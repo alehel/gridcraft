@@ -38,12 +38,31 @@ pub(super) fn sorted(mut v: Vec<f64>) -> Vec<f64> {
     v
 }
 
+/// Sorts `v` if it is already monotone in `total_cmp` order (a descending slice is reversed) and
+/// says whether it did. One cheap pass that stops at the first out-of-order pair, so unordered
+/// data costs next to nothing. Needed because the std sort recognises ascending and descending
+/// runs in O(n), which a selection cannot beat.
+fn sorted_if_monotone(v: &mut [f64]) -> bool {
+    if v.is_sorted_by(|a, b| a.total_cmp(b).is_le()) {
+        return true;
+    }
+    if v.is_sorted_by(|a, b| a.total_cmp(b).is_ge()) {
+        v.reverse();
+        return true;
+    }
+    false
+}
+
 pub(super) fn median(v: Vec<f64>) -> R<f64> {
     if v.is_empty() {
         return Err(CellError::Num);
     }
     let mut v = v;
     let n = v.len();
+    if sorted_if_monotone(&mut v) {
+        let hi = v.get(n / 2).copied().unwrap_or(0.0);
+        return if n % 2 == 1 { Ok(hi) } else { Ok(v.get(n / 2 - 1).copied().unwrap_or(0.0).midpoint(hi)) };
+    }
     let (lower, hi, _) = v.select_nth_unstable_by(n / 2, f64::total_cmp);
     let hi = *hi;
     if n % 2 == 1 { Ok(hi) } else { Ok(lower.iter().copied().max_by(f64::total_cmp).unwrap_or(0.0).midpoint(hi)) }
@@ -120,7 +139,11 @@ pub(super) fn kth(v: Vec<f64>, k: f64, largest: bool) -> R<f64> {
     let mut v = v;
     let k = k as usize;
     let idx = if largest { v.len() - k } else { k - 1 };
-    // Selection instead of a full sort; same total order, so the same bit pattern as `sorted(v)[idx]`.
+    // Selection instead of a full sort (monotone input is read directly); same total order, so the
+    // same bit pattern as `sorted(v)[idx]`.
+    if sorted_if_monotone(&mut v) {
+        return v.get(idx).copied().ok_or(CellError::Num);
+    }
     Ok(*v.select_nth_unstable_by(idx, f64::total_cmp).1)
 }
 
@@ -131,6 +154,13 @@ fn interp(mut v: Vec<f64>, pos: f64) -> R<f64> {
     let i = i as usize;
     if i >= v.len() {
         return Err(CellError::Num);
+    }
+    if sorted_if_monotone(&mut v) {
+        let lo = v.get(i).copied().ok_or(CellError::Num)?;
+        return match v.get(i + 1) {
+            Some(hi) if frac > 0.0 => Ok(lo + frac * (hi - lo)),
+            _ => Ok(lo),
+        };
     }
     let (_, lo, upper) = v.select_nth_unstable_by(i, f64::total_cmp);
     let lo = *lo;

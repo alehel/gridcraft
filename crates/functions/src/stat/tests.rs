@@ -263,8 +263,8 @@ fn selection_matches_full_sort_bit_for_bit() {
     };
     let specials = [0.0, -0.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, -f64::NAN, f64::MAX, f64::MIN_POSITIVE, 1.0, -1.0];
     for len in (0..=40).chain([63, 64, 65, 100, 257, 1000, 4096]) {
-        for round in 0..12 {
-            let v: Vec<f64> = (0..len)
+        for round in 0..24 {
+            let mut v: Vec<f64> = (0..len)
                 .map(|_| match (round % 4, next() % 8) {
                     // Few distinct values: many ties.
                     (0, r) => (r % 3) as f64,
@@ -277,7 +277,23 @@ fn selection_matches_full_sort_bit_for_bit() {
                     _ => (next() % 50) as f64,
                 })
                 .collect();
-            assert!(same(median(v.clone()), old_median(v.clone())), "median len={len}");
+            // Rounds 12..24 repeat the data as already ascending, already descending and nearly
+            // ascending (ends swapped): the monotone shortcut and its fallback to selection.
+            match round / 4 {
+                3 => v.sort_by(f64::total_cmp),
+                4 => {
+                    v.sort_by(f64::total_cmp);
+                    v.reverse();
+                }
+                5 => {
+                    v.sort_by(f64::total_cmp);
+                    if let Some(last) = v.len().checked_sub(1) {
+                        v.swap(0, last);
+                    }
+                }
+                _ => {}
+            }
+            assert!(same(median(v.clone()), old_median(v.clone())), "median len={len} round={round}");
             let ks = [-1.0, 0.0, 0.2, 1.0, 1.5, 2.0, len as f64 / 2.0, len as f64 - 0.5, len as f64, len as f64 + 1.0, f64::NAN];
             for &k in &ks {
                 for largest in [true, false] {
