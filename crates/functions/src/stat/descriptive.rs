@@ -39,9 +39,10 @@ pub(super) fn sorted(mut v: Vec<f64>) -> Vec<f64> {
 }
 
 /// Sorts `v` if it is already monotone in `total_cmp` order (a descending slice is reversed) and
-/// says whether it did. One cheap pass that stops at the first out-of-order pair, so unordered
-/// data costs next to nothing. Needed because the std sort recognises ascending and descending
-/// runs in O(n), which a selection cannot beat.
+/// says whether it did. At most two passes, each stopping at the first out-of-order pair, so
+/// unordered data costs next to nothing. Needed because the std sort recognises ascending and
+/// descending runs in O(n) with a small constant; selection is O(n) too but measured 1.2-1.8x
+/// slower on such input.
 fn sorted_if_monotone(v: &mut [f64]) -> bool {
     if v.is_sorted_by(|a, b| a.total_cmp(b).is_le()) {
         return true;

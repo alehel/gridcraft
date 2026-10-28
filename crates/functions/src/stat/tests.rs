@@ -269,7 +269,7 @@ fn selection_matches_full_sort_bit_for_bit() {
                     // Few distinct values: many ties.
                     (0, r) => (r % 3) as f64,
                     // Specials, including both zeros and NaNs.
-                    (1, r) => specials[(next() as usize + r as usize) % specials.len()],
+                    (1, r) => specials[(next() as usize).wrapping_add(r as usize) % specials.len()],
                     // Wide random range.
                     (2, _) => (next() as i64 as f64) / 1e3,
                     // Integers with some specials mixed in.
