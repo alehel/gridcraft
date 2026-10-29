@@ -2,6 +2,7 @@
 
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef};
 use gridcraft_model::{BorderLine, BorderStyle, Borders, Color, Fill, HAlign, NumFmt, Style, StyleId, Theme, Underline, VAlign, VertAlign};
+use gridcraft_xlsx::MAX_XML_NODES;
 use serde_json::{Value as Json, json};
 
 use super::{
@@ -11,10 +12,12 @@ use super::{
 
 /// A whole-row selection writes one `<row>` entry per selected row -- plus one cell per row for
 /// the presets whose left edge lands on each row's first cell -- so a selection larger than this
-/// would push the sheet part past the reader's 1,000,000-element cap and a reload would drop
-/// content, the damage #2484 is about. Refused whole, before anything is applied, the way the
-/// cell-by-cell path's size guard refuses. (A whole-column selection holds at most 16,384
-/// columns, the sheet's width: it needs no cap of its own.)
+/// would push the sheet part past the reader's element cap and a reload would drop content, the
+/// damage #2484 is about. It bounds each range's rows, and it bounds the first cells the whole
+/// selection materialises together against what the sheet already holds (see the projection in
+/// `borders`). Refused whole, before anything is applied, the way the cell-by-cell path's size
+/// guard refuses. (A whole-column selection holds at most 16,384 columns, the sheet's width: it
+/// needs no cap of its own.)
 const MAX_WHOLE_ROW_LINES: u64 = 100_000;
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -495,6 +498,34 @@ fn edge_change(preset: &str, base: BorderStyle, color: Color, b: &mut Borders, e
     }
 }
 
+/// The cells a whole-row selection would hold when the borders are applied, judged before any
+/// is applied: the first cells `left`/`outside`/`thickOutside` materialise on the selected rows,
+/// plus the cells the sheet already holds -- the reader of the saved file counts every `<c>`
+/// element of a part and refuses one past [`MAX_XML_NODES`], keeping only the rows it managed to
+/// read, which is the loss #2484 is about. The ranges of one selection are judged together: ten
+/// disjoint 100,000-row ranges each pass the per-range cap while together they materialise a
+/// million cells. Errors when the projection exceeds what the sheet may gain.
+fn project_line_cells(cx: &Ctx<'_>, sheet: usize, ranges: &[RangeRef], preset: &str) -> Result<()> {
+    if !matches!(preset, "left" | "outside" | "thickOutside") {
+        return Ok(());
+    }
+    let mut projected: u64 = 0;
+    for r in ranges {
+        if r.is_full_rows() && !r.is_full_cols() {
+            let rows = u64::from(r.end.row.saturating_sub(r.start.row)).saturating_add(1);
+            let present =
+                cx.wb.sheet(sheet).map(|sh| sh.cells.iter_range(*r).filter(|(c, _)| c.col == r.start.col).count() as u64).unwrap_or_default();
+            projected = projected.saturating_add(rows.saturating_sub(present));
+        }
+    }
+    let held = cx.wb.sheet(sheet).map(|sh| sh.cells.len() as u64).unwrap_or_default();
+    let budget = (MAX_XML_NODES as u64).saturating_sub(held).min(MAX_WHOLE_ROW_LINES);
+    if projected > budget {
+        return Err(bad("home.borders", "selection too large"));
+    }
+    Ok(())
+}
+
 /// Borders of a whole row or column go on that line's default style, as Excel stores them: the
 /// edges that every cell of the line has, which a cell in the middle of the line has. The first
 /// and last row or column keep their own per-cell edges in `borders`.
@@ -578,6 +609,8 @@ fn borders(s: &mut Session, p: &Json) -> Result<Json> {
         return Err(EngineError::Other("The cell or chart you're trying to change is on a protected sheet.".into()));
     }
     edit(s, |cx| {
+        // The selection's whole-row ranges are judged together before any border is applied.
+        project_line_cells(cx, sheet, &ranges, &preset)?;
         for r in &ranges {
             // A whole row or column: Excel stores its borders as the line's default style,
             // merged into the cells that exist. A styled cell per row of a column is a million

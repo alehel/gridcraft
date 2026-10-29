@@ -161,8 +161,8 @@ fn a_whole_row_left_border_reaches_every_selected_row() {
     }
 }
 
-/// The rows' line entries and their first cells both count toward the sheet part's element cap,
-/// so a whole-row selection too large for the reader is refused before any border is applied.
+/// The rows' line entries and their first cells are both bounded, so a whole-row selection too
+/// large for the reader's element cap is refused whole, before any border is applied.
 #[test]
 fn a_whole_row_selection_past_the_reader_cap_is_refused_whole() {
     let mut s = Session::new();
@@ -175,6 +175,58 @@ fn a_whole_row_selection_past_the_reader_cap_is_refused_whole() {
     assert!(sh.rows.get(&2).and_then(|i| i.style).is_none(), "row 3 was styled");
     assert!(sh.cells.get(at("A3")).is_none(), "no first cell was materialised");
     assert_eq!(doc.wb.styles.get(sh.style_id(at("A5"))).borders.left.style, BorderStyle::None, "A5 untouched");
+}
+
+/// The ranges of one selection are judged together, before any border is applied: each can sit
+/// under the per-range cap while the selection as a whole projects past what the sheet may hold,
+/// and a selection under the cap still applies its first cells as usual.
+#[test]
+fn a_selection_of_whole_row_ranges_is_judged_as_a_whole() {
+    let mut s = Session::new();
+    s.new_workbook();
+    // Ten disjoint ranges, each exactly at the per-range cap: together ten times the cap.
+    let many = (0..10).map(|i| format!("{}:{}", i * 100_000 + 1, (i + 1) * 100_000)).collect::<Vec<_>>().join(",");
+    let err = s.execute("home.borders", json!({"range": many, "preset": "left"})).unwrap_err().to_string();
+    assert!(err.contains("selection too large"), "{err}");
+    {
+        let doc = s.doc().unwrap();
+        let sh = doc.wb.active().unwrap();
+        assert!(sh.cells.is_empty(), "no first cell was materialised: {} cells", sh.cells.len());
+        assert!(sh.rows.get(&0).and_then(|i| i.style).is_none(), "row 1's line was styled");
+    }
+    // The same shape under the cap goes through, one first cell per selected row.
+    s.execute("home.borders", json!({"range": "3:10,20:25", "preset": "left"})).unwrap();
+    let doc = s.doc().unwrap();
+    let sh = doc.wb.active().unwrap();
+    for (lo, hi) in [(3u32, 10u32), (20, 25)] {
+        for row in lo..=hi {
+            let cell = sh.cells.get(CellRef::new(row - 1, 0)).unwrap_or_else(|| panic!("A{row} holds its left edge"));
+            assert_ne!(doc.wb.styles.get(cell.style).borders.left.style, BorderStyle::None, "A{row} left");
+        }
+    }
+    assert!(sh.cells.len() <= 14, "only those first cells: {} cells", sh.cells.len());
+}
+
+/// The cells a sheet already holds count toward the same reader cap: a sheet built up to it gains
+/// no whole-row first cells, while the same borders on a roomy sheet apply.
+#[test]
+fn a_whole_row_left_border_respects_the_cells_the_sheet_already_holds() {
+    let mut s = Session::new();
+    s.new_workbook();
+    // Every column but the last one: a range that spans all columns formats rows' lines instead
+    // of cells, and would materialise nothing.
+    s.execute("home.bold", json!({"range": "A1:XFC62"})).unwrap();
+    {
+        let doc = s.doc().unwrap();
+        let sh = doc.wb.active().unwrap();
+        assert!(sh.cells.len() >= 1_000_000, "the sheet is at the reader's cap: {} cells", sh.cells.len());
+    }
+    let err = s.execute("home.borders", json!({"range": "63:70", "preset": "left"})).unwrap_err().to_string();
+    assert!(err.contains("selection too large"), "{err}");
+    let doc = s.doc().unwrap();
+    let sh = doc.wb.active().unwrap();
+    assert!(sh.cells.get(CellRef::new(62, 0)).is_none(), "A63 was materialised");
+    assert!(sh.rows.get(&62).and_then(|i| i.style).is_none(), "row 63's line was styled");
 }
 
 /// A border line can be drawn from either side: clearing a whole column clears the facing edge
