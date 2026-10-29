@@ -124,6 +124,59 @@ fn whole_line_edges_follow_excels_store_or_drop_decisions() {
     }
 }
 
+/// Excel draws a whole row's left edge on the first cell of *every* selected row -- not only the
+/// first row's -- while a preset whose left edge belongs to the rows' lines stores no cell at all.
+#[test]
+fn a_whole_row_left_border_reaches_every_selected_row() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("home.borders", json!({"range": "3:10", "preset": "left"})).unwrap();
+    {
+        let doc = s.doc().unwrap();
+        let sh = doc.wb.active().unwrap();
+        for row in 3..=10u32 {
+            let idx = row - 1;
+            let cell = sh.cells.get(CellRef::new(idx, 0)).unwrap_or_else(|| panic!("A{row}, the first cell of row {row}, holds its left edge"));
+            assert_ne!(doc.wb.styles.get(cell.style).borders.left.style, BorderStyle::None, "A{row} left");
+            assert!(sh.rows.get(&idx).and_then(|i| i.style).is_none(), "row {row}'s line takes no left edge");
+        }
+        assert!(sh.cells.len() <= 8, "only those first cells: {} cells", sh.cells.len());
+    }
+    // `all` puts the left edge on every row's line instead, and stores no cell for it.
+    s.execute("home.borders", json!({"range": "20:25", "preset": "all"})).unwrap();
+    {
+        let doc = s.doc().unwrap();
+        let sh = doc.wb.active().unwrap();
+        for row in 20..=25u32 {
+            let idx = row - 1;
+            assert!(sh.cells.get(CellRef::new(idx, 0)).is_none(), "preset all writes no A{row}");
+            let st = sh.rows.get(&idx).and_then(|i| i.style).expect("the row's line is styled");
+            let b = &doc.wb.styles.get(st).borders;
+            assert_ne!(b.left.style, BorderStyle::None, "row {row} left, on its line");
+            assert_ne!(b.right.style, BorderStyle::None, "row {row} right");
+            assert_ne!(b.top.style, BorderStyle::None, "row {row} top");
+            assert_ne!(b.bottom.style, BorderStyle::None, "row {row} bottom");
+        }
+        assert!(sh.cells.len() <= 8, "and no cell was written: {} cells", sh.cells.len());
+    }
+}
+
+/// The rows' line entries and their first cells both count toward the sheet part's element cap,
+/// so a whole-row selection too large for the reader is refused before any border is applied.
+#[test]
+fn a_whole_row_selection_past_the_reader_cap_is_refused_whole() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A5", "values": [["x"]]})).unwrap();
+    let err = s.execute("home.borders", json!({"range": "1:100001", "preset": "left"})).unwrap_err().to_string();
+    assert!(err.contains("selection too large"), "{err}");
+    let doc = s.doc().unwrap();
+    let sh = doc.wb.active().unwrap();
+    assert!(sh.rows.get(&2).and_then(|i| i.style).is_none(), "row 3 was styled");
+    assert!(sh.cells.get(at("A3")).is_none(), "no first cell was materialised");
+    assert_eq!(doc.wb.styles.get(sh.style_id(at("A5"))).borders.left.style, BorderStyle::None, "A5 untouched");
+}
+
 /// A border line can be drawn from either side: clearing a whole column clears the facing edge
 /// its neighbour's line holds, without a cell per row of the neighbour either.
 #[test]

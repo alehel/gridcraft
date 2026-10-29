@@ -9,6 +9,14 @@ use super::{
     target_ranges, target_sheet,
 };
 
+/// A whole-row selection writes one `<row>` entry per selected row -- plus one cell per row for
+/// the presets whose left edge lands on each row's first cell -- so a selection larger than this
+/// would push the sheet part past the reader's 1,000,000-element cap and a reload would drop
+/// content, the damage #2484 is about. Refused whole, before anything is applied, the way the
+/// cell-by-cell path's size guard refuses. (A whole-column selection holds at most 16,384
+/// columns, the sheet's width: it needs no cap of its own.)
+const MAX_WHOLE_ROW_LINES: u64 = 100_000;
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         // Font
@@ -578,14 +586,25 @@ fn borders(s: &mut Session, p: &Json) -> Result<Json> {
             // the size guard below.
             if r.is_full_rows() != r.is_full_cols() {
                 let columns = r.is_full_cols();
+                if !columns && u64::from(r.end.row.saturating_sub(r.start.row)).saturating_add(1) > MAX_WHOLE_ROW_LINES {
+                    return Err(bad("home.borders", "selection too large"));
+                }
                 line_borders(cx, sheet, *r, columns, &preset, base, color);
                 let mut cells: Vec<(CellRef, StyleId)> =
                     cx.wb.sheet(sheet).map(|sh| sh.cells.iter_range(*r).map(|(c, x)| (c, x.style)).collect()).unwrap_or_default();
-                if !columns {
-                    // Excel draws a whole row's left edge on its first cell, materialising it
-                    // when the sheet row is empty; the row's line itself never takes it.
-                    let at = CellRef::new(r.start.row, r.start.col);
-                    if !cells.iter().any(|(c, _)| *c == at) {
+                if !columns && matches!(preset.as_str(), "left" | "outside" | "thickOutside") {
+                    // Excel draws a whole row's left edge on the first cell of *every* selected
+                    // row, materialising each one when that sheet row is empty; the rows' lines
+                    // never take a left edge. Those three presets are the ones whose left edge
+                    // *is* the selection's: `all` and the inside presets put it on the rows'
+                    // lines instead and store no cell at all (measured in Excel over 8-row and
+                    // 10,000-row selections).
+                    let present: std::collections::HashSet<u32> = cells.iter().filter(|(c, _)| c.col == r.start.col).map(|(c, _)| c.row).collect();
+                    for row in r.start.row..=r.end.row {
+                        if present.contains(&row) {
+                            continue;
+                        }
+                        let at = CellRef::new(row, r.start.col);
                         let st = cx.wb.sheet(sheet).map(|sh| sh.style_id(at)).unwrap_or_default();
                         cells.push((at, st));
                     }
