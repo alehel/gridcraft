@@ -29,4 +29,5 @@ mod stored_list_shape;
 mod subtotal_filter_roundtrip;
 mod table_resize_overlap;
 mod table_total_row_last_row;
+mod whole_line_borders;
 mod wrap_row_height;
