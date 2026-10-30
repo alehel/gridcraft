@@ -26,6 +26,7 @@ mod row_autofit;
 mod sheet_name_quoting;
 mod sparse_clear_invalidation;
 mod stored_list_shape;
+mod subtotal_filter_roundtrip;
 mod table_resize_overlap;
 mod table_total_row_last_row;
 mod wrap_row_height;
