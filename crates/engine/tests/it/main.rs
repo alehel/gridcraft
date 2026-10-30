@@ -6,6 +6,7 @@ mod cf_formula_validate;
 mod chart_area_stacked100;
 mod chart_workbook_names;
 mod command_sequence_fuzz;
+mod criteria_open;
 mod cross_sheet_cut;
 mod csv_export_budget;
 mod custom_filter_blanks;
