@@ -2501,6 +2501,22 @@ fn ods_opens_with_formulas_and_saves_back_as_ods() {
 }
 
 #[test]
+fn flat_ods_opens_and_saves_as_flat_xml() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A1", "input": "2"})).unwrap();
+    s.execute("cell.set", json!({"cell": "A2", "input": "=A1*21"})).unwrap();
+    let saved = s.execute("file.saveBytes", json!({"format": "fods"})).unwrap();
+    let bytes = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
+    assert!(bytes.starts_with(b"<?xml") && gridcraft_xlsx::is_flat_ods(&bytes));
+    // By name, and by content under another name.
+    for name in ["book.fods", "book.xml"] {
+        let mut t = super::tests::s();
+        t.execute("file.open", json!({"name": name, "base64": saved["base64"]})).unwrap();
+        assert_eq!(v(&t, "A2"), Value::Number(42.0), "{name}");
+    }
+}
+
+#[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn ods_saves_in_place_but_a_disguised_package_is_imported() {
     let nonce = unique_nonce();

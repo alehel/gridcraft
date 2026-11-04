@@ -31,6 +31,14 @@ pub(crate) fn from_odf(src: &str) -> Option<String> {
 /// syntax than OpenFormula (or the legacy OpenOffice syntax it grew from) are refused.
 fn strip_namespace(src: &str) -> Option<&str> {
     let src = src.trim_start();
+    // A prefix without `=` (`of:#N/A`) is still the namespace.
+    for p in ["of:", "oooc:", "ooow:", "msoxl:"] {
+        if let Some(rest) = src.strip_prefix(p)
+            && !rest.starts_with('=')
+        {
+            return Some(rest);
+        }
+    }
     if let Some(i) = src.find(":=")
         && src.get(..i).is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
     {
@@ -620,6 +628,7 @@ mod tests {
         assert_eq!(from_odf("of:=ISNA(#N/A)").as_deref(), Some("ISNA(#N/A)"));
         assert_eq!(from_odf("msoxl:=SUM(A1:B2)").as_deref(), Some("SUM(A1:B2)"));
         assert_eq!(from_odf("foo:=1"), None);
+        assert_eq!(from_odf("of:#N/A").as_deref(), Some("#N/A"));
         assert_eq!(split_addresses("'My sheet'.A1:'My sheet'.B2  Data.C3"), vec!["'My sheet'.A1:'My sheet'.B2", "Data.C3"]);
     }
 

@@ -99,7 +99,43 @@ pub fn read_ods(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
     {
         read_meta(&tree, &mut import.wb);
     }
-    import.load_pictures(&mut package);
+    import.load_pictures(Some(&mut package));
+    Ok((import.wb, import.report))
+}
+
+/// Whether `bytes` are a flat (single-XML) OpenDocument spreadsheet, `.fods`.
+pub fn is_flat_ods(bytes: &[u8]) -> bool {
+    let head = bytes.get(..bytes.len().min(16 * 1024)).unwrap_or(bytes);
+    let head = String::from_utf8_lossy(head);
+    let head = head.trim_start_matches('\u{feff}').trim_start();
+    head.starts_with('<') && head.contains(":document") && head.contains("application/vnd.oasis.opendocument.spreadsheet")
+}
+
+/// Imports a flat OpenDocument spreadsheet (`.fods`): the parts of a package in one XML
+/// document, pictures inline as base64 and charts as inline documents.
+pub fn read_fods(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
+    if !is_flat_ods(bytes) {
+        return Err(IoError::Format("not a flat OpenDocument spreadsheet".into()));
+    }
+    let mut import = Import::new();
+    import.flat = true;
+    dom::parse(bytes, &mut import)?;
+    if !import.spreadsheet_seen {
+        return Err(xml_error("incomplete ODS document"));
+    }
+    if import.wb.sheets.is_empty() {
+        return Err(IoError::Format("ODS contains no worksheets".into()));
+    }
+    import.finish_names();
+    if let Some(settings) = import.flat_settings.take() {
+        let root = Elem { ns: Ns::Office, name: "document-settings".into(), attrs: vec![], kids: vec![dom::Node::El(settings)] };
+        settings::apply(&root, &mut import.wb);
+    }
+    if let Some(meta) = import.flat_meta.take() {
+        let root = Elem { ns: Ns::Office, name: "document-meta".into(), attrs: vec![], kids: vec![dom::Node::El(meta)] };
+        read_meta(&root, &mut import.wb);
+    }
+    import.load_pictures(None);
     Ok((import.wb, import.report))
 }
 
@@ -184,6 +220,12 @@ struct SheetState {
     has_calcext_formats: bool,
 }
 
+/// What a flat document holds inline instead of a part of its package.
+enum Inline {
+    Picture(Vec<u8>),
+    Chart(Box<Elem>),
+}
+
 /// A picture as read, before its anchor is placed and its bytes loaded.
 struct Frame {
     href: String,
@@ -191,6 +233,8 @@ struct Frame {
     object: bool,
     /// A drawing shape rather than a picture.
     shape: Option<super::shape::ShapeDraft>,
+    /// A flat document's picture bytes or chart document, held inline.
+    inline: Option<Inline>,
     cell: Option<CellRef>,
     x: f64,
     y: f64,
@@ -231,6 +275,10 @@ pub(crate) struct Import {
     sheet: Option<SheetState>,
     styles_ready: bool,
     pub spreadsheet_seen: bool,
+    /// A flat document (`.fods`): every part in one XML tree.
+    flat: bool,
+    flat_meta: Option<Elem>,
+    flat_settings: Option<Elem>,
     depth: usize,
     cells: u64,
     blanks: u64,
@@ -275,6 +323,9 @@ impl Import {
             sheet: None,
             styles_ready: false,
             spreadsheet_seen: false,
+            flat: false,
+            flat_meta: None,
+            flat_settings: None,
             depth: 0,
             cells: 0,
             blanks: 0,
@@ -853,7 +904,14 @@ impl Import {
         };
         // Older writers cache a formula's error as its text (`Err:508`, `#VALUE!`).
         let value = match value {
-            Value::Text(t) if formula_text.is_some() && (t.starts_with("Err:") || CellError::parse(&t).is_some()) => Value::Error(error_value(&t)),
+            Value::Text(t)
+                if formula_text.is_some()
+                    && (t.starts_with("Err:")
+                        || CellError::parse(&t).is_some()
+                        || (t.starts_with('#') && (t.ends_with('!') || t.ends_with('?')) && t.len() <= 16)) =>
+            {
+                Value::Error(error_value(&t))
+            }
             v => v,
         };
         let mut cell = Cell::value(value);
@@ -1286,7 +1344,7 @@ impl Import {
         }
     }
 
-    fn load_pictures(&mut self, package: &mut Package<'_>) {
+    fn load_pictures(&mut self, mut package: Option<&mut Package<'_>>) {
         let mut next_id = 1u32;
         let mut next_chart = 1u32;
         let mut next_shape = 1u32;
@@ -1310,9 +1368,15 @@ impl Import {
             }
             let path = f.href.trim_start_matches("./").to_string();
             if f.object {
-                let part = format!("{}/content.xml", path.trim_end_matches('/'));
-                let draft = match package.read_limited(&part, 64 * 1024 * 1024) {
-                    Ok(Some(xml)) => dom::parse_tree(&xml).ok().as_ref().and_then(super::chart::read),
+                let draft = match (f.inline.take(), package.as_deref_mut()) {
+                    (Some(Inline::Chart(doc)), _) => super::chart::read(&doc),
+                    (_, Some(package)) => {
+                        let part = format!("{}/content.xml", path.trim_end_matches('/'));
+                        match package.read_limited(&part, 64 * 1024 * 1024) {
+                            Ok(Some(xml)) => dom::parse_tree(&xml).ok().as_ref().and_then(super::chart::read),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 };
                 let Some(d) = draft else {
@@ -1343,18 +1407,32 @@ impl Import {
                 next_chart += 1;
                 continue;
             }
-            let mime = match path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
-                Some("png") => "image/png",
-                Some("jpg" | "jpeg") => "image/jpeg",
-                Some("gif") => "image/gif",
-                _ => {
-                    self.report.warn("Some ODS pictures in formats GridCraft doesn't show were not imported.");
-                    continue;
-                }
+            let data = match (f.inline.take(), package.as_deref_mut()) {
+                (Some(Inline::Picture(bytes)), _) => Some(bytes),
+                (_, Some(package)) if !path.is_empty() => package.read_limited(&path, 64 * 1024 * 1024).ok().flatten(),
+                _ => None,
             };
-            let Ok(Some(data)) = package.read_limited(&path, 64 * 1024 * 1024) else {
+            let Some(data) = data else {
                 self.report.warn("Some ODS pictures are linked or missing and were not imported.");
                 continue;
+            };
+            // The picture's kind from its bytes, or its name when they don't say.
+            let mime = if data.starts_with(b"\x89PNG") {
+                "image/png"
+            } else if data.starts_with(&[0xFF, 0xD8]) {
+                "image/jpeg"
+            } else if data.starts_with(b"GIF8") {
+                "image/gif"
+            } else {
+                match path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+                    Some("png") => "image/png",
+                    Some("jpg" | "jpeg") => "image/jpeg",
+                    Some("gif") => "image/gif",
+                    _ => {
+                        self.report.warn("Some ODS pictures in formats GridCraft doesn't show were not imported.");
+                        continue;
+                    }
+                }
             };
             let Some(sheet) = self.wb.sheets.get_mut(index) else { continue };
             let sheet = Arc::make_mut(sheet);
@@ -1427,15 +1505,37 @@ fn locate(mut pos: f32, size: impl Fn(u32) -> f32, max: u32) -> (u32, f32) {
 fn read_frame(f: &Elem, cell: Option<CellRef>) -> Option<Frame> {
     let img = f.child(Ns::Draw, "image");
     let obj = f.child(Ns::Draw, "object");
-    let href = img.or(obj).and_then(|i| i.attr(Ns::XLink, "href"))?.to_string();
     let len = |n: &str| f.attr(Ns::Svg, n).and_then(length_pt).unwrap_or(0.0);
+    // A flat document holds a chart's document, or a picture's bytes, inline.
+    let inline = match (obj.and_then(|o| o.child(Ns::Office, "document")), img.and_then(|i| i.child(Ns::Office, "binary-data"))) {
+        (Some(doc), _) => Some(Inline::Chart(Box::new(doc.clone()))),
+        (None, Some(data)) => super::b64::decode(&data.raw_text(), 64 * 1024 * 1024).map(Inline::Picture),
+        _ => None,
+    };
+    if let Some(inline) = inline {
+        let object = matches!(inline, Inline::Chart(_));
+        let alt = f.child(Ns::Svg, "title").map(Elem::raw_text).unwrap_or_default();
+        return Some(Frame {
+            href: String::new(),
+            object,
+            shape: None,
+            inline: Some(inline),
+            cell,
+            x: len("x"),
+            y: len("y"),
+            width: len("width"),
+            height: len("height"),
+            alt,
+        });
+    }
+    let href = img.or(obj).and_then(|i| i.attr(Ns::XLink, "href"))?.to_string();
     let alt = f.child(Ns::Svg, "title").map(Elem::raw_text).or_else(|| f.child(Ns::Svg, "desc").map(Elem::raw_text)).unwrap_or_default();
     // An embedded object (a chart) comes with a replacement picture that is only its preview.
     let (href, object) = match obj.and_then(|o| o.attr(Ns::XLink, "href")) {
         Some(o) => (o.to_string(), true),
         None => (href, false),
     };
-    Some(Frame { href, object, shape: None, cell, x: len("x"), y: len("y"), width: len("width"), height: len("height"), alt })
+    Some(Frame { href, object, shape: None, inline: None, cell, x: len("x"), y: len("y"), width: len("width"), height: len("height"), alt })
 }
 
 /// Pictures, charts and shapes among `parent`'s children, groups flattened.
@@ -1459,6 +1559,7 @@ fn drawings(parent: &Elem, cell: Option<CellRef>, styles: &super::shape::DrawSty
             out.push(Frame {
                 href: String::new(),
                 object: false,
+                inline: None,
                 cell,
                 x: d.x,
                 y: d.y,
@@ -1782,7 +1883,10 @@ impl Sink for Import {
     fn capture(&mut self, ancestors: &[(Ns, String)], ns: Ns, name: &str) -> bool {
         let in_table = self.sheet.is_some();
         match (ns, name) {
-            (Ns::Office, "font-face-decls" | "automatic-styles" | "styles" | "scripts" | "forms" | "event-listeners" | "master-styles") => true,
+            (
+                Ns::Office,
+                "font-face-decls" | "automatic-styles" | "styles" | "scripts" | "forms" | "event-listeners" | "master-styles" | "meta" | "settings",
+            ) => true,
             (Ns::Table, "table-column" | "table-row" | "named-expressions" | "shapes" | "table-source" | "scenario" | "dde-source") if in_table => {
                 true
             }
@@ -1807,7 +1911,7 @@ impl Sink for Import {
     }
 
     fn open(&mut self, el: &Elem) -> Result<(), IoError> {
-        if self.depth == 0 && !el.is(Ns::Office, "document-content") {
+        if self.depth == 0 && !(el.is(Ns::Office, "document-content") || (self.flat && el.is(Ns::Office, "document"))) {
             return Err(xml_error("expected one office:document-content root"));
         }
         self.depth += 1;
@@ -1886,6 +1990,15 @@ impl Sink for Import {
             (Ns::Office, "font-face-decls") => self.read_fonts(&el),
             (Ns::Office, "automatic-styles") => self.read_style_list(&el, false),
             (Ns::Office, "styles") => self.read_style_list(&el, true),
+            (Ns::Office, "master-styles") => {
+                for p in el.children(Ns::Style, "master-page") {
+                    if let Some(n) = p.attr(Ns::Style, "name") {
+                        self.master_pages.insert(n.to_string(), p.clone());
+                    }
+                }
+            }
+            (Ns::Office, "meta") => self.flat_meta = Some(el),
+            (Ns::Office, "settings") => self.flat_settings = Some(el),
             (Ns::Table, "table-column") => self.column(&el)?,
             (Ns::Table, "table-row") => {
                 if self.sheet.is_some() {
@@ -1932,7 +2045,10 @@ impl Sink for Import {
                     }
                 }
             }
-            (Ns::Office, "scripts") if !el.elems().all(|e| e.elems().next().is_none()) => self.report.warn("ODS macros were not imported."),
+            // LibreOffice lists its (empty) Basic library in every file: only real code counts.
+            (Ns::Office, "scripts") if el.descendants(Ns::Other, "module").len() + el.descendants(Ns::Other, "source-code").len() > 0 => {
+                self.report.warn("ODS macros were not imported.");
+            }
             _ => {}
         }
         Ok(())
@@ -1945,11 +2061,15 @@ fn error_value(text: &str) -> CellError {
     if let Some(e) = CellError::parse(text) {
         return e;
     }
+    // An error in another language (`#VALORE!`, `#WERT!`) is still an error.
+    if text.starts_with('#') && (text.ends_with('!') || text.ends_with('?')) {
+        return CellError::Value;
+    }
     match text.strip_prefix("Err:").and_then(|n| n.parse::<u32>().ok()) {
         Some(524) => CellError::Ref,
         Some(525) => CellError::Name,
         Some(532) => CellError::Div0,
-        Some(502 | 503 | 523) => CellError::Num,
+        Some(503 | 523) => CellError::Num,
         Some(_) => CellError::Value,
         None => CellError::NA,
     }

@@ -135,7 +135,7 @@
       <key>CFBundleTypeMIMETypes</key>
       <array><string>text/tab-separated-values</string></array>
     </dict>
-    <!-- .xlsb and .ods are imported (data only) into a new workbook that saves as .xlsx. -->
+    <!-- .xlsb is imported (data only) into a new workbook that saves as .xlsx; .ods opens and saves as itself. -->
     <dict>
       <key>CFBundleTypeName</key>
       <string>Excel Binary Workbook</string>

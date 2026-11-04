@@ -293,3 +293,39 @@ fn ods_title_rows_past_the_content_write_well_formed_xml() {
     assert_eq!(back.sheets[0].print.title_rows, Some((0, 0)));
     assert_eq!(back.sheets[0].print.print_area, Some(RangeRef::new(CellRef::new(0, 0), CellRef::new(9, 3))));
 }
+
+/// A flat document (`.fods`) holds the whole workbook in one XML file and reads back the same.
+#[test]
+fn ods_flat_documents_round_trip() {
+    let mut wb = gridcraft_model::Workbook::new();
+    let bold = wb.styles.derive(gridcraft_model::StyleId::DEFAULT, |s| {
+        s.font.bold = true;
+        s.num_fmt = gridcraft_model::NumFmt::new("0.00%");
+    });
+    let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    sh.set_cell(CellRef::new(0, 0), gridcraft_model::Cell::styled(Value::Number(0.25), bold));
+    sh.set_cell(CellRef::new(1, 0), gridcraft_model::Cell::formula(gridcraft_model::Formula::new("=A1*2")));
+    sh.freeze = Some((1, 0));
+    sh.images.push(gridcraft_model::Image {
+        id: 1,
+        anchor: gridcraft_model::Anchor { cell: CellRef::new(2, 1), width: 40.0, height: 30.0, ..Default::default() },
+        data: std::sync::Arc::new(b"\x89PNG\r\n\x1a\nnot really".to_vec()),
+        mime: "image/png".into(),
+        alt: String::new(),
+    });
+    wb.props.title = "Flat".into();
+    let bytes = crate::write_fods(&wb, None).unwrap();
+    assert!(crate::is_flat_ods(&bytes));
+    assert!(!crate::is_flat_ods(b"a,b\n1,2"));
+    let (back, _) = crate::read_fods(&bytes).unwrap();
+    let s = &back.sheets[0];
+    assert_eq!(s.value(CellRef::new(0, 0)), Value::Number(0.25));
+    let st = back.styles.get(s.style_id(CellRef::new(0, 0)));
+    assert!(st.font.bold);
+    assert_eq!(st.num_fmt.as_str(), "0.00%");
+    assert_eq!(s.cell(CellRef::new(1, 0)).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some("A1*2"));
+    assert_eq!(s.freeze, Some((1, 0)));
+    assert_eq!(s.images.len(), 1);
+    assert_eq!(s.images[0].data.as_slice(), b"\x89PNG\r\n\x1a\nnot really");
+    assert_eq!(back.props.title, "Flat");
+}

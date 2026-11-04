@@ -18,7 +18,7 @@ use crate::IoError;
 use crate::package::ZipOut;
 use crate::xml::{esc, esc_attr};
 
-const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0" xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:calcext="urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0" xmlns:tableooo="http://openoffice.org/2009/table""#;
+const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0" xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:calcext="urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0" xmlns:tableooo="http://openoffice.org/2009/table" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" xmlns:ooo="http://openoffice.org/2004/office" xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0""#;
 
 /// The style LibreOffice assumes for a document that states none; the file's Default style is
 /// written as the difference from it.
@@ -67,6 +67,58 @@ pub fn write_ods_with(wb: &Workbook, display: Option<Display<'_>>) -> Result<Vec
         zip.add(&format!("{dir}/content.xml"), content.as_bytes())?;
     }
     zip.finish()
+}
+
+/// The children of the root element of one of this writer's documents.
+fn inner<'s>(doc: &'s str, root: &str) -> &'s str {
+    let Some(tag) = doc.find(&format!("<office:{root} ")) else { return "" };
+    let Some(open) = doc.get(tag..).and_then(|d| d.find('>')).map(|j| tag + j + 1) else { return "" };
+    let end = doc.rfind(&format!("</office:{root}>")).unwrap_or(doc.len());
+    doc.get(open..end).unwrap_or("")
+}
+
+/// Encodes `wb` as a flat OpenDocument spreadsheet (`.fods`): one XML document holding what a
+/// package splits into parts, pictures as base64 and charts as inline documents.
+pub fn write_fods(wb: &Workbook, display: Option<Display<'_>>) -> Result<Vec<u8>, IoError> {
+    let mut w = Writer::new(wb, display);
+    w.flat = true;
+    let content = w.content();
+    let styles = w.styles();
+    let content = inner(&content, "document-content");
+    let styles = inner(&styles, "document-styles");
+    let meta = meta(wb);
+    let settings = settings::write(wb);
+    // A part of one of the documents. Only the body holds documents of its own (inline charts,
+    // with their own parts), so it ends at the last closing tag; every other part at the first.
+    let section = |doc: &str, tag: &str| -> String {
+        let open = format!("<office:{tag}>");
+        let close = format!("</office:{tag}>");
+        let Some(a) = doc.find(&open) else { return String::new() };
+        let end = if tag == "body" { doc.rfind(&close) } else { doc.get(a..).and_then(|d| d.find(&close)).map(|b| a + b) };
+        match end {
+            Some(b) if a < b => doc.get(a..b + close.len()).unwrap_or("").to_string(),
+            _ => String::new(),
+        }
+    };
+    let mut o = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><office:document {NS} office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.spreadsheet">"#
+    );
+    o.push_str(&section(&meta, "meta"));
+    o.push_str(&section(&settings, "settings"));
+    o.push_str(&section(styles, "font-face-decls"));
+    o.push_str(&section(styles, "styles"));
+    // Both parts' automatic styles (cells and pages) in one list.
+    o.push_str("<office:automatic-styles>");
+    let auto = |doc: &str| {
+        section(doc, "automatic-styles").trim_start_matches("<office:automatic-styles>").trim_end_matches("</office:automatic-styles>").to_string()
+    };
+    o.push_str(&auto(content));
+    o.push_str(&auto(styles));
+    o.push_str("</office:automatic-styles>");
+    o.push_str(&section(styles, "master-styles"));
+    o.push_str(&section(content, "body"));
+    o.push_str("</office:document>");
+    Ok(o.into_bytes())
 }
 
 fn meta(wb: &Workbook) -> String {
@@ -148,6 +200,8 @@ pub type Display<'a> = &'a dyn Fn(&Sheet, CellRef) -> String;
 struct Writer<'a> {
     wb: &'a Workbook,
     display: Option<Display<'a>>,
+    /// A flat document: pictures and charts inline instead of package parts.
+    flat: bool,
     /// Automatic cell styles: style id → name.
     cell_styles: BTreeMap<StyleId, String>,
     /// Data styles: format code → name.
@@ -175,6 +229,7 @@ impl<'a> Writer<'a> {
         Writer {
             wb,
             display,
+            flat: false,
             cell_styles: BTreeMap::new(),
             data_styles: HashMap::new(),
             data_xml: String::new(),
@@ -799,16 +854,26 @@ impl<'a> Writer<'a> {
             // Anchors are in pixels at 96 dpi; the file takes points.
             let x = geometry_x(sh, c.anchor.cell.col) + c.anchor.dx * 0.75;
             let y = geometry_y(sh, c.anchor.cell.row) + c.anchor.dy * 0.75;
+            let content = super::chart::write(c, &self.wb.theme);
+            let object = if self.flat {
+                // The chart's own document, inline.
+                let body = content.split_once("<office:document-content").map(|(_, rest)| rest).unwrap_or("");
+                let body = body.split_once('>').map(|(_, rest)| rest).unwrap_or("").trim_end_matches("</office:document-content>");
+                format!(
+                    r#"<draw:object><office:document office:mimetype="application/vnd.oasis.opendocument.chart" office:version="1.3">{body}</office:document></draw:object>"#
+                )
+            } else {
+                format!(r#"<draw:object xlink:href="./{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/>"#, esc_attr(&dir))
+            };
             let _ = write!(
                 out,
-                r#"<draw:frame draw:z-index="{}" draw:name="Chart {}" svg:width="{}pt" svg:height="{}pt" svg:x="{x}pt" svg:y="{y}pt"><draw:object xlink:href="./{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/></draw:frame>"#,
+                r#"<draw:frame draw:z-index="{}" draw:name="Chart {}" svg:width="{}pt" svg:height="{}pt" svg:x="{x}pt" svg:y="{y}pt">{object}</draw:frame>"#,
                 self.objects.len(),
                 c.id,
                 c.anchor.width * 0.75,
                 c.anchor.height * 0.75,
-                esc_attr(&dir)
             );
-            self.objects.push((dir, super::chart::write(c, &self.wb.theme)));
+            self.objects.push((dir, content));
         }
         for img in &sh.images {
             let ext = match img.mime.as_str() {
@@ -819,14 +884,18 @@ impl<'a> Writer<'a> {
             let path = format!("Pictures/{}.{ext}", self.pictures.len() + 1);
             let x = geometry_x(sh, img.anchor.cell.col) + img.anchor.dx * 0.75;
             let y = geometry_y(sh, img.anchor.cell.row) + img.anchor.dy * 0.75;
+            let image = if self.flat {
+                format!("<draw:image><office:binary-data>{}</office:binary-data></draw:image>", super::b64::encode(&img.data))
+            } else {
+                format!(r#"<draw:image xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/>"#, esc_attr(&path))
+            };
             let _ = write!(
                 out,
-                r#"<draw:frame draw:z-index="{}" draw:name="Image {}" draw:style-name="gr1" svg:width="{}pt" svg:height="{}pt" svg:x="{x}pt" svg:y="{y}pt"><draw:image xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/>"#,
+                r#"<draw:frame draw:z-index="{}" draw:name="Image {}" draw:style-name="gr1" svg:width="{}pt" svg:height="{}pt" svg:x="{x}pt" svg:y="{y}pt">{image}"#,
                 self.pictures.len(),
                 img.id,
                 img.anchor.width * 0.75,
                 img.anchor.height * 0.75,
-                esc_attr(&path)
             );
             if !img.alt.is_empty() {
                 let _ = write!(out, "<svg:title>{}</svg:title>", esc(&img.alt));

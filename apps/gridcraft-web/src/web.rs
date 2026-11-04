@@ -193,7 +193,7 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
             let ctx = ctx.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let Some(file) = rfd::AsyncFileDialog::new()
-                    .add_filter("Spreadsheets", &["xlsx", "xlsm", "xls", "xlsb", "ods", "ots", "csv", "tsv", "txt", "slk", "json"])
+                    .add_filter("Spreadsheets", &["xlsx", "xlsm", "xls", "xlsb", "ods", "ots", "fods", "csv", "tsv", "txt", "slk", "json"])
                     .pick_file()
                     .await
                 else {
