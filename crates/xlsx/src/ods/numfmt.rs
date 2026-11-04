@@ -773,8 +773,12 @@ pub(crate) fn write_style(name: &str, code: &str) -> Option<String> {
     // stated ones, or Excel's implicit positive;negative;zero;text.
     let explicit = sections.iter().any(|s| s.cond.is_some());
     if sections.len() < MAX_SECTIONS && sections.last().is_some_and(|s| s.cond.is_some()) {
-        // Every section has its condition: other values show as General, the main style.
-        sections.push(Section { parts: vec![Part::General], ..Section::default() });
+        // Every section has its condition: other values show as General, the main style. Under a
+        // lone `>=0` they are the negatives, which read back as Excel's implicit second section
+        // (shown without their sign), so they keep it.
+        let negatives = matches!(sections.as_slice(), [s] if s.cond.as_deref().is_some_and(|c| c.replace(' ', "") == ">=0"));
+        let parts = if negatives { vec![Part::Lit("-".into()), Part::General] } else { vec![Part::General] };
+        sections.push(Section { parts, ..Section::default() });
     }
     let n = sections.len();
     // A last text section (`0.00;@`) takes text only: the sections before it share the numbers
@@ -895,7 +899,7 @@ pub(crate) fn code(styles: &HashMap<String, DataStyle>, name: &str) -> Option<St
     let mut sections: Vec<Section> = mapped.into_iter().map(|(cond, s)| Section { cond: if implicit { None } else { cond }, ..s }).collect();
     // A bare General main under explicit conditions is the "other values" the writer adds.
     let general = Section { parts: vec![Part::General], ..Section::default() };
-    if implicit || !sections.iter().all(|s| s.cond.is_some()) || *own != general {
+    if !sections.iter().all(|s| s.cond.is_some()) || *own != general {
         sections.push(own.clone());
     }
     Some(print_code(&sections))
@@ -907,7 +911,8 @@ fn condition(c: &str) -> Option<String> {
     let op_len = rest.chars().take_while(|c| matches!(c, '<' | '>' | '=' | '!')).count();
     let op = rest.get(..op_len)?;
     let num = rest.get(op_len..)?.trim();
-    num.parse::<f64>().ok()?;
+    // As a code's own conditions: a number, LibreOffice's past-the-largest bound included.
+    num.parse::<f64>().ok().filter(|v| !v.is_nan())?;
     let op = match op {
         "==" => "=",
         "!=" => "<>",
@@ -1176,6 +1181,8 @@ mod tests {
             ("[Red]General", "[Red]General"),
             ("General;[Red]-General", "General;[Red]-General"),
             ("[>0]0", "[>0]0"),
+            // Round four: a lone `>=0` keeps its negatives' sign.
+            ("[>=0]0", "0;-General"),
             // Round three: a last conditional section keeps its condition; a time has no
             // made-up negative section.
             ("[>100]0;[<-100]-0", "[>100]0;[<-100]-0"),
