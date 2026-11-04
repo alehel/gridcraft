@@ -1607,11 +1607,24 @@ fn hyperlink(href: &str, title: Option<&str>) -> Hyperlink {
     if let Some(local) = href.strip_prefix('#') {
         let target = match super::formula::from_odf(&format!("of:=[{local}]")) {
             Some(t) if !t.starts_with('#') => t.replace('$', ""),
+            // A sheet alone (`#Sheet2`) is its first cell.
+            _ if !local.contains('.') => format!("{}!A1", gridcraft_formula::quote_sheet(local.trim_matches('\''))),
             _ => local.to_string(),
         };
         return Hyperlink { target, tooltip, external: false };
     }
-    Hyperlink { target: href.to_string(), tooltip, external: true }
+    // A relative link is relative to the package as a folder (ODF 1.3 part 2 §3.7): `../x.ods`
+    // is next to the file, which is where the model's relative links start.
+    let target = if is_relative(href) { href.strip_prefix("../").unwrap_or(href).to_string() } else { href.to_string() };
+    Hyperlink { target, tooltip, external: true }
+}
+
+/// A link that is neither a URL with a scheme nor an absolute path.
+pub(crate) fn is_relative(href: &str) -> bool {
+    let scheme = href
+        .split_once(':')
+        .is_some_and(|(s, _)| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) && s.len() > 1);
+    !scheme && !href.starts_with('/') && !href.starts_with('\\') && !href.starts_with('#')
 }
 
 /// `$Sheet1.$A$1:.$C$9` → (sheet, range).

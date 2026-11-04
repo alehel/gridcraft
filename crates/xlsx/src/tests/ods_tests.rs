@@ -351,3 +351,23 @@ fn ods_protection_keys_are_passwords() {
     let (x, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
     assert!(x.sheets[0].protection.is_some());
 }
+
+/// Relative links are relative to the package in ODF and to the file's folder in GridCraft; a
+/// link to a sheet alone goes to its first cell.
+#[test]
+fn ods_links_keep_their_targets() {
+    let bytes = row(r##"
+        <table:table-cell office:value-type="string"><text:p><text:a xlink:href="../other.ods#Sheet1.A1" xmlns:xlink="http://www.w3.org/1999/xlink">next door</text:a></text:p></table:table-cell>
+        <table:table-cell office:value-type="string"><text:p><text:a xlink:href="https://example.com/a" xmlns:xlink="http://www.w3.org/1999/xlink">web</text:a></text:p></table:table-cell>
+        <table:table-cell office:value-type="string"><text:p><text:a xlink:href="#Data" xmlns:xlink="http://www.w3.org/1999/xlink">sheet</text:a></text:p></table:table-cell>
+        <table:table-cell office:value-type="string"><text:p><text:a xlink:href="#Data.B2" xmlns:xlink="http://www.w3.org/1999/xlink">cell</text:a></text:p></table:table-cell>
+    "##);
+    let (wb, _) = read_ods(&bytes).unwrap();
+    let target = |wb: &gridcraft_model::Workbook, c| wb.sheets[0].hyperlinks.get(&CellRef::new(0, c)).map(|h| h.target.clone()).unwrap();
+    for wb in [wb.clone(), read_ods(&write_ods(&wb).unwrap()).unwrap().0] {
+        assert_eq!(target(&wb, 0), "other.ods#Sheet1.A1");
+        assert_eq!(target(&wb, 1), "https://example.com/a");
+        assert_eq!(target(&wb, 2), "Data!A1");
+        assert_eq!(target(&wb, 3), "Data!B2");
+    }
+}

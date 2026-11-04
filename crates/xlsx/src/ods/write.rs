@@ -780,7 +780,8 @@ impl<'a> Writer<'a> {
         };
         let link = sh.hyperlinks.get(&pos).map(|h| {
             if h.external {
-                h.target.clone()
+                // Relative to the file's folder in the model, to the package in ODF.
+                if super::read::is_relative(&h.target) { format!("../{}", h.target) } else { h.target.clone() }
             } else {
                 // `Sheet2!A1` → `#Sheet2.A1`.
                 match h.target.rsplit_once('!') {

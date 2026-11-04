@@ -159,6 +159,7 @@ refresh. Counted under features (Get & Transform, ~10% ready), not here.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-04 | trivial | ODS relative links resolve from the file's folder (ODF counts them from inside the package); a link to a sheet alone goes to its first cell |
 | 2026-11-04 | minor | ODS sheet and structure protection keep their SHA-256 password keys, which unprotect with the password |
 | 2026-11-04 | minor | Flat OpenDocument (`.fods`) opens and saves; LibreOffice opens all 296 corpus files written as `.fods` with the same agreement as packaged ODS |
 | 2026-11-04 | minor | ODS: pivot tables and drawing shapes read and written; sheet names with spaces in range lists (print ranges, named ranges, conditional formats) read |
