@@ -8,23 +8,17 @@ use std::fmt::Write as _;
 use gridcraft_core::date::datetime_from_serial;
 use gridcraft_core::{CellRef, DateSystem, MAX_COLS, MAX_ROWS, RangeRef, Value, col_to_letters};
 use gridcraft_model::{
-    Cell, CfOperator, CfRule, CfValueKind, Color, ErrorStyle, Font, LineInfo, Sheet, Style, StyleId, Validation, ValidationKind, Visibility, Workbook,
+    Cell, CfOperator, CfRule, CfValueKind, Color, ErrorStyle, LineInfo, Sheet, Style, StyleId, Validation, ValidationKind, Visibility, Workbook,
 };
 
 use super::formula::{self, Tables};
-use super::read::{ODS_FONT, ODS_FONT_SIZE};
+use super::read::baseline;
 use super::{OdsKind, numfmt, page, settings, style};
 use crate::IoError;
 use crate::package::ZipOut;
 use crate::xml::{esc, esc_attr};
 
 const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0" xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:calcext="urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0" xmlns:tableooo="http://openoffice.org/2009/table" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" xmlns:ooo="http://openoffice.org/2004/office" xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0""#;
-
-/// The style LibreOffice assumes for a document that states none; the file's Default style is
-/// written as the difference from it.
-fn baseline() -> Style {
-    Style { font: Font { name: ODS_FONT.into(), size: ODS_FONT_SIZE, minor: false, ..Font::default() }, ..Style::default() }
-}
 
 /// Encodes `wb` as an `.ods` package. Cells cache their values as plain text; see
 /// [`write_ods_with`] to cache the text as the cells show it.

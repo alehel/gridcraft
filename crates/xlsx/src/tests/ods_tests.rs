@@ -574,3 +574,15 @@ fn ods_line_runs_keep_their_own_size_against_the_defaults() {
     assert!(sh.rows.get(&0).is_some_and(|i| !i.custom));
     assert!(sh.cols.is_empty(), "{}", sh.cols.len());
 }
+
+/// A named style whose chain never names Default is still under it, as LibreOffice reads it:
+/// it shows the Default's font size, not just its number format.
+#[test]
+fn ods_styles_outside_the_default_chain_inherit_the_default() {
+    let content = r#"<?xml version="1.0"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:styles><style:style style:name="Default" style:family="table-cell"><style:text-properties fo:font-size="14pt"/></style:style><style:style style:name="Lonely" style:family="table-cell"><style:text-properties fo:font-weight="bold"/></style:style></office:styles><office:body><office:spreadsheet><table:table table:name="Data"><table:table-row><table:table-cell table:style-name="Lonely" office:value-type="float" office:value="1"/></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#;
+    let (wb, _) = read_ods(&make_zip(&[("mimetype", MIME), ("META-INF/manifest.xml", MANIFEST), ("content.xml", content.as_bytes())])).unwrap();
+    let style = wb.styles.get(wb.sheets[0].style_id(CellRef::new(0, 0)));
+    assert!(style.font.bold);
+    assert_eq!(style.font.size, 14.0);
+    assert_eq!(wb.styles.get(gridcraft_model::StyleId::DEFAULT).font.size, 14.0);
+}

@@ -28,8 +28,14 @@ const MAX_SHEETS: usize = 1024;
 const MAX_LINE_ENTRIES: usize = 200_000;
 const MAX_STYLE_DEPTH: usize = 32;
 /// LibreOffice's defaults for a document that states none.
-pub(crate) const ODS_FONT: &str = "Liberation Sans";
-pub(crate) const ODS_FONT_SIZE: f32 = 10.0;
+const ODS_FONT: &str = "Liberation Sans";
+const ODS_FONT_SIZE: f32 = 10.0;
+
+/// The style LibreOffice assumes for a document that states none: styles are read, and the
+/// file's Default style is written, as the difference from it.
+pub(crate) fn baseline() -> Style {
+    Style { font: Font { name: ODS_FONT.into(), size: ODS_FONT_SIZE, minor: false, ..Font::default() }, ..Style::default() }
+}
 
 /// Reads only the small, exact mimetype entry (a spreadsheet or a spreadsheet template),
 /// including when the ZIP uses compression.
@@ -499,29 +505,46 @@ impl Import {
     }
 
     /// The properties of a named style with its ancestors.
-    fn resolve_named(&self, name: &str) -> Props {
-        let mut chain: Vec<&Props> = Vec::new();
-        let mut cur = Some(name.to_string());
-        while let Some(n) = cur.take() {
-            if chain.len() >= MAX_STYLE_DEPTH {
+    /// An automatic style, or the named style of that name when none is automatic.
+    fn style_def(&self, name: &str) -> Option<&CellStyleDef> {
+        self.auto.get(name).or_else(|| self.named.get(name))
+    }
+
+    /// The properties `def` states and those its ancestors (named styles) state, nearest first,
+    /// up to the document's Default.
+    fn ancestry<'s>(&'s self, def: &'s CellStyleDef) -> Vec<&'s Props> {
+        let mut chain = vec![&def.props];
+        let mut parent = def.parent.as_deref();
+        while let Some(n) = parent.take() {
+            if n == "Default" || chain.len() >= MAX_STYLE_DEPTH {
                 break;
             }
-            let Some(def) = self.named.get(&n) else { break };
-            chain.push(&def.props);
-            cur = def.parent.clone();
+            let Some(d) = self.named.get(n) else { break };
+            chain.push(&d.props);
+            parent = d.parent.as_deref();
         }
-        let mut p = self.default_props.clone();
-        for c in chain.iter().rev() {
-            p = style::merge(&p, c);
+        chain
+    }
+
+    /// The document's Default cell style: the default style (`style:default-style`) and what
+    /// the named Default style sets.
+    fn default_props(&self) -> Props {
+        match self.named.get("Default") {
+            Some(d) => style::merge(&self.default_props, &d.props),
+            None => self.default_props.clone(),
         }
-        p
+    }
+
+    /// Everything `def` shows. Every cell style is under the document's Default, whether or not
+    /// its chain names it, as LibreOffice reads them.
+    fn resolve(&self, def: &CellStyleDef) -> Props {
+        self.ancestry(def).into_iter().rev().fold(self.default_props(), |p, c| style::merge(&p, c))
     }
 
     fn base_style(&self) -> Style {
-        let p = self.resolve_named("Default");
-        let base = Style { font: Font { name: ODS_FONT.into(), size: ODS_FONT_SIZE, minor: false, ..Font::default() }, ..Style::default() };
+        let p = self.default_props();
         let code = p.data_style.as_deref().and_then(|d| numfmt::code(&self.data_styles, d));
-        style::to_style(&p, &base, code)
+        style::to_style(&p, &baseline(), code)
     }
 
     /// Called once the styles are known: makes the workbook's default style the file's Default.
@@ -539,22 +562,13 @@ impl Import {
         if let Some(id) = self.ids.get(name) {
             return *id;
         }
-        let props = match self.auto.get(name) {
-            Some(def) => {
-                let parent = def.parent.clone().unwrap_or_else(|| "Default".into());
-                style::merge(&self.resolve_named(&parent), &def.props)
-            }
-            None => self.resolve_named(name),
+        let props = match self.style_def(name) {
+            Some(def) => self.resolve(def),
+            None => self.default_props(),
         };
         let code = props.data_style.as_deref().and_then(|d| numfmt::code(&self.data_styles, d));
-        let base = self.wb.styles.get(StyleId::DEFAULT).clone();
-        let base_default = Style { font: Font { name: ODS_FONT.into(), size: ODS_FONT_SIZE, minor: false, ..Font::default() }, ..Style::default() };
-        // Resolve on top of the plain defaults so that a property set back to the default sticks.
-        let mut s = style::to_style(&props, &base_default, code.clone());
-        if code.is_none() {
-            s.num_fmt = base.num_fmt.clone();
-        }
-        let id = self.wb.styles.intern(s);
+        // The resolved properties are complete, so they apply to LibreOffice's baseline.
+        let id = self.wb.styles.intern(style::to_style(&props, &baseline(), code));
         self.ids.insert(name.to_string(), id);
         id
     }
@@ -566,28 +580,13 @@ impl Import {
         self.wb.styles.derive(StyleId::DEFAULT, |s| s.font.family = if s.font.family.is_none() { Some(2) } else { None })
     }
 
-    /// The differential style of a conditional format's named style: only what it states.
+    /// The differential style of a conditional format's named style: only what it and its
+    /// ancestors below Default state.
     fn dxf(&self, name: &str) -> Style {
-        let mut chain: Vec<&Props> = Vec::new();
-        let mut cur = Some(name.to_string());
-        while let Some(n) = cur.take() {
-            if chain.len() >= MAX_STYLE_DEPTH || n == "Default" {
-                break;
-            }
-            let Some(def) = self.named.get(&n).or_else(|| self.auto.get(&n)) else { break };
-            chain.push(&def.props);
-            cur = def.parent.clone();
-        }
-        let mut p = Props::default();
-        for c in chain.iter().rev() {
-            p = style::merge(&p, c);
-        }
+        let Some(def) = self.named.get(name).or_else(|| self.auto.get(name)).filter(|_| name != "Default") else { return Style::default() };
+        let p = self.ancestry(def).into_iter().rev().fold(Props::default(), |p, c| style::merge(&p, c));
         let code = p.data_style.as_deref().and_then(|d| numfmt::code(&self.data_styles, d));
-        let mut s = style::to_style(&p, &Style::default(), code);
-        if p.font_name.is_none() {
-            s.font.minor = Font::default().minor;
-        }
-        s
+        style::to_style(&p, &Style::default(), code)
     }
 
     fn open_table(&mut self, e: &Elem) -> Result<(), IoError> {
@@ -908,10 +907,7 @@ impl Import {
                 link = Some(hyperlink(href, a.attr(Ns::Office, "title")));
             }
             validation = c.attr(Ns::Table, "content-validation-name").map(str::to_string);
-            mapped = c
-                .attr(Ns::Table, "style-name")
-                .filter(|n| self.auto.get(*n).or_else(|| self.named.get(*n)).is_some_and(|d| !d.maps.is_empty()))
-                .map(str::to_string);
+            mapped = c.attr(Ns::Table, "style-name").filter(|n| self.style_def(n).is_some_and(|d| !d.maps.is_empty())).map(str::to_string);
             drawings(c, Some(CellRef::new(row, col)), &self.draw, &mut frames);
         }
         let Some(st) = self.sheet.as_mut() else { return Ok(()) };
@@ -1299,7 +1295,7 @@ impl Import {
         names.sort_by(|a, b| a.0.cmp(&b.0));
         let mut priority = st.sheet.cond_formats.len() as u32 + 1;
         for (name, ranges) in names {
-            let Some(def) = self.auto.get(&name).or_else(|| self.named.get(&name)) else { continue };
+            let Some(def) = self.style_def(&name) else { continue };
             let ranges = merge_ranges(ranges);
             for (cond, apply, _) in &def.maps {
                 let style = Box::new(self.dxf(apply));
