@@ -161,6 +161,8 @@ struct Writer<'a> {
     pictures: Vec<(String, String, std::sync::Arc<Vec<u8>>)>,
     /// Embedded chart objects: folder (`Object 1`) and its `content.xml`.
     objects: Vec<(String, String)>,
+    /// Graphic styles of shapes.
+    graphics: Vec<String>,
     validations: Vec<(String, String)>,
 }
 
@@ -182,6 +184,7 @@ impl<'a> Writer<'a> {
             fonts: Vec::new(),
             pictures: Vec::new(),
             objects: Vec::new(),
+            graphics: Vec::new(),
             validations: Vec::new(),
         }
     }
@@ -281,6 +284,9 @@ impl<'a> Writer<'a> {
         o.push_str(&self.data_xml);
         o.push_str(&cells);
         o.push_str("<style:style style:name=\"gr1\" style:family=\"graphic\"><style:graphic-properties draw:stroke=\"none\" draw:fill=\"none\"/></style:style>");
+        for g in &self.graphics {
+            o.push_str(g);
+        }
         o.push_str("</office:automatic-styles>");
         o
     }
@@ -317,6 +323,7 @@ impl<'a> Writer<'a> {
         body.push_str(&tables);
         body.push_str(&self.names(None));
         body.push_str(&self.database_ranges());
+        body.push_str(&super::pivot::write(self.wb));
         body.push_str("</office:spreadsheet></office:body>");
         let auto = self.automatic_styles();
         let mut o = format!(r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content {NS} office:version="1.3">"#);
@@ -525,7 +532,8 @@ impl<'a> Writer<'a> {
         }
         let covered_rows: std::collections::HashSet<u32> = covered.iter().map(|c| c.row).chain(spans.keys().map(|c| c.row)).collect();
         let note_rows: std::collections::HashSet<u32> = sh.comments.keys().chain(sh.hyperlinks.keys()).map(|c| c.row).collect();
-        let header = sh.print.title_rows;
+        // Title rows past the sheet's content end with it, so the header group always closes.
+        let header = sh.print.title_rows.map(|(a, b)| (a.min(b), b.max(a).min(max_row.max(a)))).filter(|(a, _)| *a <= max_row);
         let mut level = 0u8;
         let mut row = 0u32;
         let default_h = sh.default_row_height;
@@ -773,10 +781,19 @@ impl<'a> Writer<'a> {
     }
 
     fn shapes(&mut self, _i: usize, sh: &Sheet, out: &mut String) {
-        if sh.images.is_empty() && sh.charts.is_empty() {
+        if sh.images.is_empty() && sh.charts.is_empty() && sh.shapes.is_empty() {
             return;
         }
         out.push_str("<table:shapes>");
+        for shp in &sh.shapes {
+            let name = format!("shp{}", self.graphics.len() + 1);
+            let x = geometry_x(sh, shp.anchor.cell.col) + shp.anchor.dx * 0.75;
+            let y = geometry_y(sh, shp.anchor.cell.row) + shp.anchor.dy * 0.75;
+            if let Some(xml) = super::shape::shape_xml(shp, &name, x, y, self.graphics.len()) {
+                out.push_str(&xml);
+                self.graphics.push(super::shape::style_xml(&name, shp, &self.wb.theme));
+            }
+        }
         for c in &sh.charts {
             let dir = format!("Object {}", self.objects.len() + 1);
             // Anchors are in pixels at 96 dpi; the file takes points.
@@ -951,6 +968,8 @@ impl<'a> Writer<'a> {
         for s in &self.cf_styles {
             o.push_str(s);
         }
+        // The arrowhead of arrow shapes: a plain triangle.
+        o.push_str(r#"<draw:marker draw:name="Arrow" svg:viewBox="0 0 10 10" svg:d="M5 0 L10 10 L0 10 Z"/>"#);
         o.push_str("</office:styles><office:automatic-styles>");
         let mut masters = String::new();
         for (i, sh) in self.wb.sheets.iter().enumerate() {

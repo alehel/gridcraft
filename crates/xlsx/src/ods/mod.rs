@@ -9,8 +9,10 @@ mod formula;
 mod names;
 mod numfmt;
 mod page;
+mod pivot;
 mod read;
 mod settings;
+mod shape;
 mod style;
 mod write;
 

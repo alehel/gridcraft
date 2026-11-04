@@ -278,3 +278,18 @@ fn ods_blank_repeats_past_the_sheet_edge_are_clipped() {
     assert!(wb.sheets[0].cells.is_empty());
     assert!(report.warnings.iter().any(|w| w.contains("beyond row 1,048,576")));
 }
+
+/// Print titles that reach past the sheet's content still close their header-rows group.
+#[test]
+fn ods_title_rows_past_the_content_write_well_formed_xml() {
+    let mut wb = gridcraft_model::Workbook::new();
+    let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    sh.set_value(CellRef::new(0, 0), Value::Number(1.0));
+    sh.print.title_rows = Some((0, 5));
+    sh.print.print_area = Some(RangeRef::new(CellRef::new(0, 0), CellRef::new(9, 3)));
+    let bytes = write_ods(&wb).unwrap();
+    let (back, _) = read_ods(&bytes).unwrap();
+    assert_eq!(back.sheets[0].value(CellRef::new(0, 0)), Value::Number(1.0));
+    assert_eq!(back.sheets[0].print.title_rows, Some((0, 0)));
+    assert_eq!(back.sheets[0].print.print_area, Some(RangeRef::new(CellRef::new(0, 0), CellRef::new(9, 3))));
+}

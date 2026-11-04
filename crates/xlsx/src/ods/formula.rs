@@ -346,6 +346,30 @@ pub(crate) fn reference(inner: &str) -> String {
     }
 }
 
+/// The addresses of a space-separated list (`Sheet1.A1:Sheet1.B2 'My sheet'.C3`); spaces inside
+/// quoted sheet names belong to the name.
+pub(crate) fn split_addresses(list: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut quoted = false;
+    let mut start = 0;
+    for (i, c) in list.char_indices() {
+        match c {
+            '\'' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if let Some(part) = list.get(start..i).filter(|p| !p.is_empty()) {
+                    out.push(part);
+                }
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if let Some(part) = list.get(start..).filter(|p| !p.is_empty()) {
+        out.push(part);
+    }
+    out
+}
+
 /// Splits a range at its `:` outside quotes.
 fn split_range(s: &str) -> Option<(&str, &str)> {
     let mut quoted = false;
@@ -596,6 +620,7 @@ mod tests {
         assert_eq!(from_odf("of:=ISNA(#N/A)").as_deref(), Some("ISNA(#N/A)"));
         assert_eq!(from_odf("msoxl:=SUM(A1:B2)").as_deref(), Some("SUM(A1:B2)"));
         assert_eq!(from_odf("foo:=1"), None);
+        assert_eq!(split_addresses("'My sheet'.A1:'My sheet'.B2  Data.C3"), vec!["'My sheet'.A1:'My sheet'.B2", "Data.C3"]);
     }
 
     #[test]

@@ -189,6 +189,8 @@ struct Frame {
     href: String,
     /// An embedded object (a chart) rather than a picture.
     object: bool,
+    /// A drawing shape rather than a picture.
+    shape: Option<super::shape::ShapeDraft>,
     cell: Option<CellRef>,
     x: f64,
     y: f64,
@@ -222,6 +224,7 @@ pub(crate) struct Import {
     table_styles: HashMap<String, TableStyle>,
     page_layouts: HashMap<String, Elem>,
     master_pages: HashMap<String, Elem>,
+    draw: super::shape::DrawStyles,
     validations: HashMap<String, ValidationDef>,
     names: Vec<NameDef>,
     database_ranges: Vec<Elem>,
@@ -265,6 +268,7 @@ impl Import {
             table_styles: HashMap::new(),
             page_layouts: HashMap::new(),
             master_pages: HashMap::new(),
+            draw: super::shape::DrawStyles::default(),
             validations: HashMap::new(),
             names: Vec::new(),
             database_ranges: Vec::new(),
@@ -292,6 +296,7 @@ impl Import {
     /// Reads a style container (`office:styles`, `office:automatic-styles`); `named` for common styles.
     fn read_style_list(&mut self, list: &Elem, named: bool) {
         numfmt::read_styles(list, &mut self.data_styles);
+        self.draw.add(list);
         for e in list.elems() {
             if e.is(Ns::Style, "default-style") && e.attr(Ns::Style, "family") == Some("table-cell") {
                 self.default_props = style::read_props(e, &self.fonts);
@@ -761,11 +766,7 @@ impl Import {
                 .attr(Ns::Table, "style-name")
                 .filter(|n| self.auto.get(*n).or_else(|| self.named.get(*n)).is_some_and(|d| !d.maps.is_empty()))
                 .map(str::to_string);
-            for f in c.elems().filter(|k| k.is(Ns::Draw, "frame")) {
-                if let Some(fr) = read_frame(f, Some(CellRef::new(row, col))) {
-                    frames.push(fr);
-                }
-            }
+            drawings(c, Some(CellRef::new(row, col)), &self.draw, &mut frames);
         }
         let Some(st) = self.sheet.as_mut() else { return Ok(()) };
         for r in row..row + rows {
@@ -979,7 +980,7 @@ impl Import {
             st.sheet.print.title_cols = Some((a, b));
         }
         if let Some(pr) = &st.print_ranges {
-            let first = pr.split_whitespace().next().unwrap_or_default();
+            let first = formula::split_addresses(pr).first().copied().unwrap_or_default();
             if let Ok(e) = gridcraft_formula::parse(&formula::reference(first))
                 && let gridcraft_formula::Expr::Ref(r) = e
             {
@@ -1041,7 +1042,8 @@ impl Import {
         for (name, scope, text, range, base) in std::mem::take(&mut self.names) {
             let formula = if range {
                 // `$Sheet1.$A$1:.$B$2`, possibly several ranges separated by spaces.
-                let parts: Vec<String> = text.split_whitespace().map(|p| formula::reference(p.trim_matches(|c| c == '[' || c == ']'))).collect();
+                let parts: Vec<String> =
+                    formula::split_addresses(&text).into_iter().map(|p| formula::reference(p.trim_matches(|c| c == '[' || c == ']'))).collect();
                 if parts.len() == 1 { parts.into_iter().next().unwrap_or_default() } else { format!("({})", parts.join(",")) }
             } else {
                 match formula::from_odf(&text) {
@@ -1175,7 +1177,7 @@ impl Import {
         let mut priority = 1u32;
         for cf in e.children(Ns::CalcExt, "conditional-format") {
             let Some(addr) = cf.attr(Ns::CalcExt, "target-range-address") else { continue };
-            let ranges: Vec<RangeRef> = addr.split_whitespace().filter_map(range_on_sheet).map(|(_, r)| r).collect();
+            let ranges: Vec<RangeRef> = formula::split_addresses(addr).into_iter().filter_map(range_on_sheet).map(|(_, r)| r).collect();
             if ranges.is_empty() {
                 continue;
             }
@@ -1278,11 +1280,7 @@ impl Import {
 
     fn frames_in(&mut self, shapes: &Elem) {
         let mut out = Vec::new();
-        for f in shapes.elems().filter(|e| e.is(Ns::Draw, "frame")) {
-            if let Some(fr) = read_frame(f, None) {
-                out.push(fr);
-            }
-        }
+        drawings(shapes, None, &self.draw, &mut out);
         if let Some(st) = self.sheet.as_mut() {
             st.frames.extend(out);
         }
@@ -1291,7 +1289,25 @@ impl Import {
     fn load_pictures(&mut self, package: &mut Package<'_>) {
         let mut next_id = 1u32;
         let mut next_chart = 1u32;
-        for (index, f) in std::mem::take(&mut self.images) {
+        let mut next_shape = 1u32;
+        for (index, mut f) in std::mem::take(&mut self.images) {
+            if let Some(d) = f.shape.take() {
+                let Some(sheet) = self.wb.sheets.get_mut(index) else { continue };
+                let sheet = Arc::make_mut(sheet);
+                let anchor = place_anchor(sheet, &f);
+                sheet.shapes.push(gridcraft_model::Shape {
+                    id: next_shape,
+                    kind: d.kind,
+                    anchor,
+                    fill: d.fill,
+                    line: d.line,
+                    text: d.text,
+                    format: d.format,
+                    math: Default::default(),
+                });
+                next_shape += 1;
+                continue;
+            }
             let path = f.href.trim_start_matches("./").to_string();
             if f.object {
                 let part = format!("{}/content.xml", path.trim_end_matches('/'));
@@ -1419,7 +1435,40 @@ fn read_frame(f: &Elem, cell: Option<CellRef>) -> Option<Frame> {
         Some(o) => (o.to_string(), true),
         None => (href, false),
     };
-    Some(Frame { href, object, cell, x: len("x"), y: len("y"), width: len("width"), height: len("height"), alt })
+    Some(Frame { href, object, shape: None, cell, x: len("x"), y: len("y"), width: len("width"), height: len("height"), alt })
+}
+
+/// Pictures, charts and shapes among `parent`'s children, groups flattened.
+fn drawings(parent: &Elem, cell: Option<CellRef>, styles: &super::shape::DrawStyles, out: &mut Vec<Frame>) {
+    let mut stack: Vec<(&Elem, usize)> = parent.elems().filter(|e| e.ns == Ns::Draw).map(|e| (e, 0)).collect();
+    stack.reverse();
+    while let Some((e, depth)) = stack.pop() {
+        if e.name == "g" {
+            if depth < 16 {
+                stack.extend(e.elems().filter(|k| k.ns == Ns::Draw).map(|k| (k, depth + 1)).collect::<Vec<_>>().into_iter().rev());
+            }
+            continue;
+        }
+        if e.name == "frame"
+            && let Some(f) = read_frame(e, cell)
+        {
+            out.push(f);
+            continue;
+        }
+        if let Some(d) = super::shape::read(e, styles) {
+            out.push(Frame {
+                href: String::new(),
+                object: false,
+                cell,
+                x: d.x,
+                y: d.y,
+                width: d.width,
+                height: d.height,
+                alt: String::new(),
+                shape: Some(d),
+            });
+        }
+    }
 }
 
 fn read_annotation(a: &Elem) -> Comment {
@@ -1871,7 +1920,18 @@ impl Sink for Import {
                 }
             }
             (Ns::Table, "tracked-changes") => self.report.warn("ODS tracked changes were not imported; the current cell contents were."),
-            (Ns::Table, "data-pilot-tables") => self.report.warn("ODS pivot tables were imported as their current values."),
+            (Ns::Table, "data-pilot-tables") => {
+                for (i, p) in el.children(Ns::Table, "data-pilot-table").enumerate() {
+                    let placed = super::pivot::read(p, i as u32 + 1).and_then(|(sheet, pt)| {
+                        let s = self.wb.sheets.iter_mut().find(|s| s.name == sheet)?;
+                        Arc::make_mut(s).pivots.push(pt);
+                        Some(())
+                    });
+                    if placed.is_none() {
+                        self.report.warn("Some ODS pivot tables (from databases or external sources) were imported as their current values.");
+                    }
+                }
+            }
             (Ns::Office, "scripts") if !el.elems().all(|e| e.elems().next().is_none()) => self.report.warn("ODS macros were not imported."),
             _ => {}
         }
