@@ -586,3 +586,21 @@ fn ods_styles_outside_the_default_chain_inherit_the_default() {
     assert_eq!(style.font.size, 14.0);
     assert_eq!(wb.styles.get(gridcraft_model::StyleId::DEFAULT).font.size, 14.0);
 }
+
+/// A merge reaching past the sheet's edge is cut at it, with a warning, rather than refusing
+/// the file.
+#[test]
+fn ods_merges_past_the_edge_are_clipped() {
+    let (wb, report) = read_ods(&row(
+        r#"<table:table-cell table:number-columns-repeated="16383"/><table:table-cell table:number-columns-spanned="5" office:value-type="float" office:value="1"/>"#,
+    ))
+    .unwrap();
+    assert_eq!(wb.sheets[0].value(CellRef::new(0, 16383)), Value::Number(1.0));
+    assert!(wb.sheets[0].merges.is_empty(), "{:?}", wb.sheets[0].merges);
+    assert!(report.warnings.iter().any(|w| w.contains("edge")), "{:?}", report.warnings);
+    let (wb, _) = read_ods(&row(
+        r#"<table:table-cell table:number-columns-repeated="16380"/><table:table-cell table:number-columns-spanned="9" table:number-rows-spanned="2" office:value-type="float" office:value="1"/>"#,
+    ))
+    .unwrap();
+    assert_eq!(wb.sheets[0].merges, vec![RangeRef::new(CellRef::new(0, 16380), CellRef::new(1, 16383))]);
+}

@@ -216,9 +216,8 @@ fn paragraph_text_uncapped(p: &Elem, out: &mut String) {
 
 /// What a streaming parse does with each element below the root.
 pub(crate) trait Sink {
-    /// Whether the element (given its streamed ancestors' names) is read whole and handed to
-    /// [`Sink::subtree`].
-    fn capture(&mut self, ancestors: &[(Ns, String)], ns: Ns, name: &str) -> bool;
+    /// Whether the element is read whole and handed to [`Sink::subtree`].
+    fn capture(&mut self, ns: Ns, name: &str) -> bool;
     /// A streamed element starts (attributes only).
     fn open(&mut self, el: &Elem) -> Result<(), IoError>;
     /// The streamed element opened last ends.
@@ -287,7 +286,6 @@ pub(crate) fn parse(xml: &[u8], sink: &mut dyn Sink) -> Result<(), IoError> {
     let data = crate::xml::to_utf8(xml);
     let mut reader = NsReader::from_reader(data.as_ref());
     let mut streamed: Vec<Elem> = Vec::new();
-    let mut names: Vec<(Ns, String)> = Vec::new();
     let mut capture: Option<Capture> = None;
     let mut root_done = false;
     loop {
@@ -316,7 +314,7 @@ pub(crate) fn parse(xml: &[u8], sink: &mut dyn Sink) -> Result<(), IoError> {
                     }
                     continue;
                 }
-                if !streamed.is_empty() && sink.capture(&names, el.ns, &el.name) {
+                if !streamed.is_empty() && sink.capture(el.ns, &el.name) {
                     if empty {
                         sink.subtree(el)?;
                     } else {
@@ -331,7 +329,6 @@ pub(crate) fn parse(xml: &[u8], sink: &mut dyn Sink) -> Result<(), IoError> {
                         root_done = true;
                     }
                 } else {
-                    names.push((el.ns, el.name.clone()));
                     streamed.push(el);
                 }
             }
@@ -348,7 +345,6 @@ pub(crate) fn parse(xml: &[u8], sink: &mut dyn Sink) -> Result<(), IoError> {
                     continue;
                 }
                 let Some(el) = streamed.pop() else { return Err(xml_error("unexpected closing element")) };
-                names.pop();
                 sink.close(&el)?;
                 if streamed.is_empty() {
                     root_done = true;
@@ -398,7 +394,7 @@ pub(crate) fn parse(xml: &[u8], sink: &mut dyn Sink) -> Result<(), IoError> {
 pub(crate) fn parse_tree(xml: &[u8]) -> Result<Elem, IoError> {
     struct Whole(Option<Elem>, Option<Elem>);
     impl Sink for Whole {
-        fn capture(&mut self, _: &[(Ns, String)], _: Ns, _: &str) -> bool {
+        fn capture(&mut self, _: Ns, _: &str) -> bool {
             true
         }
         fn open(&mut self, el: &Elem) -> Result<(), IoError> {

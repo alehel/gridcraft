@@ -264,6 +264,7 @@ enum Inline {
 }
 
 /// A picture as read, before its anchor is placed and its bytes loaded.
+#[derive(Default)]
 struct Frame {
     href: String,
     /// An embedded object (a chart) rather than a picture.
@@ -280,12 +281,16 @@ struct Frame {
     alt: String,
 }
 
-struct ValidationDef {
-    v: Validation,
+/// A defined name as read, translated once every sheet is known.
+struct NameDef {
+    name: String,
+    scope: Option<usize>,
+    /// The ODF expression, or the range address of a named range.
+    text: String,
+    range: bool,
+    /// The cell its relative references are relative to.
+    base: Option<String>,
 }
-
-/// A defined name as read: name, scope, ODF expression or range, whether a range, base cell.
-type NameDef = (String, Option<usize>, String, bool, Option<String>);
 
 /// The style of the merge holding `at` among the merges still open, and the column where that
 /// answer ends (the merge's right edge, or the next merge's left one), dropping merges that ended
@@ -332,7 +337,7 @@ pub(crate) struct Import {
     page_layouts: HashMap<String, Elem>,
     master_pages: HashMap<String, Elem>,
     draw: super::shape::DrawStyles,
-    validations: HashMap<String, ValidationDef>,
+    validations: HashMap<String, Validation>,
     names: Vec<NameDef>,
     database_ranges: Vec<Elem>,
     sheet: Option<SheetState>,
@@ -496,11 +501,7 @@ impl Import {
             self.read_style_list(s, false);
         }
         if let Some(m) = root.child(Ns::Office, "master-styles") {
-            for p in m.children(Ns::Style, "master-page") {
-                if let Some(n) = p.attr(Ns::Style, "name") {
-                    self.master_pages.insert(n.to_string(), p.clone());
-                }
-            }
+            self.read_master_pages(m);
         }
     }
 
@@ -602,17 +603,16 @@ impl Import {
             self.report.warn("Some ODS sheet names were shortened or renamed to valid, unique sheet names.");
         }
         let mut sheet = Sheet::new(name);
-        if let Some(ts) = e.attr(Ns::Table, "style-name").and_then(|n| self.table_styles.get(n)).cloned() {
+        let ts = e.attr(Ns::Table, "style-name").and_then(|n| self.table_styles.get(n));
+        if let Some(ts) = ts {
             if ts.hidden {
                 sheet.visibility = Visibility::Hidden;
             }
             sheet.tab_color = ts.tab_color;
             sheet.right_to_left = ts.rtl;
-            super::page::apply(&mut sheet, ts.master_page.as_deref().unwrap_or("Default"), &self.master_pages, &self.page_layouts);
         }
-        if e.attr(Ns::Table, "style-name").is_none_or(|n| !self.table_styles.contains_key(n)) {
-            super::page::apply(&mut sheet, "Default", &self.master_pages, &self.page_layouts);
-        }
+        let master = ts.and_then(|t| t.master_page.as_deref()).unwrap_or("Default");
+        super::page::apply(&mut sheet, master, &self.master_pages, &self.page_layouts);
         if e.attr(Ns::Table, "protected") == Some("true") {
             let password = self.protection_key(e);
             sheet.protection = Some(SheetProtection { password, select_locked: true, select_unlocked: true, ..SheetProtection::default() });
@@ -855,7 +855,18 @@ impl Import {
 
     /// Stores a (repeated) cell and what hangs off it: merges, notes, links, validation, pictures.
     fn place(&mut self, row: u32, rows: u32, k: RowCell<'_>) -> Result<(), IoError> {
-        let RowCell { col, count: cols, width, height, cell, fallback, el } = k;
+        let RowCell { col, count: cols, mut width, mut height, cell, fallback, el } = k;
+        if (cols > 1 && width > 1) || (rows > 1 && height > 1) {
+            return Err(IoError::Format("repeated ODS cells have overlapping merges".into()));
+        }
+        // A merge reaching past the sheet's edge ends at it (the cells themselves never pass it).
+        let room_w = MAX_COLS.saturating_sub((col + cols).saturating_sub(1));
+        let room_h = MAX_ROWS.saturating_sub((row + rows).saturating_sub(1));
+        if width > room_w || height > room_h {
+            self.report.warn("Some ODS merged cells reaching past the sheet's edge were cut at it.");
+            width = width.min(room_w).max(1);
+            height = height.min(room_h).max(1);
+        }
         let count = u64::from(rows) * u64::from(cols);
         let merged = width > 1 || height > 1;
         // A formatted empty cell is stored within its own budget; what hangs off it (a merge, a
@@ -881,14 +892,6 @@ impl Import {
         }
         if self.cells > MAX_CELLS || self.merges > MAX_MERGES || self.text > MAX_TEXT {
             return Err(IoError::TooLarge("ODS expands beyond the import limit (4 million cells, 100000 merges or 256 MiB of text)".into()));
-        }
-        let last_col = col.checked_add(cols - 1).and_then(|c| c.checked_add(width - 1));
-        let last_row = row.checked_add(rows - 1).and_then(|r| r.checked_add(height - 1));
-        if last_col.is_none_or(|c| c >= MAX_COLS) || last_row.is_none_or(|r| r >= MAX_ROWS) {
-            return Err(IoError::TooLarge("ODS merged cell exceeds worksheet bounds".into()));
-        }
-        if merged && ((cols > 1 && width > 1) || (rows > 1 && height > 1)) {
-            return Err(IoError::Format("repeated ODS cells have overlapping merges".into()));
         }
         let el = Some(el);
         // Extras of the cell element: a note, a link, a validation, pictures.
@@ -997,14 +1000,7 @@ impl Import {
         };
         // Older writers cache a formula's error as its text (`Err:508`, `#VALUE!`).
         let value = match value {
-            Value::Text(t)
-                if formula_text.is_some()
-                    && (t.starts_with("Err:")
-                        || CellError::parse(&t).is_some()
-                        || (t.starts_with('#') && (t.ends_with('!') || t.ends_with('?')) && t.len() <= 16)) =>
-            {
-                Value::Error(error_value(&t))
-            }
+            Value::Text(t) if formula_text.is_some() && is_error_text(&t) => Value::Error(error_value(&t)),
             v => v,
         };
         let mut cell = Cell::value(value);
@@ -1101,13 +1097,21 @@ impl Import {
         vnames.sort_by(|a, b| a.0.cmp(&b.0));
         for (name, ranges) in vnames {
             if let Some(def) = self.validations.get(&name) {
-                let mut v = def.v.clone();
+                let mut v = def.clone();
                 v.ranges = merge_ranges(ranges);
                 st.sheet.validations.push(v);
             }
         }
         self.images.extend(st.frames.drain(..).map(|f| (index, f)));
         self.wb.sheets.push(Arc::new(st.sheet));
+    }
+
+    fn read_master_pages(&mut self, m: &Elem) {
+        for p in m.children(Ns::Style, "master-page") {
+            if let Some(n) = p.attr(Ns::Style, "name") {
+                self.master_pages.insert(n.to_string(), p.clone());
+            }
+        }
     }
 
     fn sheet_index(&self) -> Option<usize> {
@@ -1118,20 +1122,21 @@ impl Import {
         let scope = self.sheet_index();
         for n in e.elems() {
             let Some(name) = n.attr(Ns::Table, "name") else { continue };
-            if n.is(Ns::Table, "named-range") {
-                if let Some(addr) = n.attr(Ns::Table, "cell-range-address") {
-                    self.names.push((name.to_string(), scope, addr.to_string(), true, n.attr(Ns::Table, "base-cell-address").map(str::to_string)));
-                }
-            } else if n.is(Ns::Table, "named-expression")
-                && let Some(expr) = n.attr(Ns::Table, "expression")
-            {
-                self.names.push((name.to_string(), scope, expr.to_string(), false, n.attr(Ns::Table, "base-cell-address").map(str::to_string)));
+            let range = n.is(Ns::Table, "named-range");
+            let text = match (range, n.is(Ns::Table, "named-expression")) {
+                (true, _) => n.attr(Ns::Table, "cell-range-address"),
+                (false, true) => n.attr(Ns::Table, "expression"),
+                _ => None,
+            };
+            if let Some(text) = text {
+                let base = n.attr(Ns::Table, "base-cell-address").map(str::to_string);
+                self.names.push(NameDef { name: name.to_string(), scope, text: text.to_string(), range, base });
             }
         }
     }
 
     pub(crate) fn finish_names(&mut self) {
-        for (name, scope, text, range, base) in std::mem::take(&mut self.names) {
+        for NameDef { name, scope, text, range, base } in std::mem::take(&mut self.names) {
             let formula = if range {
                 // `$Sheet1.$A$1:.$B$2`, possibly several ranges separated by spaces.
                 let parts: Vec<String> =
@@ -1155,7 +1160,7 @@ impl Import {
                 self.report.warn("Some ODS named ranges have names GridCraft can't use and were skipped.");
                 continue;
             }
-            // An unscoped "print range" from older files is the print area.
+            // A name defined twice in one scope keeps its first definition.
             if self.wb.names.iter().any(|n| n.name.eq_ignore_ascii_case(&name) && n.scope == scope) {
                 continue;
             }
@@ -1259,7 +1264,7 @@ impl Import {
             } else if cv.child(Ns::Table, "error-macro").is_some() {
                 v.show_error = false;
             }
-            self.validations.insert(name.to_string(), ValidationDef { v });
+            self.validations.insert(name.to_string(), v);
         }
     }
 
@@ -1580,21 +1585,11 @@ fn read_frame(f: &Elem, cell: Option<CellRef>) -> Option<Frame> {
         (None, Some(data)) => super::b64::decode(&data.raw_text(), 64 * 1024 * 1024).map(Inline::Picture),
         _ => None,
     };
+    let frame = Frame { cell, x: len("x"), y: len("y"), width: len("width"), height: len("height"), ..Frame::default() };
     if let Some(inline) = inline {
         let object = matches!(inline, Inline::Chart(_));
         let alt = f.child(Ns::Svg, "title").map(Elem::raw_text).unwrap_or_default();
-        return Some(Frame {
-            href: String::new(),
-            object,
-            shape: None,
-            inline: Some(inline),
-            cell,
-            x: len("x"),
-            y: len("y"),
-            width: len("width"),
-            height: len("height"),
-            alt,
-        });
+        return Some(Frame { object, inline: Some(inline), alt, ..frame });
     }
     let href = img.or(obj).and_then(|i| i.attr(Ns::XLink, "href"))?.to_string();
     let alt = f.child(Ns::Svg, "title").map(Elem::raw_text).or_else(|| f.child(Ns::Svg, "desc").map(Elem::raw_text)).unwrap_or_default();
@@ -1603,7 +1598,7 @@ fn read_frame(f: &Elem, cell: Option<CellRef>) -> Option<Frame> {
         Some(o) => (o.to_string(), true),
         None => (href, false),
     };
-    Some(Frame { href, object, shape: None, inline: None, cell, x: len("x"), y: len("y"), width: len("width"), height: len("height"), alt })
+    Some(Frame { href, object, alt, ..frame })
 }
 
 /// Pictures, charts and shapes among `parent`'s children, groups flattened.
@@ -1624,18 +1619,7 @@ fn drawings(parent: &Elem, cell: Option<CellRef>, styles: &super::shape::DrawSty
             continue;
         }
         if let Some(d) = super::shape::read(e, styles) {
-            out.push(Frame {
-                href: String::new(),
-                object: false,
-                inline: None,
-                cell,
-                x: d.x,
-                y: d.y,
-                width: d.width,
-                height: d.height,
-                alt: String::new(),
-                shape: Some(d),
-            });
+            out.push(Frame { cell, x: d.x, y: d.y, width: d.width, height: d.height, shape: Some(d), ..Frame::default() });
         }
     }
 }
@@ -1977,7 +1961,7 @@ fn cf_condition(value: &str, style: Box<Style>) -> Option<CfRule> {
 }
 
 impl Sink for Import {
-    fn capture(&mut self, ancestors: &[(Ns, String)], ns: Ns, name: &str) -> bool {
+    fn capture(&mut self, ns: Ns, name: &str) -> bool {
         if self.skip_depth.is_some() {
             return false;
         }
@@ -1987,9 +1971,7 @@ impl Sink for Import {
                 Ns::Office,
                 "font-face-decls" | "automatic-styles" | "styles" | "scripts" | "forms" | "event-listeners" | "master-styles" | "meta" | "settings",
             ) => true,
-            (Ns::Table, "table-column" | "table-row" | "named-expressions" | "shapes" | "table-source" | "scenario" | "dde-source") if in_table => {
-                true
-            }
+            (Ns::Table, "table-column" | "table-row" | "shapes" | "table-source" | "scenario" | "dde-source") if in_table => true,
             (Ns::CalcExt, "conditional-formats") if in_table => true,
             (
                 Ns::Table,
@@ -2005,8 +1987,7 @@ impl Sink for Import {
             ) => true,
             (Ns::Text, _) => true,
             (Ns::LoExt | Ns::CalcExt, _) if in_table => true,
-            (Ns::Table, "table") => false,
-            _ => ancestors.len() > 64,
+            _ => false,
         }
     }
 
@@ -2105,13 +2086,7 @@ impl Sink for Import {
             (Ns::Office, "font-face-decls") => self.read_fonts(&el),
             (Ns::Office, "automatic-styles") => self.read_style_list(&el, false),
             (Ns::Office, "styles") => self.read_style_list(&el, true),
-            (Ns::Office, "master-styles") => {
-                for p in el.children(Ns::Style, "master-page") {
-                    if let Some(n) = p.attr(Ns::Style, "name") {
-                        self.master_pages.insert(n.to_string(), p.clone());
-                    }
-                }
-            }
+            (Ns::Office, "master-styles") => self.read_master_pages(&el),
             (Ns::Office, "meta") => self.flat_meta = Some(el),
             (Ns::Office, "settings") => self.flat_settings = Some(el),
             (Ns::Table, "table-column") => self.column(&el)?,
@@ -2170,13 +2145,20 @@ impl Sink for Import {
     }
 }
 
-/// An error as a cell shows it: Excel's (`#DIV/0!`) or LibreOffice's numbered ones (`Err:532`),
-/// which map to the Excel error LibreOffice itself saves them as.
+/// Whether `text` is how a cell shows an error: Excel's (`#DIV/0!`), one in another language
+/// (`#VALORE!`, `#WERT!`) or LibreOffice's numbered ones (`Err:532`).
+fn is_error_text(text: &str) -> bool {
+    text.starts_with("Err:")
+        || CellError::parse(text).is_some()
+        || (text.starts_with('#') && (text.ends_with('!') || text.ends_with('?')) && text.len() <= 16)
+}
+
+/// The error a cell shows as `text` (see [`is_error_text`]); numbered ones map to the Excel
+/// error LibreOffice itself saves them as.
 fn error_value(text: &str) -> CellError {
     if let Some(e) = CellError::parse(text) {
         return e;
     }
-    // An error in another language (`#VALORE!`, `#WERT!`) is still an error.
     if text.starts_with('#') && (text.ends_with('!') || text.ends_with('?')) {
         return CellError::Value;
     }
