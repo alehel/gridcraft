@@ -142,21 +142,33 @@ impl Elem {
     }
 }
 
-/// Appends a paragraph's text to `out` (see [`Elem::paragraphs_text`]).
+/// A cell holds at most 1 MiB of text; the rest of a longer text is dropped.
+pub(crate) const MAX_CELL_TEXT: usize = 1024 * 1024;
+
+/// Appends a paragraph's text to `out` (see [`Elem::paragraphs_text`]), keeping `out` within
+/// [`MAX_CELL_TEXT`].
 pub(crate) fn paragraph_text(p: &Elem, out: &mut String) {
-    // A cell holds at most 1 MiB of text; the rest of a longer paragraph is dropped.
-    const MAX_CELL_TEXT: usize = 1024 * 1024;
+    paragraph_text_uncapped(p, out);
+    if out.len() > MAX_CELL_TEXT {
+        out.truncate(out.floor_char_boundary(MAX_CELL_TEXT));
+    }
+}
+
+/// [`paragraph_text`], stopping once `out` reaches the cap (it may pass it by a few bytes).
+fn paragraph_text_uncapped(p: &Elem, out: &mut String) {
     let mut started = false;
     let mut pending = false;
     let mut stack: Vec<&Node> = p.kids.iter().rev().collect();
     while let Some(n) = stack.pop() {
         if out.len() >= MAX_CELL_TEXT {
-            out.truncate(out.floor_char_boundary(MAX_CELL_TEXT));
             return;
         }
         match n {
             Node::Text(t) => {
                 for ch in t.chars() {
+                    if out.len() >= MAX_CELL_TEXT {
+                        return;
+                    }
                     if matches!(ch, ' ' | '\t' | '\n' | '\r') {
                         pending = started;
                     } else {

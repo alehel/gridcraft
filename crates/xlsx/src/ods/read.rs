@@ -203,6 +203,23 @@ struct LineRun {
     page_break: bool,
 }
 
+impl LineRun {
+    /// What the model holds for each line of the run, showing `size` (`None`: the sheet's
+    /// default), or `None` when that is all default. A size the file set by hand is custom; an
+    /// optimal one is recalculated.
+    fn info(&self, size: Option<f32>) -> Option<LineInfo> {
+        let special = size.is_some() || self.hidden || self.outline > 0 || self.style.is_some();
+        special.then_some(LineInfo {
+            size,
+            hidden: self.hidden,
+            outline: self.outline,
+            collapsed: self.collapsed,
+            style: self.style,
+            custom: !self.optimal && size.is_some(),
+        })
+    }
+}
+
 struct SheetState {
     sheet: Sheet,
     depth: usize,
@@ -223,8 +240,6 @@ struct SheetState {
     last_content_row: Option<u32>,
     print_ranges: Option<String>,
     frames: Vec<Frame>,
-    /// A cached copy of another document's sheet (an external reference's source), not a sheet.
-    external: bool,
     /// Cells whose style carries `style:map` conditions, by style name.
     mapped: HashMap<String, Vec<RangeRef>>,
     has_calcext_formats: bool,
@@ -322,6 +337,9 @@ pub(crate) struct Import {
     flat_meta: Option<Elem>,
     flat_settings: Option<Elem>,
     depth: usize,
+    /// The depth of a table being skipped: a cached copy of another document's sheet (the
+    /// source of an external reference), which is not a sheet of this workbook.
+    skip_depth: Option<usize>,
     cells: u64,
     blanks: u64,
     merges: u64,
@@ -365,6 +383,7 @@ impl Import {
             sheet: None,
             styles_ready: false,
             spreadsheet_seen: false,
+            skip_depth: None,
             flat: false,
             flat_meta: None,
             flat_settings: None,
@@ -621,7 +640,6 @@ impl Import {
             last_content_row: None,
             print_ranges: e.attr(Ns::Table, "print-ranges").map(str::to_string),
             frames: Vec::new(),
-            external: original.starts_with('\'') && original.contains("'#"),
             mapped: HashMap::new(),
             has_calcext_formats: false,
             open_merges: BTreeMap::new(),
@@ -707,7 +725,7 @@ impl Import {
     }
 
     fn row(&mut self, e: &Elem) -> Result<(), IoError> {
-        if self.sheet.as_ref().is_none_or(|s| s.external) {
+        if self.sheet.is_none() {
             return Ok(());
         }
         let repeat = attr_u32(e, Ns::Table, "number-rows-repeated", 1, u32::MAX)?;
@@ -1014,40 +1032,21 @@ impl Import {
 
     fn finish_sheet(&mut self) {
         let Some(mut st) = self.sheet.take() else { return };
-        if st.external {
-            return;
-        }
         let index = self.wb.sheets.len();
         // Columns: the most common width is the default.
         let default_w = most_common(st.cols.iter().map(|c| (c.size, c.count)));
         if let Some(w) = default_w {
             st.sheet.default_col_width = w;
         }
-        let mut entries = 0usize;
+        let mut budget = MAX_LINE_ENTRIES;
+        let mut capped = false;
         for c in &st.cols {
-            let special = c.size != default_w.or(Some(st.sheet.default_col_width)) || c.hidden || c.outline > 0 || c.style.is_some();
             if c.page_break && c.start > 0 {
                 st.sheet.print.col_breaks.push(c.start);
             }
-            if !special {
-                continue;
-            }
-            for i in c.start..c.start.saturating_add(c.count).min(MAX_COLS) {
-                entries += 1;
-                if entries > MAX_LINE_ENTRIES {
-                    break;
-                }
-                st.sheet.cols.insert(
-                    i,
-                    LineInfo {
-                        size: c.size.filter(|s| Some(*s) != default_w),
-                        hidden: c.hidden,
-                        outline: c.outline,
-                        collapsed: c.collapsed,
-                        style: c.style,
-                        custom: true,
-                    },
-                );
+            let size = c.size.filter(|w| !default_w.is_some_and(|d| same_size(*w, d)));
+            if let Some(info) = c.info(size) {
+                capped |= !store_run(&mut st.sheet.cols, c, MAX_COLS, info, &mut budget);
             }
         }
         // Rows: a run that fills the rest of the sheet sets the default height (writers pad the
@@ -1060,41 +1059,31 @@ impl Import {
         // another default.
         let font_h = pt_to_px(f64::from(self.wb.styles.get(StyleId::DEFAULT).font.size) * 1.28);
         let near = |h: f32| (h - font_h).abs() <= font_h * 0.2;
-        let default_h = match tail.filter(|r| !r.optimal).and_then(|r| r.size) {
-            Some(h) => h,
-            None => font_h,
-        };
+        let default_h = tail.filter(|r| !r.optimal).and_then(|r| r.size).unwrap_or(font_h);
         st.sheet.default_row_height = default_h;
-        let default_h = Some(default_h);
         let last = st.last_content_row.unwrap_or(0);
         for r in &st.rows {
             if r.page_break && r.start > 0 {
                 st.sheet.print.row_breaks.push(r.start);
             }
-            // An optimal height close to one line is the default; a taller one (wrapped or larger
-            // text) is kept as the automatic height it was.
-            let size = match r.size {
-                Some(h) if r.optimal && near(h) => None,
-                Some(h) if Some(h) == default_h => None,
-                other => other,
-            };
-            let custom = !r.optimal && size.is_some();
-            let special = size.is_some() || r.hidden || r.outline > 0 || r.style.is_some();
-            if !special {
-                continue;
-            }
             // The run that fills the rest of the sheet is the default height already.
             if Some(r.start) == tail_start && (r.start > last || r.style.is_none()) {
                 continue;
             }
-            for i in r.start..r.start.saturating_add(r.count).min(MAX_ROWS) {
-                entries += 1;
-                if entries > MAX_LINE_ENTRIES {
-                    self.report.warn("Some ODS row and column sizes beyond the import limit were not imported.");
-                    break;
-                }
-                st.sheet.rows.insert(i, LineInfo { size, hidden: r.hidden, outline: r.outline, collapsed: r.collapsed, style: r.style, custom });
+            // An optimal height close to one line is one line of the default font (the sheet's
+            // default, unless a manual tail set another); a taller one (wrapped or larger text)
+            // is kept as the automatic height it was.
+            let size = match r.size {
+                Some(h) if r.optimal && near(h) => Some(font_h),
+                other => other,
             }
+            .filter(|h| !same_size(*h, default_h));
+            if let Some(info) = r.info(size) {
+                capped |= !store_run(&mut st.sheet.rows, r, MAX_ROWS, info, &mut budget);
+            }
+        }
+        if capped {
+            self.report.warn("Some ODS row and column sizes beyond the import limit were not imported.");
         }
         if let Some((a, b)) = st.header_rows {
             st.sheet.print.title_rows = Some((a, b));
@@ -1756,11 +1745,27 @@ fn merge_ranges(mut ranges: Vec<RangeRef>) -> Vec<RangeRef> {
     out
 }
 
+/// Whether two row heights or column widths (in pixels) are the same size.
+fn same_size(a: f32, b: f32) -> bool {
+    (a - b).abs() < 0.01
+}
+
+/// Stores `info` for each line of `run` below `max`, taking one entry per line from `budget`;
+/// false when the budget ran out.
+fn store_run(lines: &mut BTreeMap<u32, LineInfo>, run: &LineRun, max: u32, info: LineInfo, budget: &mut usize) -> bool {
+    for i in run.start..run.start.saturating_add(run.count).min(max) {
+        let Some(left) = budget.checked_sub(1) else { return false };
+        *budget = left;
+        lines.insert(i, info);
+    }
+    true
+}
+
 fn most_common(items: impl Iterator<Item = (Option<f32>, u32)>) -> Option<f32> {
     let mut counts: Vec<(f32, u64)> = Vec::new();
     for (size, n) in items {
         let Some(s) = size else { continue };
-        match counts.iter_mut().find(|(v, _)| (*v - s).abs() < 0.01) {
+        match counts.iter_mut().find(|(v, _)| same_size(*v, s)) {
             Some((_, c)) => *c += u64::from(n),
             None => counts.push((s, u64::from(n))),
         }
@@ -1977,6 +1982,9 @@ fn cf_condition(value: &str, style: Box<Style>) -> Option<CfRule> {
 
 impl Sink for Import {
     fn capture(&mut self, ancestors: &[(Ns, String)], ns: Ns, name: &str) -> bool {
+        if self.skip_depth.is_some() {
+            return false;
+        }
         let in_table = self.sheet.is_some();
         match (ns, name) {
             (
@@ -2011,6 +2019,9 @@ impl Sink for Import {
             return Err(xml_error("expected one office:document-content root"));
         }
         self.depth += 1;
+        if self.skip_depth.is_some() {
+            return Ok(());
+        }
         match (el.ns, el.name.as_str()) {
             (Ns::Office, "spreadsheet") => {
                 if self.spreadsheet_seen {
@@ -2023,10 +2034,11 @@ impl Sink for Import {
                 }
                 self.ready_styles();
             }
-            (Ns::Table, "table") if self.spreadsheet_seen && self.sheet.is_none() => {
-                self.ready_styles();
-                self.open_table(el)?;
+            // An external reference's cached source table is named `'file:///…'#Sheet`.
+            (Ns::Table, "table") if el.attr(Ns::Table, "name").is_some_and(|n| n.starts_with('\'') && n.contains("'#")) => {
+                self.skip_depth = Some(self.depth);
             }
+            (Ns::Table, "table") if self.spreadsheet_seen && self.sheet.is_none() => self.open_table(el)?,
             (Ns::Table, "table-row-group") => {
                 if let Some(st) = self.sheet.as_mut() {
                     st.row_level = st.row_level.saturating_add(1).min(7);
@@ -2055,6 +2067,13 @@ impl Sink for Import {
     }
 
     fn close(&mut self, el: &Elem) -> Result<(), IoError> {
+        if let Some(d) = self.skip_depth {
+            if d == self.depth {
+                self.skip_depth = None;
+            }
+            self.depth = self.depth.saturating_sub(1);
+            return Ok(());
+        }
         self.depth = self.depth.saturating_sub(1);
         match (el.ns, el.name.as_str()) {
             (Ns::Table, "table") if self.sheet.as_ref().is_some_and(|s| s.depth == self.depth + 1) => self.finish_sheet(),

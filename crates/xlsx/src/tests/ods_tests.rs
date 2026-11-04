@@ -202,6 +202,10 @@ fn ods_expansion_bounds_stop_small_repeat_bombs() {
     let (wb, _) =
         read_ods(&row(r#"<table:table-cell office:value-type="string"><text:p><text:s text:c="4294967295"/></text:p></table:table-cell>"#)).unwrap();
     assert!(matches!(wb.sheets[0].value(CellRef::new(0, 0)), Value::Text(t) if t.len() <= 1024 * 1024));
+    // So is one long run of text in a single node.
+    let long = format!(r#"<table:table-cell office:value-type="string"><text:p>{}</text:p></table:table-cell>"#, "é".repeat(800_000));
+    let (wb, _) = read_ods(&row(&long)).unwrap();
+    assert!(matches!(wb.sheets[0].value(CellRef::new(0, 0)), Value::Text(t) if t.len() <= 1024 * 1024 && t.len() > 1_000_000));
     // More than four million cells, or 256 MiB of text, are refused before they are stored.
     let cells = ods(
         r#"<table:table table:name="Data"><table:table-row table:number-rows-repeated="1048576"><table:table-cell table:number-columns-repeated="5" office:value-type="float" office:value="1"/></table:table-row></table:table>"#,
@@ -538,4 +542,35 @@ fn ods_scroll_position_round_trips() {
     assert_eq!(back.sheets[0].view_top_left, CellRef::new(40, 3));
     assert_eq!(back.sheets[1].freeze, Some((2, 1)));
     assert_eq!(back.sheets[1].view_top_left, CellRef::new(30, 5));
+}
+
+/// A cached copy of another document's sheet is skipped as it opens: it is no sheet, isn't
+/// counted against the import limits, and warns of no renamed sheet.
+#[test]
+fn ods_external_source_tables_are_skipped() {
+    let big = r#"<table:table-row table:number-rows-repeated="1048576"><table:table-cell table:number-columns-repeated="5" office:value-type="float" office:value="1"/></table:table-row>"#;
+    let (wb, report) = read_ods(&ods(&format!(
+        r#"<table:table table:name="Data"><table:table-row><table:table-cell office:value-type="float" office:value="1"/></table:table-row></table:table><table:table table:name="'file:///tmp/other.ods'#Sheet1">{big}</table:table><table:table table:name="Second"><table:table-row><table:table-cell office:value-type="float" office:value="2"/></table:table-row></table:table>"#
+    )))
+    .unwrap();
+    assert_eq!(wb.sheets.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Data", "Second"]);
+    assert_eq!(wb.sheets[1].value(CellRef::new(0, 0)), Value::Number(2.0));
+    assert!(!report.warnings.iter().any(|w| w.contains("renamed")), "{:?}", report.warnings);
+}
+
+/// Optimal one-line rows stay one line high when a manual run at the end sets a taller default,
+/// and columns that state no width store nothing.
+#[test]
+fn ods_line_runs_keep_their_own_size_against_the_defaults() {
+    let styles = r#"<style:style style:name="ro1" style:family="table-row"><style:table-row-properties style:row-height="0.452cm" style:use-optimal-row-height="true"/></style:style><style:style style:name="ro2" style:family="table-row"><style:table-row-properties style:row-height="1cm" style:use-optimal-row-height="false"/></style:style>"#;
+    let (wb, _) = read_ods(&styled_ods(
+        styles,
+        r#"<table:table table:name="Data"><table:table-column table:number-columns-repeated="16384"/><table:table-row table:style-name="ro1" table:number-rows-repeated="3"><table:table-cell office:value-type="float" office:value="1"/></table:table-row><table:table-row table:style-name="ro2" table:number-rows-repeated="1048573"><table:table-cell/></table:table-row></table:table>"#,
+    ))
+    .unwrap();
+    let sh = &wb.sheets[0];
+    let one_line = sh.rows.get(&0).and_then(|i| i.size).unwrap_or(sh.default_row_height);
+    assert!(one_line < sh.default_row_height - 10.0, "{one_line} vs {}", sh.default_row_height);
+    assert!(sh.rows.get(&0).is_some_and(|i| !i.custom));
+    assert!(sh.cols.is_empty(), "{}", sh.cols.len());
 }
