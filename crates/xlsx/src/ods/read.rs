@@ -542,10 +542,14 @@ impl Import {
         self.ancestry(def).into_iter().rev().fold(self.default_props(), |p, c| style::merge(&p, c))
     }
 
-    fn base_style(&self) -> Style {
-        let p = self.default_props();
+    /// The style `p` describes on top of `base`, its data style's format included.
+    fn props_style(&self, p: &Props, base: &Style) -> Style {
         let code = p.data_style.as_deref().and_then(|d| numfmt::code(&self.data_styles, d));
-        style::to_style(&p, &baseline(), code)
+        style::to_style(p, base, code)
+    }
+
+    fn base_style(&self) -> Style {
+        self.props_style(&self.default_props(), &baseline())
     }
 
     /// Called once the styles are known: makes the workbook's default style the file's Default.
@@ -567,9 +571,8 @@ impl Import {
             Some(def) => self.resolve(def),
             None => self.default_props(),
         };
-        let code = props.data_style.as_deref().and_then(|d| numfmt::code(&self.data_styles, d));
         // The resolved properties are complete, so they apply to LibreOffice's baseline.
-        let id = self.wb.styles.intern(style::to_style(&props, &baseline(), code));
+        let id = self.wb.styles.intern(self.props_style(&props, &baseline()));
         self.ids.insert(name.to_string(), id);
         id
     }
@@ -586,8 +589,7 @@ impl Import {
     fn dxf(&self, name: &str) -> Style {
         let Some(def) = self.named.get(name).or_else(|| self.auto.get(name)).filter(|_| name != "Default") else { return Style::default() };
         let p = self.ancestry(def).into_iter().rev().fold(Props::default(), |p, c| style::merge(&p, c));
-        let code = p.data_style.as_deref().and_then(|d| numfmt::code(&self.data_styles, d));
-        style::to_style(&p, &Style::default(), code)
+        self.props_style(&p, &Style::default())
     }
 
     fn open_table(&mut self, e: &Elem) -> Result<(), IoError> {

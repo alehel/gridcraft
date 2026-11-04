@@ -74,8 +74,9 @@ pub(crate) struct CellStyleDef {
     pub maps: Vec<(String, String, Option<String>)>,
 }
 
-/// Parses a border (`0.74pt solid #000000`, `none`) with an optional `style:border-line-width`.
-fn border(s: &str, line_width: Option<&str>) -> Option<BorderLine> {
+/// Parses a border (`0.74pt solid #000000`, `none`). A double line's `style:border-line-width`
+/// (inner, gap, outer) doesn't change its kind.
+fn border(s: &str) -> Option<BorderLine> {
     let s = s.trim();
     if s.is_empty() || s == "none" || s == "hidden" {
         return Some(BorderLine::default());
@@ -101,17 +102,10 @@ fn border(s: &str, line_width: Option<&str>) -> Option<BorderLine> {
         return Some(BorderLine::default());
     }
     let w = width.unwrap_or(0.75);
-    // A double line's widths (inner, gap, outer) don't change its kind.
-    let _ = line_width;
     let style = match kind {
         "double" | "double-thin" => BorderStyle::Double,
-        "dotted" => {
-            if w > 1.0 {
-                BorderStyle::MediumDashDotDot
-            } else {
-                BorderStyle::Dotted
-            }
-        }
+        // Excel has no medium dotted line: a thick dotted one is still dotted.
+        "dotted" => BorderStyle::Dotted,
         "dashed" | "fine-dashed" => {
             if w > 1.0 {
                 BorderStyle::MediumDashed
@@ -134,9 +128,11 @@ fn border(s: &str, line_width: Option<&str>) -> Option<BorderLine> {
             }
         }
         _ => {
-            // LibreOffice's own lines: hairline 0.05pt, thin 0.74pt, medium 1.75pt, thick 2.5pt.
-            // A solid hairline draws as a fine solid line, which is Thin: Excel's Hair is dotted.
-            if w <= 1.5 {
+            // LibreOffice's own lines: hairline 0.05pt, thin 0.74pt, medium 1.75pt, thick 2.5pt;
+            // a hairline is Excel's Hair (written back as 0.06pt).
+            if w < 0.3 {
+                BorderStyle::Hair
+            } else if w <= 1.5 {
                 BorderStyle::Thin
             } else if w <= 2.25 {
                 BorderStyle::Medium
@@ -146,6 +142,21 @@ fn border(s: &str, line_width: Option<&str>) -> Option<BorderLine> {
         }
     };
     Some(BorderLine { style, color: col })
+}
+
+/// An ODF angle (`45`, `45deg`, `0.785rad`, `50grad`) in degrees.
+fn angle_deg(a: &str) -> Option<f64> {
+    let a = a.trim();
+    let (n, per_deg) = if let Some(n) = a.strip_suffix("deg") {
+        (n, 1.0)
+    } else if let Some(n) = a.strip_suffix("grad") {
+        (n, 400.0 / 360.0)
+    } else if let Some(n) = a.strip_suffix("rad") {
+        (n, std::f64::consts::PI / 180.0)
+    } else {
+        (a, 1.0)
+    };
+    n.trim().parse::<f64>().ok().map(|v| v / per_deg).filter(|d| d.is_finite())
 }
 
 fn font_weight_bold(s: &str) -> Option<bool> {
@@ -163,7 +174,8 @@ pub(crate) fn read_props(e: &Elem, fonts: &HashMap<String, String>) -> Props {
         cell_props(tc, &mut p);
     }
     if let Some(pp) = e.child(Ns::Style, "paragraph-properties") {
-        paragraph_props(e, pp, &mut p);
+        let cell_align = p.h.is_some();
+        paragraph_props(pp, cell_align, &mut p);
     }
     if let Some(tp) = e.child(Ns::Style, "text-properties") {
         text_props(tp, fonts, &mut p);
@@ -177,24 +189,23 @@ fn cell_props(tc: &Elem, p: &mut Props) {
         p.background = Some(if bg == "transparent" { None } else { color(bg) });
     }
     if let Some(b) = tc.attr(Ns::Fo, "border") {
-        let all = border(b, tc.attr(Ns::Style, "border-line-width"));
+        let all = border(b);
         for side in p.borders.iter_mut().take(4) {
             *side = all;
         }
     }
     for (i, side) in ["left", "right", "top", "bottom"].iter().enumerate() {
-        if let Some(b) = tc.attr(Ns::Fo, &format!("border-{side}")) {
-            let lw = tc.attr(Ns::Style, &format!("border-line-width-{side}"));
-            if let Some(slot) = p.borders.get_mut(i) {
-                *slot = border(b, lw);
-            }
+        if let Some(b) = tc.attr(Ns::Fo, &format!("border-{side}"))
+            && let Some(slot) = p.borders.get_mut(i)
+        {
+            *slot = border(b);
         }
     }
     if let Some(b) = tc.attr(Ns::Style, "diagonal-tl-br") {
-        p.borders[4] = border(b, None);
+        p.borders[4] = border(b);
     }
     if let Some(b) = tc.attr(Ns::Style, "diagonal-bl-tr") {
-        p.borders[5] = border(b, None);
+        p.borders[5] = border(b);
     }
     if let Some(w) = tc.attr(Ns::Fo, "wrap-option") {
         p.wrap = Some(w == "wrap");
@@ -217,7 +228,7 @@ fn cell_props(tc: &Elem, p: &mut Props) {
         }
     }
     if let Some(a) = tc.attr(Ns::Style, "rotation-angle") {
-        let deg = a.trim().trim_end_matches("deg").parse::<f64>().ok().filter(|d| d.is_finite()).map(|d| d.rem_euclid(360.0).round() as i16);
+        let deg = angle_deg(a).map(|d| (d.round() as i64).rem_euclid(360) as i16);
         if let Some(d) = deg {
             p.rotation = Some(match d {
                 0..=90 => d,
@@ -244,10 +255,10 @@ fn cell_props(tc: &Elem, p: &mut Props) {
     }
 }
 
-/// `style:paragraph-properties`: horizontal alignment and indent.
-fn paragraph_props(e: &Elem, pp: &Elem, p: &mut Props) {
-    let source_fix = e.child(Ns::Style, "table-cell-properties").and_then(|t| t.attr(Ns::Style, "text-align-source")) != Some("value-type");
-    if source_fix && p.h != Some(HAlign::Fill) {
+/// `style:paragraph-properties`: alignment, unless the cell's properties already decided it
+/// (`cell_align`: filled, or aligned by value type), and indent.
+fn paragraph_props(pp: &Elem, cell_align: bool, p: &mut Props) {
+    if !cell_align {
         match pp.attr(Ns::Fo, "text-align") {
             Some("start" | "left") => p.h = Some(HAlign::Left),
             Some("center") => p.h = Some(HAlign::Center),
@@ -332,36 +343,21 @@ pub(crate) fn merge(base: &Props, over: &Props) -> Props {
 /// The style the properties describe, on top of `base`.
 pub(crate) fn to_style(p: &Props, base: &Style, num_fmt: Option<String>) -> Style {
     let mut s = base.clone();
+    // Each stated property replaces the base's.
+    macro_rules! apply {
+        ($($prop:ident => $($field:ident).+),* $(,)?) => { $( if let Some(v) = &p.$prop { s.$($field).+ = v.clone(); } )* };
+    }
+    apply!(
+        font_size => font.size, bold => font.bold, italic => font.italic, underline => font.underline, strike => font.strike,
+        color => font.color, vert => font.vert, h => align.h, v => align.v, wrap => align.wrap, shrink => align.shrink,
+        indent => align.indent, rotation => align.rotation, protection => protection,
+    );
     if let Some(n) = &p.font_name {
         s.font.name.clone_from(n);
         s.font.minor = false;
     }
-    if let Some(v) = p.font_size {
-        s.font.size = v;
-    }
-    if let Some(v) = p.bold {
-        s.font.bold = v;
-    }
-    if let Some(v) = p.italic {
-        s.font.italic = v;
-    }
-    if let Some(v) = p.underline {
-        s.font.underline = v;
-    }
-    if let Some(v) = p.strike {
-        s.font.strike = v;
-    }
-    if let Some(v) = p.color {
-        s.font.color = v;
-    }
-    if let Some(v) = p.vert {
-        s.font.vert = v;
-    }
     if let Some(bg) = p.background {
-        s.fill = match bg {
-            Some(c) => Fill::solid(c),
-            None => Fill::default(),
-        };
+        s.fill = bg.map_or_else(Fill::default, Fill::solid);
     }
     let slots: [&mut BorderLine; 6] =
         [&mut s.borders.left, &mut s.borders.right, &mut s.borders.top, &mut s.borders.bottom, &mut s.borders.diag_down, &mut s.borders.diag_up];
@@ -369,27 +365,6 @@ pub(crate) fn to_style(p: &Props, base: &Style, num_fmt: Option<String>) -> Styl
         if let Some(b) = b {
             *slot = *b;
         }
-    }
-    if let Some(v) = p.h {
-        s.align.h = v;
-    }
-    if let Some(v) = p.v {
-        s.align.v = v;
-    }
-    if let Some(v) = p.wrap {
-        s.align.wrap = v;
-    }
-    if let Some(v) = p.shrink {
-        s.align.shrink = v;
-    }
-    if let Some(v) = p.indent {
-        s.align.indent = v;
-    }
-    if let Some(v) = p.rotation {
-        s.align.rotation = v;
-    }
-    if let Some(v) = p.protection {
-        s.protection = v;
     }
     if let Some(code) = num_fmt {
         s.num_fmt = gridcraft_model::NumFmt::new(&code);
@@ -444,23 +419,19 @@ pub(crate) fn write_props(s: &Style, base: &Style, theme: &gridcraft_model::Them
             }
         }
     }
-    let sides = [
-        ("left", s.borders.left, base.borders.left),
-        ("right", s.borders.right, base.borders.right),
-        ("top", s.borders.top, base.borders.top),
-        ("bottom", s.borders.bottom, base.borders.bottom),
-    ];
+    let sides = [("left", s.borders.left), ("right", s.borders.right), ("top", s.borders.top), ("bottom", s.borders.bottom)];
     if s.borders != base.borders {
-        for (side, b, _) in sides {
+        for (side, b) in sides {
             let _ = write!(tc, " fo:border-{side}=\"{}\"", border_text(&b, theme));
             if b.style == BorderStyle::Double {
                 let _ = write!(tc, " style:border-line-width-{side}=\"0.35pt 0.4pt 0.35pt\"");
             }
         }
-        if !s.borders.diag_down.is_none() {
+        // A diagonal is written whenever it differs from the base's, `none` when it was cleared.
+        if s.borders.diag_down != base.borders.diag_down {
             let _ = write!(tc, " style:diagonal-tl-br=\"{}\"", border_text(&s.borders.diag_down, theme));
         }
-        if !s.borders.diag_up.is_none() {
+        if s.borders.diag_up != base.borders.diag_up {
             let _ = write!(tc, " style:diagonal-bl-tr=\"{}\"", border_text(&s.borders.diag_up, theme));
         }
     }
@@ -608,9 +579,40 @@ mod tests {
 
     #[test]
     fn borders_read() {
-        assert_eq!(border("0.74pt solid #ff0000", None), Some(BorderLine { style: BorderStyle::Thin, color: Color::Rgb(0xff0000) }));
-        assert_eq!(border("none", None), Some(BorderLine::default()));
-        assert_eq!(border("2.49pt solid #000000", None).map(|b| b.style), Some(BorderStyle::Thick));
-        assert_eq!(border("1.1pt double #000000", None).map(|b| b.style), Some(BorderStyle::Double));
+        assert_eq!(border("0.74pt solid #ff0000"), Some(BorderLine { style: BorderStyle::Thin, color: Color::Rgb(0xff0000) }));
+        assert_eq!(border("none"), Some(BorderLine::default()));
+        assert_eq!(border("2.49pt solid #000000").map(|b| b.style), Some(BorderStyle::Thick));
+        assert_eq!(border("1.1pt double #000000").map(|b| b.style), Some(BorderStyle::Double));
+        assert_eq!(border("2.5pt dotted #000000").map(|b| b.style), Some(BorderStyle::Dotted));
+    }
+
+    /// An angle just under a full turn is upright, and every ODF angle unit reads.
+    #[test]
+    fn rotation_angles_read_in_any_unit() {
+        let rotation = |a: &str| {
+            let xml =
+                format!(r#"<style:table-cell-properties xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" style:rotation-angle="{a}"/>"#);
+            let Ok(tree) = super::super::dom::parse_tree(xml.as_bytes()) else { return None };
+            let mut p = Props::default();
+            cell_props(&tree, &mut p);
+            p.rotation
+        };
+        assert_eq!(rotation("359.6"), Some(0));
+        assert_eq!(rotation("45deg"), Some(45));
+        assert_eq!(rotation("50grad"), Some(45));
+        assert_eq!(rotation("1.5707963rad"), Some(90));
+        assert_eq!(rotation("315"), Some(-45));
+    }
+
+    /// A diagonal the base has and the style clears is written as `none`, so the base's doesn't
+    /// show through.
+    #[test]
+    fn cleared_diagonals_are_written() {
+        let theme = gridcraft_model::Theme::default();
+        let mut base = Style::default();
+        base.borders.diag_down = BorderLine { style: BorderStyle::Thin, color: Color::Auto };
+        let props = write_props(&Style::default(), &base, &theme);
+        assert!(props.contains("style:diagonal-tl-br=\"none\""), "{props}");
+        assert!(!props.contains("diagonal-bl-tr"), "{props}");
     }
 }
