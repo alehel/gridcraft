@@ -12,7 +12,7 @@ use gridcraft_model::{
 };
 
 use super::formula::{self, Tables};
-use super::read::{anchor_pt, baseline};
+use super::read::{anchor_pt, baseline, sheet_lines};
 use super::{OdsKind, numfmt, page, settings, style};
 use crate::IoError;
 use crate::package::ZipOut;
@@ -571,12 +571,13 @@ impl<'a> Writer<'a> {
                 esc_attr(name),
                 esc_attr(&formula::range_address(sheet, r))
             );
-            if !criteria.is_empty() {
-                o.push_str("<table:filter><table:filter-and>");
-                for (col, crit) in criteria {
-                    filter_condition(o, *col, crit);
-                }
-                o.push_str("</table:filter-and></table:filter>");
+            // Only the criteria ODF can hold are written; with none, no filter element.
+            let mut conditions = String::new();
+            for (col, crit) in criteria {
+                filter_condition(&mut conditions, *col, crit);
+            }
+            if !conditions.is_empty() {
+                let _ = write!(o, "<table:filter><table:filter-and>{conditions}</table:filter-and></table:filter>");
             }
             o.push_str("</table:database-range>");
         };
@@ -953,9 +954,10 @@ impl<'a> Writer<'a> {
         out.push_str("<table:shapes>");
         // One stacking order over shapes, charts and pictures, in the order they are drawn.
         let mut z = 0usize;
+        let lines = sheet_lines(sh);
         for shp in &sh.shapes {
             let name = format!("shp{}", self.graphics.len() + 1);
-            let (x, y) = anchor_pt(sh, &shp.anchor);
+            let (x, y) = anchor_pt(&lines, &shp.anchor);
             if let Some(xml) = super::shape::shape_xml(shp, &name, x, y, z) {
                 z += 1;
                 out.push_str(&xml);
@@ -965,7 +967,7 @@ impl<'a> Writer<'a> {
         for c in &sh.charts {
             let dir = format!("Object {}", self.objects.len() + 1);
             // Anchors are in pixels at 96 dpi; the file takes points.
-            let (x, y) = anchor_pt(sh, &c.anchor);
+            let (x, y) = anchor_pt(&lines, &c.anchor);
             let content = super::chart::write(c, &self.wb.theme);
             let object = if self.flat {
                 // The chart's own document, inline.
@@ -986,7 +988,7 @@ impl<'a> Writer<'a> {
         for img in &sh.images {
             let ext = crate::drawing::image_ext(&img.mime, &img.data);
             let path = format!("Pictures/{}.{ext}", self.pictures.len() + 1);
-            let (x, y) = anchor_pt(sh, &img.anchor);
+            let (x, y) = anchor_pt(&lines, &img.anchor);
             let image = if self.flat {
                 format!("<draw:image><office:binary-data>{}</office:binary-data></draw:image>", gridcraft_model::b64::encode(&img.data))
             } else {
