@@ -1264,14 +1264,15 @@ impl Import {
         }
         // A database range's name must be new in every scope.
         let mut taken: std::collections::HashSet<String> = defined.into_iter().map(|(_, n)| n).collect();
+        let sheets: HashMap<String, usize> = self.wb.sheets.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for db in std::mem::take(&mut self.database_ranges) {
-            self.database_range(&db, &mut taken);
+            self.database_range(&db, &sheets, &mut taken);
         }
     }
 
     /// A database range: a defined name when its name isn't `taken` (folded) in any scope, and
     /// the sheet's autofilter when it shows filter buttons.
-    fn database_range(&mut self, db: &Elem, taken: &mut std::collections::HashSet<String>) {
+    fn database_range(&mut self, db: &Elem, sheets: &HashMap<String, usize>, taken: &mut std::collections::HashSet<String>) {
         let Some(addr) = db.attr(Ns::Table, "target-range-address") else { return };
         let (sheet, range) = match formula::range_on_sheet(addr) {
             Some(v) => v,
@@ -1281,7 +1282,7 @@ impl Import {
         if let Some(name) = db.attr(Ns::Table, "name")
             && !name.starts_with("__Anonymous")
             && gridcraft_formula::parse_name(name).is_ok()
-            && self.wb.sheets.iter().any(|s| s.name == sheet)
+            && sheets.contains_key(&sheet)
             && taken.insert(name.to_lowercase())
         {
             let r = formula::absolute(&sheet, range, false);
@@ -1296,8 +1297,29 @@ impl Import {
         if db.attr(Ns::Table, "display-filter-buttons") != Some("true") {
             return;
         }
-        let Some(idx) = self.wb.sheets.iter().position(|s| s.name == sheet) else { return };
-        let mut criteria: Vec<(u32, FilterCriterion)> = Vec::new();
+        let Some(&idx) = sheets.get(&sheet) else { return };
+        // An autofilter holds one criterion per column of its range.
+        let width = range.width();
+        let mut by_field: BTreeMap<u32, FilterCriterion> = BTreeMap::new();
+        let mut outside = false;
+        let mut add = |field: u32, crit: FilterCriterion| {
+            if field >= width {
+                outside = true;
+                return;
+            }
+            match by_field.entry(field) {
+                std::collections::btree_map::Entry::Vacant(v) => {
+                    v.insert(crit);
+                }
+                // A second custom condition on a column is ANDed with the first.
+                std::collections::btree_map::Entry::Occupied(mut o) => {
+                    if let (FilterCriterion::Custom { b: b @ None, .. }, FilterCriterion::Custom { a, .. }) = (o.get_mut(), crit) {
+                        *b = Some(a);
+                    }
+                }
+            }
+        };
+        let mut unread = false;
         if let Some(filter) = db.child(Ns::Table, "filter") {
             // A filter is an AND of conditions, each one alone or an OR of two on one column (as
             // an autofilter column's custom filter is).
@@ -1308,33 +1330,29 @@ impl Import {
             };
             for g in groups {
                 if g.is(Ns::Table, "filter-condition") {
-                    let Some((field, crit)) = filter_criterion(g) else { continue };
-                    // A second custom condition on a column is ANDed with the first.
-                    if let FilterCriterion::Custom { a, .. } = &crit
-                        && let Some((_, FilterCriterion::Custom { b: b @ None, .. })) = criteria.iter_mut().find(|(f, _)| *f == field)
-                    {
-                        *b = Some(a.clone());
-                        continue;
+                    if let Some((field, crit)) = filter_criterion(g) {
+                        add(field, crit);
                     }
-                    criteria.push((field, crit));
                 } else if g.is(Ns::Table, "filter-or") {
-                    let conds: Vec<(u32, FilterCriterion)> = g.children(Ns::Table, "filter-condition").filter_map(filter_criterion).collect();
+                    let conds: Vec<(u32, FilterCriterion)> = g.children(Ns::Table, "filter-condition").take(3).filter_map(filter_criterion).collect();
                     match conds.as_slice() {
                         [(f, FilterCriterion::Custom { a, .. }), (f2, FilterCriterion::Custom { a: b, .. })] if f == f2 => {
-                            criteria.push((*f, FilterCriterion::Custom { a: a.clone(), b: Some(b.clone()), and: false }));
+                            add(*f, FilterCriterion::Custom { a: a.clone(), b: Some(b.clone()), and: false });
                         }
-                        [one] => criteria.push(one.clone()),
-                        _ => self.report.warn("Some ODS filters combine conditions in ways GridCraft doesn't read; they were left out."),
+                        [one] => add(one.0, one.1.clone()),
+                        _ => unread = true,
                     }
                 }
             }
         }
-        // A criterion for a column outside the range has nothing to filter.
-        let width = range.width();
-        if criteria.iter().any(|(f, _)| *f >= width) {
-            self.report.warn("Some ODS filter conditions name columns outside their range and were not imported.");
-            criteria.retain(|(f, _)| *f < width);
+        if unread {
+            self.report.warn("Some ODS filters combine conditions in ways GridCraft doesn't read; they were left out.");
         }
+        // A criterion for a column outside the range has nothing to filter.
+        if outside {
+            self.report.warn("Some ODS filter conditions name columns outside their range and were not imported.");
+        }
+        let criteria: Vec<(u32, FilterCriterion)> = by_field.into_iter().collect();
         if let Some(sheet) = self.wb.sheets.get_mut(idx) {
             Arc::make_mut(sheet).autofilter = Some(AutoFilter { range, criteria });
         }
@@ -1659,7 +1677,7 @@ fn filter_criterion(cond: &Elem) -> Option<(u32, FilterCriterion)> {
 
 /// The offsets of a sheet's columns or rows in points, for placing drawings: the lines with an
 /// entry, each with where it starts and its size, and the size of the lines without one.
-struct Lines {
+pub(crate) struct Lines {
     entries: Vec<(u32, f32, f32)>,
     default: f32,
     max: u32,
@@ -1709,9 +1727,7 @@ struct SheetLines(HashMap<usize, (Lines, Lines)>);
 
 impl SheetLines {
     fn get(&mut self, index: usize, sheet: &Sheet) -> (&Lines, &Lines) {
-        let (c, r) = self.0.entry(index).or_insert_with(|| {
-            (Lines::new(&sheet.cols, sheet.default_col_width, MAX_COLS), Lines::new(&sheet.rows, sheet.default_row_height, MAX_ROWS))
-        });
+        let (c, r) = self.0.entry(index).or_insert_with(|| sheet_lines(sheet));
         (c, r)
     }
 }
@@ -1739,10 +1755,14 @@ fn place_anchor((cols, rows): (&Lines, &Lines), f: &Frame) -> Anchor {
     }
 }
 
-/// Where an anchor's top-left corner is on the sheet, in points (anchors are in pixels).
-pub(crate) fn anchor_pt(sheet: &Sheet, a: &Anchor) -> (f32, f32) {
-    let cols = Lines::new(&sheet.cols, sheet.default_col_width, MAX_COLS);
-    let rows = Lines::new(&sheet.rows, sheet.default_row_height, MAX_ROWS);
+/// A sheet's column and row offsets.
+pub(crate) fn sheet_lines(sheet: &Sheet) -> (Lines, Lines) {
+    (Lines::new(&sheet.cols, sheet.default_col_width, MAX_COLS), Lines::new(&sheet.rows, sheet.default_row_height, MAX_ROWS))
+}
+
+/// Where an anchor's top-left corner is on its sheet (with offsets `lines`), in points
+/// (anchors are in pixels).
+pub(crate) fn anchor_pt((cols, rows): &(Lines, Lines), a: &Anchor) -> (f32, f32) {
     (cols.offset(a.cell.col) + a.dx * 0.75, rows.offset(a.cell.row) + a.dy * 0.75)
 }
 
@@ -1917,16 +1937,16 @@ fn store_run(lines: &mut BTreeMap<u32, LineInfo>, run: &LineRun, max: u32, info:
     true
 }
 
+/// The size most lines have, sizes counted to a hundredth of a pixel (each as first seen).
 fn most_common(items: impl Iterator<Item = (Option<f32>, u32)>) -> Option<f32> {
-    let mut counts: Vec<(f32, u64)> = Vec::new();
+    let mut counts: HashMap<i64, (usize, f32, u64)> = HashMap::new();
     for (size, n) in items {
-        let Some(s) = size else { continue };
-        match counts.iter_mut().find(|(v, _)| same_size(*v, s)) {
-            Some((_, c)) => *c += u64::from(n),
-            None => counts.push((s, u64::from(n))),
-        }
+        let Some(s) = size.filter(|s| s.is_finite()) else { continue };
+        let seen = counts.len();
+        counts.entry((f64::from(s) * 100.0).round() as i64).or_insert((seen, s, 0)).2 += u64::from(n);
     }
-    counts.into_iter().max_by_key(|(_, c)| *c).map(|(v, _)| v)
+    // Ties go to the size seen last.
+    counts.into_values().max_by_key(|&(first, _, c)| (c, first)).map(|(_, v, _)| v)
 }
 
 /// Splits `f(a;b)` style arguments at top-level `;` or `,`.
