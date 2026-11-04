@@ -1559,14 +1559,24 @@ fn row_height_pt(sheet: &Sheet, i: u32) -> f32 {
     }
     info.and_then(|c| c.size).unwrap_or(sheet.default_row_height) * 0.75
 }
-fn sheet_x(sheet: &Sheet, col: u32) -> f32 {
-    (0..col.min(MAX_COLS)).map(|i| col_width_pt(sheet, i)).sum()
+/// Points from the sheet's left edge to column `col`'s; columns without an entry all have the
+/// default width.
+pub(crate) fn sheet_x(sheet: &Sheet, col: u32) -> f32 {
+    let custom: f32 = sheet.cols.range(..col).map(|(i, _)| col_width_pt(sheet, *i)).sum();
+    let n = sheet.cols.range(..col).count() as f32;
+    custom + (col as f32 - n) * sheet.default_col_width * 0.75
 }
-fn sheet_y(sheet: &Sheet, row: u32) -> f32 {
-    // Rows without an entry all have the default height.
+
+/// Points from the sheet's top edge to row `row`'s.
+pub(crate) fn sheet_y(sheet: &Sheet, row: u32) -> f32 {
     let custom: f32 = sheet.rows.range(..row).map(|(i, _)| row_height_pt(sheet, *i)).sum();
     let n = sheet.rows.range(..row).count() as f32;
     custom + (row as f32 - n) * sheet.default_row_height * 0.75
+}
+
+/// Where an anchor's top-left corner is on the sheet, in points (anchors are in pixels).
+pub(crate) fn anchor_pt(sheet: &Sheet, a: &Anchor) -> (f32, f32) {
+    (sheet_x(sheet, a.cell.col) + a.dx * 0.75, sheet_y(sheet, a.cell.row) + a.dy * 0.75)
 }
 fn locate(mut pos: f32, size: impl Fn(u32) -> f32, max: u32) -> (u32, f32) {
     let mut i = 0;

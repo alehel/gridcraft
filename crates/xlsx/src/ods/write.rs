@@ -12,7 +12,7 @@ use gridcraft_model::{
 };
 
 use super::formula::{self, Tables};
-use super::read::baseline;
+use super::read::{anchor_pt, baseline};
 use super::{OdsKind, numfmt, page, settings, style};
 use crate::IoError;
 use crate::package::ZipOut;
@@ -30,8 +30,7 @@ pub fn write_ods(wb: &Workbook) -> Result<Vec<u8>, IoError> {
 /// shows it), as spreadsheet applications write it.
 pub fn write_ods_with(wb: &Workbook, kind: OdsKind, display: Option<Display<'_>>) -> Result<Vec<u8>, IoError> {
     let mut w = Writer::new(wb, display);
-    let content = w.content();
-    let styles = w.styles();
+    let parts = w.parts();
     let mut zip = ZipOut::new();
     // ODF 1.3 part 2 §3.3: `mimetype` comes first and is stored uncompressed.
     zip.add_stored("mimetype", kind.mimetype().as_bytes())?;
@@ -50,26 +49,40 @@ pub fn write_ods_with(wb: &Workbook, kind: OdsKind, display: Option<Display<'_>>
         );
     }
     manifest.push_str("</manifest:manifest>");
+    let Parts { fonts, styles, content_auto, styles_auto, masters, body } = parts;
+    let content = document("document-content", &format!("{fonts}<office:automatic-styles>{content_auto}</office:automatic-styles>{body}"));
+    let styles = document("document-styles", &format!("{fonts}{styles}<office:automatic-styles>{styles_auto}</office:automatic-styles>{masters}"));
     zip.add("META-INF/manifest.xml", manifest.as_bytes())?;
     zip.add("content.xml", content.as_bytes())?;
     zip.add("styles.xml", styles.as_bytes())?;
-    zip.add("meta.xml", meta(wb).as_bytes())?;
-    zip.add("settings.xml", settings::write(wb).as_bytes())?;
+    zip.add("meta.xml", document("document-meta", &meta(wb)).as_bytes())?;
+    zip.add("settings.xml", document("document-settings", &settings::write(wb)).as_bytes())?;
     for (path, _, data) in &w.pictures {
         zip.add(path, data)?;
     }
-    for (dir, content) in &w.objects {
-        zip.add(&format!("{dir}/content.xml"), content.as_bytes())?;
+    for (dir, chart) in &w.objects {
+        zip.add(&format!("{dir}/content.xml"), chart.package().as_bytes())?;
     }
     zip.finish()
 }
 
-/// The children of the root element of one of this writer's documents.
-fn inner<'s>(doc: &'s str, root: &str) -> &'s str {
-    let Some(tag) = doc.find(&format!("<office:{root} ")) else { return "" };
-    let Some(open) = doc.get(tag..).and_then(|d| d.find('>')).map(|j| tag + j + 1) else { return "" };
-    let end = doc.rfind(&format!("</office:{root}>")).unwrap_or(doc.len());
-    doc.get(open..end).unwrap_or("")
+/// A package part: `inner` in the root element `office:{root}`.
+fn document(root: &str, inner: &str) -> String {
+    format!(r#"<?xml version="1.0" encoding="UTF-8"?><office:{root} {NS} office:version="1.3">{inner}</office:{root}>"#)
+}
+
+/// What the parts of a document hold, each as its element (or, for automatic styles, its
+/// children): a package puts them in its parts, a flat document in one tree.
+struct Parts {
+    fonts: String,
+    /// `office:styles`: the default and named styles.
+    styles: String,
+    /// The automatic styles of the content (columns, rows, tables, cells, data styles…) and of
+    /// the styles part (page layouts).
+    content_auto: String,
+    styles_auto: String,
+    masters: String,
+    body: String,
 }
 
 /// Encodes `wb` as a flat OpenDocument spreadsheet (`.fods`): one XML document holding what a
@@ -77,49 +90,17 @@ fn inner<'s>(doc: &'s str, root: &str) -> &'s str {
 pub fn write_fods(wb: &Workbook, display: Option<Display<'_>>) -> Result<Vec<u8>, IoError> {
     let mut w = Writer::new(wb, display);
     w.flat = true;
-    let content = w.content();
-    let styles = w.styles();
-    let content = inner(&content, "document-content");
-    let styles = inner(&styles, "document-styles");
-    let meta = meta(wb);
-    let settings = settings::write(wb);
-    // A part of one of the documents. Only the body holds documents of its own (inline charts,
-    // with their own parts), so it ends at the last closing tag; every other part at the first.
-    let section = |doc: &str, tag: &str| -> String {
-        let open = format!("<office:{tag}>");
-        let close = format!("</office:{tag}>");
-        let Some(a) = doc.find(&open) else { return String::new() };
-        let end = if tag == "body" { doc.rfind(&close) } else { doc.get(a..).and_then(|d| d.find(&close)).map(|b| a + b) };
-        match end {
-            Some(b) if a < b => doc.get(a..b + close.len()).unwrap_or("").to_string(),
-            _ => String::new(),
-        }
-    };
-    let mut o = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?><office:document {NS} office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.spreadsheet">"#
+    let Parts { fonts, styles, content_auto, styles_auto, masters, body } = w.parts();
+    let o = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><office:document {NS} office:version="1.3" office:mimetype="application/vnd.oasis.opendocument.spreadsheet">{}{}{fonts}{styles}<office:automatic-styles>{content_auto}{styles_auto}</office:automatic-styles>{masters}{body}</office:document>"#,
+        meta(wb),
+        settings::write(wb)
     );
-    o.push_str(&section(&meta, "meta"));
-    o.push_str(&section(&settings, "settings"));
-    o.push_str(&section(styles, "font-face-decls"));
-    o.push_str(&section(styles, "styles"));
-    // Both parts' automatic styles (cells and pages) in one list.
-    o.push_str("<office:automatic-styles>");
-    let auto = |doc: &str| {
-        section(doc, "automatic-styles").trim_start_matches("<office:automatic-styles>").trim_end_matches("</office:automatic-styles>").to_string()
-    };
-    o.push_str(&auto(content));
-    o.push_str(&auto(styles));
-    o.push_str("</office:automatic-styles>");
-    o.push_str(&section(styles, "master-styles"));
-    o.push_str(&section(content, "body"));
-    o.push_str("</office:document>");
     Ok(o.into_bytes())
 }
 
 fn meta(wb: &Workbook) -> String {
-    let mut o = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-meta {NS} office:version="1.3"><office:meta><meta:generator>GridCraft</meta:generator>"#
-    );
+    let mut o = String::from("<office:meta><meta:generator>GridCraft</meta:generator>");
     let p = &wb.props;
     if !p.title.is_empty() {
         let _ = write!(o, "<dc:title>{}</dc:title>", esc(&p.title));
@@ -136,7 +117,7 @@ fn meta(wb: &Workbook) -> String {
     for k in p.keywords.split([',', ';']).map(str::trim).filter(|k| !k.is_empty()) {
         let _ = write!(o, "<meta:keyword>{}</meta:keyword>", esc(k));
     }
-    o.push_str("</office:meta></office:document-meta>");
+    o.push_str("</office:meta>");
     o
 }
 
@@ -199,17 +180,19 @@ struct Writer<'a> {
     flat: bool,
     /// Automatic cell styles: style id → name.
     cell_styles: BTreeMap<StyleId, String>,
-    /// Data styles: format code → name.
-    data_styles: HashMap<String, String>,
-    data_xml: String,
+    /// Data styles by format code: name, elements, and whether a named style uses it (it then
+    /// goes with the named styles, where every style can refer to it).
+    data_styles: HashMap<String, (String, String, bool)>,
+    /// Format codes in the order their data styles were made.
+    data_order: Vec<String>,
     col_styles: Vec<(u32, String)>,
     row_styles: Vec<(u32, bool, String)>,
     /// Named conditional-format styles (`ConditionalStyle_N`) and their properties.
     cf_styles: Vec<String>,
     fonts: Vec<String>,
     pictures: Vec<(String, String, std::sync::Arc<Vec<u8>>)>,
-    /// Embedded chart objects: folder (`Object 1`) and its `content.xml`.
-    objects: Vec<(String, String)>,
+    /// Embedded chart objects: folder (`Object 1`) and its document.
+    objects: Vec<(String, super::chart::ChartDoc)>,
     /// Graphic styles of shapes.
     graphics: Vec<String>,
     validations: Vec<(String, String)>,
@@ -277,7 +260,7 @@ impl<'a> Writer<'a> {
             flat: false,
             cell_styles: BTreeMap::new(),
             data_styles: HashMap::new(),
-            data_xml: String::new(),
+            data_order: Vec::new(),
             col_styles: Vec::new(),
             row_styles: Vec::new(),
             cf_styles: Vec::new(),
@@ -295,15 +278,37 @@ impl<'a> Writer<'a> {
         }
     }
 
-    fn data_style(&mut self, code: &str) -> Option<String> {
-        if let Some(n) = self.data_styles.get(code) {
+    /// The name of the data style for `code` (`None` for General), made on first use; `named`
+    /// when a named style uses it.
+    fn data_style(&mut self, code: &str, named: bool) -> Option<String> {
+        if let Some((n, _, used_by_named)) = self.data_styles.get_mut(code) {
+            *used_by_named |= named;
             return Some(n.clone());
         }
         let name = format!("N{}", self.data_styles.len() + 100);
         let xml = numfmt::write_style(&name, code)?;
-        self.data_xml.push_str(&xml);
-        self.data_styles.insert(code.to_string(), name.clone());
+        self.data_styles.insert(code.to_string(), (name.clone(), xml, named));
+        self.data_order.push(code.to_string());
         Some(name)
+    }
+
+    /// The data styles kept with the named styles (`named`) or with the automatic ones.
+    fn data_styles_xml(&self, named: bool) -> String {
+        self.data_order.iter().filter_map(|c| self.data_styles.get(c)).filter(|(_, _, n)| *n == named).map(|(_, xml, _)| xml.as_str()).collect()
+    }
+
+    /// A table-cell style named `name`: what `s` sets beyond `base`, with its data style.
+    fn cell_style_xml(&mut self, name: &str, s: &Style, base: &Style, parent: Option<&str>, named: bool) -> String {
+        let data = if s.num_fmt != base.num_fmt { self.data_style(s.num_fmt.as_str(), named) } else { None };
+        let mut o = format!(r#"<style:style style:name="{}" style:family="table-cell""#, esc_attr(name));
+        if let Some(p) = parent {
+            let _ = write!(o, r#" style:parent-style-name="{}""#, esc_attr(p));
+        }
+        if let Some(d) = data {
+            let _ = write!(o, r#" style:data-style-name="{d}""#);
+        }
+        let _ = write!(o, ">{}</style:style>", style::write_props(s, base, &self.wb.theme));
+        o
     }
 
     fn cell_style(&mut self, id: StyleId) -> String {
@@ -338,8 +343,9 @@ impl<'a> Writer<'a> {
         name
     }
 
+    /// The content's automatic styles but its data styles (they are placed once all are known).
     fn automatic_styles(&mut self) -> String {
-        let mut o = String::from("<office:automatic-styles>");
+        let mut o = String::new();
         for (key, name) in &self.col_styles {
             let _ = write!(
                 o,
@@ -367,31 +373,34 @@ impl<'a> Writer<'a> {
         }
         let default = self.wb.styles.get(StyleId::DEFAULT).clone();
         let ids: Vec<(StyleId, String)> = self.cell_styles.iter().map(|(k, v)| (*k, v.clone())).collect();
-        let mut cells = String::new();
         for (id, name) in ids {
             let s = self.wb.styles.get(id).clone();
             if s.font.name != default.font.name {
                 self.font(&s.font.name);
             }
-            let data = if s.num_fmt != default.num_fmt { self.data_style(s.num_fmt.as_str()) } else { None };
-            let data_attr = data.map(|d| format!(" style:data-style-name=\"{d}\"")).unwrap_or_default();
-            let props = style::write_props(&s, &default, &self.wb.theme);
-            let _ = write!(
-                cells,
-                r#"<style:style style:name="{name}" style:family="table-cell" style:parent-style-name="Default"{data_attr}>{props}</style:style>"#
-            );
+            o.push_str(&self.cell_style_xml(&name, &s, &default, Some("Default"), false));
         }
-        o.push_str(&self.data_xml);
-        o.push_str(&cells);
         o.push_str("<style:style style:name=\"gr1\" style:family=\"graphic\"><style:graphic-properties draw:stroke=\"none\" draw:fill=\"none\"/></style:style>");
         for g in &self.graphics {
             o.push_str(g);
         }
-        o.push_str("</office:automatic-styles>");
         o
     }
 
-    fn content(&mut self) -> String {
+    /// The document's parts, made in the order their contents depend on: the body names the
+    /// styles it uses, the automatic and named styles name their data styles and fonts.
+    fn parts(&mut self) -> Parts {
+        let body = self.body();
+        let cells = self.automatic_styles();
+        let (styles, styles_auto, masters) = self.styles();
+        let content_auto = format!("{}{cells}", self.data_styles_xml(false));
+        let styles = format!("<office:styles>{}{styles}</office:styles>", self.data_styles_xml(true));
+        let fonts = self.font_decls();
+        Parts { fonts, styles, content_auto, styles_auto, masters, body }
+    }
+
+    /// `office:body`: the spreadsheet.
+    fn body(&mut self) -> String {
         let mut body = String::from("<office:body><office:spreadsheet");
         if self.wb.protected_structure {
             body.push_str(" table:structure-protected=\"true\"");
@@ -430,13 +439,7 @@ impl<'a> Writer<'a> {
         body.push_str(&self.database_ranges());
         body.push_str(&super::pivot::write(self.wb));
         body.push_str("</office:spreadsheet></office:body>");
-        let auto = self.automatic_styles();
-        let mut o = format!(r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content {NS} office:version="1.3">"#);
-        o.push_str(&self.font_decls());
-        o.push_str(&auto);
-        o.push_str(&body);
-        o.push_str("</office:document-content>");
-        o
+        body
     }
 
     fn font_decls(&mut self) -> String {
@@ -535,7 +538,7 @@ impl<'a> Writer<'a> {
                 p.is_none_or(|p| p.select_unlocked)
             );
         }
-        self.shapes(i, sh, out);
+        self.shapes(sh, out);
         // Extent: every cell, row and column the sheet says anything about.
         let used = sh.cells.used_range();
         let mut max_row = used.map_or(0, |r| r.end.row);
@@ -589,13 +592,10 @@ impl<'a> Writer<'a> {
         while col < MAX_COLS {
             let info = sh.cols.get(&col).cloned().unwrap_or_default();
             // A run of identical columns.
-            let mut end = col + 1;
-            let limit = if col > max_col { MAX_COLS } else { max_col + 1 };
-            while end < limit && sh.cols.get(&end).cloned().unwrap_or_default() == info {
+            // Past the sheet's extent, the rest of the columns are one run.
+            let mut end = if col > max_col { MAX_COLS } else { col + 1 };
+            while end <= max_col && sh.cols.get(&end).cloned().unwrap_or_default() == info {
                 end += 1;
-            }
-            if col > max_col {
-                end = MAX_COLS;
             }
             while level < info.outline.min(7) {
                 level += 1;
@@ -879,15 +879,14 @@ impl<'a> Writer<'a> {
         }
     }
 
-    fn shapes(&mut self, _i: usize, sh: &Sheet, out: &mut String) {
+    fn shapes(&mut self, sh: &Sheet, out: &mut String) {
         if sh.images.is_empty() && sh.charts.is_empty() && sh.shapes.is_empty() {
             return;
         }
         out.push_str("<table:shapes>");
         for shp in &sh.shapes {
             let name = format!("shp{}", self.graphics.len() + 1);
-            let x = geometry_x(sh, shp.anchor.cell.col) + shp.anchor.dx * 0.75;
-            let y = geometry_y(sh, shp.anchor.cell.row) + shp.anchor.dy * 0.75;
+            let (x, y) = anchor_pt(sh, &shp.anchor);
             if let Some(xml) = super::shape::shape_xml(shp, &name, x, y, self.graphics.len()) {
                 out.push_str(&xml);
                 self.graphics.push(super::shape::style_xml(&name, shp, &self.wb.theme));
@@ -896,16 +895,11 @@ impl<'a> Writer<'a> {
         for c in &sh.charts {
             let dir = format!("Object {}", self.objects.len() + 1);
             // Anchors are in pixels at 96 dpi; the file takes points.
-            let x = geometry_x(sh, c.anchor.cell.col) + c.anchor.dx * 0.75;
-            let y = geometry_y(sh, c.anchor.cell.row) + c.anchor.dy * 0.75;
+            let (x, y) = anchor_pt(sh, &c.anchor);
             let content = super::chart::write(c, &self.wb.theme);
             let object = if self.flat {
                 // The chart's own document, inline.
-                let body = content.split_once("<office:document-content").map(|(_, rest)| rest).unwrap_or("");
-                let body = body.split_once('>').map(|(_, rest)| rest).unwrap_or("").trim_end_matches("</office:document-content>");
-                format!(
-                    r#"<draw:object><office:document office:mimetype="application/vnd.oasis.opendocument.chart" office:version="1.3">{body}</office:document></draw:object>"#
-                )
+                format!("<draw:object>{}</draw:object>", content.inline())
             } else {
                 format!(r#"<draw:object xlink:href="./{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/>"#, esc_attr(&dir))
             };
@@ -922,8 +916,7 @@ impl<'a> Writer<'a> {
         for img in &sh.images {
             let ext = picture_extension(&img.mime);
             let path = format!("Pictures/{}.{ext}", self.pictures.len() + 1);
-            let x = geometry_x(sh, img.anchor.cell.col) + img.anchor.dx * 0.75;
-            let y = geometry_y(sh, img.anchor.cell.row) + img.anchor.dy * 0.75;
+            let (x, y) = anchor_pt(sh, &img.anchor);
             let image = if self.flat {
                 format!("<draw:image><office:binary-data>{}</office:binary-data></draw:image>", super::b64::encode(&img.data))
             } else {
@@ -948,12 +941,8 @@ impl<'a> Writer<'a> {
 
     fn cf_style(&mut self, s: &Style) -> String {
         let name = format!("ConditionalStyle_{}", self.cf_styles.len() + 1);
-        let props = style::write_props(s, &Style::default(), &self.wb.theme);
-        let data = if s.num_fmt != Style::default().num_fmt { self.data_style(s.num_fmt.as_str()) } else { None };
-        let data_attr = data.map(|d| format!(" style:data-style-name=\"{d}\"")).unwrap_or_default();
-        self.cf_styles.push(format!(
-            r#"<style:style style:name="{name}" style:family="table-cell" style:parent-style-name="Default"{data_attr}>{props}</style:style>"#
-        ));
+        let xml = self.cell_style_xml(&name, s, &Style::default(), Some("Default"), true);
+        self.cf_styles.push(xml);
         name
     }
 
@@ -970,12 +959,7 @@ impl<'a> Writer<'a> {
             let base = first.start;
             let target: Vec<String> = cf.ranges.iter().map(|r| formula::range_address(&sh.name, *r)).collect();
             let base_addr = format!("{}.{}{}", formula::quote_sheet(&sh.name), col_to_letters(base.col), base.row + 1);
-            let expr = |t: &str| -> String {
-                match gridcraft_formula::parse(t.trim_start_matches('=')) {
-                    Ok(e) => formula::to_odf(&e, base, Some(&sh.name), &tables).trim_start_matches("of:=").to_string(),
-                    Err(_) => t.to_string(),
-                }
-            };
+            let expr = |t: &str| formula::odf_expr(t, base, &sh.name, &tables);
             let entry = |k: &CfValueKind| -> (String, &'static str) {
                 match k {
                     CfValueKind::Min => ("0".into(), "minimum"),
@@ -1058,41 +1042,32 @@ impl<'a> Writer<'a> {
         out.push_str(&o);
     }
 
-    fn styles(&mut self) -> String {
+    /// The styles part's pieces but its data styles: the default and named styles (the
+    /// children of `office:styles`), page layouts (automatic styles) and master pages.
+    fn styles(&mut self) -> (String, String, String) {
         let default = self.wb.styles.get(StyleId::DEFAULT).clone();
         let base = baseline();
-        let mut o = format!(r#"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS} office:version="1.3">"#);
-        o.push_str(&self.font_decls());
-        o.push_str("<office:styles>");
+        let mut o = String::new();
         let mut tp = String::new();
         style::write_font(&mut tp, &default.font, &base.font, &self.wb.theme);
         let _ = write!(o, "<style:default-style style:family=\"table-cell\"><style:text-properties{tp}/></style:default-style>");
-        let data = if !default.num_fmt.as_str().eq_ignore_ascii_case("General") { self.data_style(default.num_fmt.as_str()) } else { None };
+        // The font is the default style's; the Default style states the rest.
         let mut no_font = default.clone();
         no_font.font = base.font.clone();
-        let props = style::write_props(&no_font, &base, &self.wb.theme);
-        let data_attr = data.map(|d| format!(" style:data-style-name=\"{d}\"")).unwrap_or_default();
-        o.push_str(&self.data_xml_styles());
-        let _ = write!(o, r#"<style:style style:name="Default" style:family="table-cell"{data_attr}>{props}</style:style>"#);
+        o.push_str(&self.cell_style_xml("Default", &no_font, &base, None, true));
         for s in &self.cf_styles {
             o.push_str(s);
         }
         // The arrowhead of arrow shapes: a plain triangle.
         o.push_str(r#"<draw:marker draw:name="Arrow" svg:viewBox="0 0 10 10" svg:d="M5 0 L10 10 L0 10 Z"/>"#);
-        o.push_str("</office:styles><office:automatic-styles>");
+        let mut layouts = String::new();
         let mut masters = String::new();
         for (i, sh) in self.wb.sheets.iter().enumerate() {
             let (layout, master) = page::write(i, &sh.print);
-            o.push_str(&layout);
+            layouts.push_str(&layout);
             masters.push_str(&master);
         }
-        let _ = write!(o, "</office:automatic-styles><office:master-styles>{masters}</office:master-styles></office:document-styles>");
-        o
-    }
-
-    /// Data styles for the styles part: the conditional and default ones, which named styles use.
-    fn data_xml_styles(&self) -> String {
-        self.data_xml.clone()
+        (o, layouts, format!("<office:master-styles>{masters}</office:master-styles>"))
     }
 }
 
@@ -1184,18 +1159,6 @@ fn paragraphs(out: &mut String, text: &str, link: Option<&str>) {
     }
 }
 
-fn geometry_x(sh: &Sheet, col: u32) -> f32 {
-    let custom: f32 = sh.cols.range(..col).map(|(_, c)| if c.hidden { 0.0 } else { c.size.unwrap_or(sh.default_col_width) }).sum();
-    let n = sh.cols.range(..col).count() as f32;
-    (custom + (col as f32 - n) * sh.default_col_width) * 0.75
-}
-
-fn geometry_y(sh: &Sheet, row: u32) -> f32 {
-    let custom: f32 = sh.rows.range(..row).map(|(_, r)| if r.hidden { 0.0 } else { r.size.unwrap_or(sh.default_row_height) }).sum();
-    let n = sh.rows.range(..row).count() as f32;
-    (custom + (row as f32 - n) * sh.default_row_height) * 0.75
-}
-
 fn op_text(op: CfOperator) -> &'static str {
     match op {
         CfOperator::Equal => "=",
@@ -1254,12 +1217,7 @@ fn condition_value<'r>(rule: &'r CfRule, expr: &dyn Fn(&str) -> String) -> Optio
 
 fn validation_xml(name: &str, v: &Validation, sheet: &str, base: CellRef, wb: &Workbook) -> String {
     let tables = WbTables(wb);
-    let expr = |t: &str| -> String {
-        match gridcraft_formula::parse(t.trim_start_matches('=')) {
-            Ok(e) => formula::to_odf(&e, base, Some(sheet), &tables).trim_start_matches("of:=").to_string(),
-            Err(_) => t.to_string(),
-        }
-    };
+    let expr = |t: &str| formula::odf_expr(t, base, sheet, &tables);
     let kind = match v.kind {
         ValidationKind::Whole => "cell-content-is-whole-number() and ",
         ValidationKind::Decimal => "cell-content-is-decimal-number() and ",

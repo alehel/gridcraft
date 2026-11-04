@@ -510,6 +510,15 @@ pub(crate) fn to_odf(e: &Expr, at: CellRef, sheet: Option<&str>, tables: &dyn Ta
     format!("of:={}", gridcraft_formula::print_with(e, &OpenFormula { at, sheet, tables }))
 }
 
+/// A formula condition (A1 text, `=` optional) as OpenFormula without the prefix, as conditional
+/// formats and validations write it; text that doesn't parse is written as it is.
+pub(crate) fn odf_expr(text: &str, at: CellRef, sheet: &str, tables: &dyn Tables) -> String {
+    match gridcraft_formula::parse(text.trim_start_matches('=')) {
+        Ok(e) => gridcraft_formula::print_with(&e, &OpenFormula { at, sheet: Some(sheet), tables }),
+        Err(_) => text.to_string(),
+    }
+}
+
 /// The OpenFormula spelling of the shared printer.
 struct OpenFormula<'a> {
     at: CellRef,

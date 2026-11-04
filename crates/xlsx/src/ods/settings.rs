@@ -101,10 +101,10 @@ fn push_item(out: &mut String, name: &str, ty: &str, value: &str) {
     let _ = write!(out, "<config:config-item config:name=\"{}\" config:type=\"{ty}\">{}</config:config-item>", esc_attr(name), esc(value));
 }
 
-/// `settings.xml` for `wb`.
+/// The `office:settings` of `wb`.
 pub(crate) fn write(wb: &Workbook) -> String {
     let mut o = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-settings xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:config="urn:oasis:names:tc:opendocument:xmlns:config:1.0" xmlns:ooo="http://openoffice.org/2004/office" office:version="1.3"><office:settings><config:config-item-set config:name="ooo:view-settings"><config:config-item-map-indexed config:name="Views"><config:config-item-map-entry>"#,
+        r#"<office:settings><config:config-item-set config:name="ooo:view-settings"><config:config-item-map-indexed config:name="Views"><config:config-item-map-entry>"#,
     );
     push_item(&mut o, "ViewId", "string", "view1");
     o.push_str("<config:config-item-map-named config:name=\"Tables\">");
@@ -146,8 +146,6 @@ pub(crate) fn write(wb: &Workbook) -> String {
         "boolean",
         if first.is_some_and(|s| s.view == SheetViewMode::PageBreakPreview) { "true" } else { "false" },
     );
-    o.push_str(
-        "</config:config-item-map-entry></config:config-item-map-indexed></config:config-item-set></office:settings></office:document-settings>",
-    );
+    o.push_str("</config:config-item-map-entry></config:config-item-map-indexed></config:config-item-set></office:settings>");
     o
 }

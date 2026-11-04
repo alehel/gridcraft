@@ -226,8 +226,34 @@ fn title_xml(o: &mut String, tag: &str, text: &Option<String>) {
     }
 }
 
-/// The `content.xml` of the chart object for `c`.
-pub(crate) fn write(c: &Chart, theme: &Theme) -> String {
+/// A chart object's document, as its parts.
+pub(crate) struct ChartDoc {
+    /// The automatic styles' children.
+    styles: String,
+    /// `office:body`.
+    body: String,
+}
+
+impl ChartDoc {
+    /// The object's `content.xml` in a package.
+    pub(crate) fn package(&self) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" office:version="1.3"><office:automatic-styles>{}</office:automatic-styles>{}</office:document-content>"#,
+            self.styles, self.body
+        )
+    }
+
+    /// The object's document inline in a flat document, whose root declares the namespaces.
+    pub(crate) fn inline(&self) -> String {
+        format!(
+            r#"<office:document office:mimetype="application/vnd.oasis.opendocument.chart" office:version="1.3"><office:automatic-styles>{}</office:automatic-styles>{}</office:document>"#,
+            self.styles, self.body
+        )
+    }
+}
+
+/// The document of the chart object for `c`.
+pub(crate) fn write(c: &Chart, theme: &Theme) -> ChartDoc {
     let (class, vertical, stacked, percent, markers) = class_of(c.kind);
     let mut styles = String::new();
     let _ = write!(
@@ -282,7 +308,7 @@ pub(crate) fn write(c: &Chart, theme: &Theme) -> String {
     }
     let categories = c.series.first().and_then(|s| s.categories.as_deref()).and_then(odf_range);
     let mut o = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:chart="urn:oasis:names:tc:opendocument:xmlns:chart:1.0" office:version="1.3"><office:automatic-styles>{styles}</office:automatic-styles><office:body><office:chart><chart:chart svg:width="{}pt" svg:height="{}pt" chart:class="{class}">"#,
+        r#"<office:body><office:chart><chart:chart svg:width="{}pt" svg:height="{}pt" chart:class="{class}">"#,
         c.anchor.width * 0.75,
         c.anchor.height * 0.75
     );
@@ -327,8 +353,8 @@ pub(crate) fn write(c: &Chart, theme: &Theme) -> String {
         );
     }
     o.push_str(&series);
-    o.push_str("</chart:plot-area></chart:chart></office:chart></office:body></office:document-content>");
-    o
+    o.push_str("</chart:plot-area></chart:chart></office:chart></office:body>");
+    ChartDoc { styles, body: o }
 }
 
 #[cfg(test)]
@@ -361,7 +387,7 @@ mod tests {
             by_rows: false,
             pivot: None,
         };
-        let xml = write(&chart, &Theme::default());
+        let xml = write(&chart, &Theme::default()).package();
         let tree = parse_tree(xml.as_bytes()).unwrap();
         let d = read(&tree).unwrap();
         assert_eq!(d.kind, ChartKind::BarStacked);
