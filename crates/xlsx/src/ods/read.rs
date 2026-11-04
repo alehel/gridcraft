@@ -30,6 +30,12 @@ const MAX_SEGMENTS: u64 = 32_000_000;
 /// The most nodes of page layouts, master pages and database ranges kept until the sheets that
 /// use them are read: as many as one whole part may hold.
 const MAX_KEPT_NODES: usize = 2_000_000;
+/// The most conditions (`style:map`) read from one cell style.
+const MAX_STYLE_MAPS: usize = 64;
+/// The most cell ranges data validation is read for, over the workbook.
+const MAX_VALIDATION_RANGES: usize = 1_000_000;
+/// The most pivot tables in a workbook.
+const MAX_PIVOTS: usize = 10_000;
 const MAX_SHEETS: usize = 1024;
 /// The most row and column entries (sizes, visibility, outline, style) in a sheet, and in a
 /// workbook.
@@ -348,6 +354,8 @@ pub(crate) struct Import {
     text: u64,
     segments: u64,
     kept_nodes: usize,
+    pivots: usize,
+    validation_ranges: usize,
     images: Vec<(usize, Frame)>,
     cf_ranges: u64,
     /// Pictures, charts and shapes read, and row/column entries stored, over the workbook.
@@ -402,6 +410,8 @@ impl Import {
             text: 0,
             segments: 0,
             kept_nodes: 0,
+            pivots: 0,
+            validation_ranges: 0,
             images: Vec::new(),
             cf_ranges: 0,
             frames: 0,
@@ -441,8 +451,13 @@ impl Import {
             let Some(name) = e.attr(Ns::Style, "name") else { continue };
             match e.attr(Ns::Style, "family") {
                 Some("table-cell") => {
+                    // Each sheet translates a style's conditions anew: a style holds only so many.
+                    if e.children(Ns::Style, "map").nth(MAX_STYLE_MAPS).is_some() {
+                        self.report.warn("Some ODS conditional styles with more conditions than GridCraft reads lost the rest.");
+                    }
                     let maps = e
                         .children(Ns::Style, "map")
+                        .take(MAX_STYLE_MAPS)
                         .filter_map(|m| {
                             Some((
                                 m.attr(Ns::Style, "condition")?.to_string(),
@@ -763,14 +778,17 @@ impl Import {
         let last_row = start_row + rows.max(1) - 1;
         let mut col = 0u32;
         let mut row_has_content = false;
-        for c in e.elems() {
+        let holds_content =
+            |c: &Elem| c.attr(Ns::Office, "value-type").is_some() || c.attr(Ns::Table, "formula").is_some() || c.child(Ns::Text, "p").is_some();
+        for (i, c) in e.elems().enumerate() {
             let covered = c.is(Ns::Table, "covered-table-cell");
             if !(c.is(Ns::Table, "table-cell") || covered) {
                 continue;
             }
             let crepeat = attr_u32(c, Ns::Table, "number-columns-repeated", 1, u32::MAX)?;
             if col >= MAX_COLS {
-                if c.attr(Ns::Office, "value-type").is_some() || c.attr(Ns::Table, "formula").is_some() || c.child(Ns::Text, "p").is_some() {
+                // This cell and the rest of the row lie past the sheet's last column.
+                if e.elems().skip(i).any(holds_content) {
                     self.report.warn("Some ODS columns beyond column XFD were not imported.");
                 }
                 break;
@@ -902,7 +920,12 @@ impl Import {
                 st.mapped.entry(m).or_default().push(range);
             }
             if let Some(v) = validation {
-                st.validation_cells.entry(v).or_default().push(range);
+                if self.validation_ranges < MAX_VALIDATION_RANGES {
+                    self.validation_ranges += 1;
+                    st.validation_cells.entry(v).or_default().push(range);
+                } else {
+                    self.report.warn("Some ODS data validation beyond the import limit was not imported.");
+                }
             }
         }
         Extras {
@@ -1185,12 +1208,38 @@ impl Import {
         Ok((self.wb, self.report))
     }
 
+    /// The pivot tables of a `table:data-pilot-tables`, placed on their sheets, numbered over
+    /// the workbook and within [`MAX_PIVOTS`].
+    fn pivot_tables(&mut self, el: &Elem) {
+        let mut pivots = el.children(Ns::Table, "data-pilot-table").peekable();
+        if pivots.peek().is_none() {
+            return;
+        }
+        let sheets: HashMap<String, usize> = self.wb.sheets.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+        for p in pivots {
+            if self.pivots >= MAX_PIVOTS {
+                self.report.warn("Some ODS pivot tables beyond the import limit were imported as their current values.");
+                return;
+            }
+            let id = self.pivots as u32 + 1;
+            let placed = super::pivot::read(p, id).and_then(|(sheet, pt)| {
+                let s = self.wb.sheets.get_mut(*sheets.get(&sheet)?)?;
+                Arc::make_mut(s).pivots.push(pt);
+                Some(())
+            });
+            match placed {
+                Some(()) => self.pivots += 1,
+                None => self.report.warn("Some ODS pivot tables (from databases or external sources) were imported as their current values."),
+            }
+        }
+    }
+
     /// Whether `e` may be kept for later, within [`MAX_KEPT_NODES`] over the document.
     fn keep(&mut self, e: &Elem) -> bool {
         self.kept_nodes = self.kept_nodes.saturating_add(e.size());
         let keep = self.kept_nodes <= MAX_KEPT_NODES;
         if !keep {
-            self.report.warn("Some ODS page styles or database ranges beyond the import limit were not imported.");
+            self.report.warn("Some ODS page styles, database ranges or charts beyond the import limit were not imported.");
         }
         keep
     }
@@ -1301,25 +1350,29 @@ impl Import {
         // An autofilter holds one criterion per column of its range.
         let width = range.width();
         let mut by_field: BTreeMap<u32, FilterCriterion> = BTreeMap::new();
-        let mut outside = false;
-        let mut add = |field: u32, crit: FilterCriterion| {
+        let (mut outside, mut unread) = (false, false);
+        // Whether a criterion was kept: false for a column's condition beyond what it holds.
+        let mut add = |field: u32, crit: FilterCriterion| -> bool {
             if field >= width {
                 outside = true;
-                return;
+                return true;
             }
             match by_field.entry(field) {
                 std::collections::btree_map::Entry::Vacant(v) => {
                     v.insert(crit);
+                    true
                 }
-                // A second custom condition on a column is ANDed with the first.
-                std::collections::btree_map::Entry::Occupied(mut o) => {
-                    if let (FilterCriterion::Custom { b: b @ None, .. }, FilterCriterion::Custom { a, .. }) = (o.get_mut(), crit) {
+                // A second custom condition on a column is ANDed with the first; a column holds
+                // no more than that.
+                std::collections::btree_map::Entry::Occupied(mut o) => match (o.get_mut(), crit) {
+                    (FilterCriterion::Custom { b: b @ None, .. }, FilterCriterion::Custom { a, .. }) => {
                         *b = Some(a);
+                        true
                     }
-                }
+                    _ => false,
+                },
             }
         };
-        let mut unread = false;
         if let Some(filter) = db.child(Ns::Table, "filter") {
             // A filter is an AND of conditions, each one alone or an OR of two on one column (as
             // an autofilter column's custom filter is).
@@ -1329,20 +1382,23 @@ impl Import {
                 None => Vec::new(),
             };
             for g in groups {
-                if g.is(Ns::Table, "filter-condition") {
-                    if let Some((field, crit)) = filter_criterion(g) {
-                        add(field, crit);
-                    }
+                let read = if g.is(Ns::Table, "filter-condition") {
+                    filter_criterion(g).is_some_and(|(field, crit)| add(field, crit))
                 } else if g.is(Ns::Table, "filter-or") {
-                    let conds: Vec<(u32, FilterCriterion)> = g.children(Ns::Table, "filter-condition").take(3).filter_map(filter_criterion).collect();
-                    match conds.as_slice() {
+                    // Every condition of the OR, or it isn't read: one left out would widen it.
+                    let conds: Option<Vec<(u32, FilterCriterion)>> =
+                        g.children(Ns::Table, "filter-condition").take(3).map(filter_criterion).collect();
+                    match conds.as_deref().unwrap_or_default() {
                         [(f, FilterCriterion::Custom { a, .. }), (f2, FilterCriterion::Custom { a: b, .. })] if f == f2 => {
-                            add(*f, FilterCriterion::Custom { a: a.clone(), b: Some(b.clone()), and: false });
+                            add(*f, FilterCriterion::Custom { a: a.clone(), b: Some(b.clone()), and: false })
                         }
                         [one] => add(one.0, one.1.clone()),
-                        _ => unread = true,
+                        _ => false,
                     }
-                }
+                } else {
+                    true
+                };
+                unread |= !read;
             }
         }
         if unread {
@@ -1524,6 +1580,14 @@ impl Import {
             frames.truncate(room);
         }
         self.frames += frames.len();
+        // A flat document's chart is kept as its document until the pictures are loaded.
+        for f in &mut frames {
+            if let Some(Inline::Chart(doc)) = &f.inline
+                && !self.keep(doc)
+            {
+                f.inline = None;
+            }
+        }
         if let Some(st) = self.sheet.as_mut() {
             st.frames.extend(frames);
         }
@@ -2320,18 +2384,7 @@ impl Sink for Import {
                 }
             }
             (Ns::Table, "tracked-changes") => self.report.warn("ODS tracked changes were not imported; the current cell contents were."),
-            (Ns::Table, "data-pilot-tables") => {
-                for (i, p) in el.children(Ns::Table, "data-pilot-table").enumerate() {
-                    let placed = super::pivot::read(p, i as u32 + 1).and_then(|(sheet, pt)| {
-                        let s = self.wb.sheets.iter_mut().find(|s| s.name == sheet)?;
-                        Arc::make_mut(s).pivots.push(pt);
-                        Some(())
-                    });
-                    if placed.is_none() {
-                        self.report.warn("Some ODS pivot tables (from databases or external sources) were imported as their current values.");
-                    }
-                }
-            }
+            (Ns::Table, "data-pilot-tables") => self.pivot_tables(&el),
             // LibreOffice lists its (empty) Basic library in every file: only real code counts.
             (Ns::Office, "scripts") if el.descendants(Ns::Other, "module").len() + el.descendants(Ns::Other, "source-code").len() > 0 => {
                 self.report.warn("ODS macros were not imported.");

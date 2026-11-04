@@ -11,6 +11,8 @@ use crate::IoError;
 
 /// Most elements a captured subtree may hold, and most bytes of text it may hold.
 const MAX_NODES: usize = 2_000_000;
+/// The most XML namespace declarations in scope at once (LibreOffice declares about 50).
+const MAX_BINDINGS: usize = 1024;
 const MAX_TEXT: usize = 64 * 1024 * 1024;
 /// Longest attribute value accepted.
 const MAX_ATTR: usize = 16 * 1024 * 1024;
@@ -306,11 +308,23 @@ pub(crate) fn parse(xml: &[u8], sink: &mut dyn Sink) -> Result<(), IoError> {
     // What earlier subtrees used of the limits, when they are kept.
     let keeps = sink.keeps_subtrees();
     let (mut kept_nodes, mut kept_text) = (0usize, 0usize);
+    // The namespace declarations each open element made: a name is resolved against all of
+    // those in scope, so their number is kept small.
+    let mut bindings: Vec<usize> = Vec::new();
+    let mut in_scope = 0usize;
     loop {
         let event = reader.read_event().map_err(xml_error)?;
         match event {
             Event::Start(ref e) | Event::Empty(ref e) => {
                 let empty = matches!(event, Event::Empty(_));
+                let declared = e.attributes().flatten().filter(|a| a.key.as_ref() == b"xmlns" || a.key.as_ref().starts_with(b"xmlns:")).count();
+                if in_scope + declared > MAX_BINDINGS {
+                    return Err(IoError::TooLarge("ODS declares too many XML namespaces".into()));
+                }
+                if !empty {
+                    in_scope += declared;
+                    bindings.push(declared);
+                }
                 let el = start_elem(&reader, e)?;
                 if root_done {
                     return Err(xml_error("content after the root element"));
@@ -356,6 +370,7 @@ pub(crate) fn parse(xml: &[u8], sink: &mut dyn Sink) -> Result<(), IoError> {
                 }
             }
             Event::End(_) => {
+                in_scope = in_scope.saturating_sub(bindings.pop().unwrap_or(0));
                 if let Some(cap) = capture.as_mut() {
                     let Some(done) = cap.stack.pop() else { return Err(xml_error("unbalanced element")) };
                     match cap.stack.last_mut() {
