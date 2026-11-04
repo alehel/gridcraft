@@ -716,3 +716,30 @@ fn ods_title_columns_round_trip() {
     assert_eq!(back.sheets[0].print.title_cols, Some((1, 2)));
     assert_eq!(back.sheets[0].cols.get(&0).map(|c| c.outline), Some(1));
 }
+
+/// Round-two reader limits: a repeated empty cell with a validation over a formatted column is
+/// not stored at every position, a picture in a repeated cell spanning column styles is read
+/// once, and an empty sheet's tail row style is not stored row by row.
+#[test]
+fn ods_repeated_extras_are_read_once() {
+    let styles = r#"<style:style style:name="ce1" style:family="table-cell"><style:text-properties fo:font-weight="bold"/></style:style>"#;
+    let (wb, _) = read_ods(&styled_ods(
+        styles,
+        r#"<table:table table:name="Data"><table:table-column table:number-columns-repeated="16384" table:default-cell-style-name="ce1"/><table:table-row table:number-rows-repeated="1048576"><table:table-cell table:number-columns-repeated="16384" table:content-validation-name="v"/></table:table-row></table:table>"#,
+    ))
+    .unwrap();
+    assert!(wb.sheets[0].cells.is_empty());
+    let pictures = r#"<table:table table:name="Data" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"><table:table-column table:default-cell-style-name="ce1"/><table:table-column/><table:table-row><table:table-cell table:number-columns-repeated="2"><draw:frame svg:width="1cm" svg:height="1cm"><draw:image><office:binary-data>iVBORw0KGgo=</office:binary-data></draw:image></draw:frame></table:table-cell></table:table-row></table:table>"#;
+    let flat = format!(
+        r#"<?xml version="1.0"?><office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:mimetype="application/vnd.oasis.opendocument.spreadsheet"><office:automatic-styles>{styles}</office:automatic-styles><office:body><office:spreadsheet>{pictures}</office:spreadsheet></office:body></office:document>"#
+    );
+    let (wb, _) = crate::read_fods(flat.as_bytes()).unwrap();
+    assert_eq!(wb.sheets[0].images.len(), 1);
+    let (wb, report) = read_ods(&styled_ods(
+        styles,
+        r#"<table:table table:name="Data"><table:table-row table:number-rows-repeated="1048576" table:default-cell-style-name="ce1"><table:table-cell/></table:table-row></table:table>"#,
+    ))
+    .unwrap();
+    assert!(wb.sheets[0].rows.len() < 10, "{}", wb.sheets[0].rows.len());
+    assert!(!report.warnings.iter().any(|w| w.contains("row and column sizes")), "{:?}", report.warnings);
+}

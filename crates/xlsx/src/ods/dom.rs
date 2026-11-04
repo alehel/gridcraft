@@ -224,6 +224,11 @@ pub(crate) trait Sink {
     fn close(&mut self, el: &Elem) -> Result<(), IoError>;
     /// A captured element, complete.
     fn subtree(&mut self, el: Elem) -> Result<(), IoError>;
+    /// Whether the sink keeps every subtree it is given (a whole tree is built): the element
+    /// and text limits then hold for the document, not each subtree.
+    fn keeps_subtrees(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) fn xml_error(e: impl std::fmt::Display) -> IoError {
@@ -288,6 +293,9 @@ pub(crate) fn parse(xml: &[u8], sink: &mut dyn Sink) -> Result<(), IoError> {
     let mut streamed: Vec<Elem> = Vec::new();
     let mut capture: Option<Capture> = None;
     let mut root_done = false;
+    // What earlier subtrees used of the limits, when they are kept.
+    let keeps = sink.keeps_subtrees();
+    let (mut kept_nodes, mut kept_text) = (0usize, 0usize);
     loop {
         let event = reader.read_event().map_err(xml_error)?;
         match event {
@@ -315,10 +323,15 @@ pub(crate) fn parse(xml: &[u8], sink: &mut dyn Sink) -> Result<(), IoError> {
                     continue;
                 }
                 if !streamed.is_empty() && sink.capture(el.ns, &el.name) {
+                    let (nodes, text) = if keeps { (kept_nodes + 1, kept_text) } else { (1, 0) };
+                    if nodes > MAX_NODES {
+                        return Err(IoError::TooLarge("ODS part holds too many elements".into()));
+                    }
                     if empty {
+                        kept_nodes = if keeps { nodes } else { 0 };
                         sink.subtree(el)?;
                     } else {
-                        capture = Some(Capture { stack: vec![el], nodes: 1, text: 0 });
+                        capture = Some(Capture { stack: vec![el], nodes, text });
                     }
                     continue;
                 }
@@ -338,6 +351,9 @@ pub(crate) fn parse(xml: &[u8], sink: &mut dyn Sink) -> Result<(), IoError> {
                     match cap.stack.last_mut() {
                         Some(parent) => parent.kids.push(Node::El(done)),
                         None => {
+                            if keeps {
+                                (kept_nodes, kept_text) = (cap.nodes, cap.text);
+                            }
                             capture = None;
                             sink.subtree(done)?;
                         }
@@ -404,6 +420,9 @@ pub(crate) fn parse_tree(xml: &[u8]) -> Result<Elem, IoError> {
         fn close(&mut self, _: &Elem) -> Result<(), IoError> {
             self.1 = self.0.take();
             Ok(())
+        }
+        fn keeps_subtrees(&self) -> bool {
+            true
         }
         fn subtree(&mut self, el: Elem) -> Result<(), IoError> {
             if let Some(root) = self.0.as_mut() {
