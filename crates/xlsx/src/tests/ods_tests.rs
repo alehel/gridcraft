@@ -656,3 +656,39 @@ fn ods_pivot_page_selections_and_filter_button_round_trip() {
         assert_eq!(pt.filters.first().and_then(|f| f.selected.clone()), Some(vec!["East".to_string(), "North".to_string()]));
     }
 }
+
+/// Limits apply as each cell is read: a row of cells each expanding to a megabyte of spaces,
+/// or a note repeated over the whole sheet, is refused instead of held in memory.
+#[test]
+fn ods_limits_apply_while_a_row_is_read() {
+    let spaces = r#"<table:table-cell office:value-type="string"><text:p><text:s text:c="1048576"/></text:p></table:table-cell>"#.repeat(400);
+    assert!(matches!(read_ods(&row(&spaces)), Err(IoError::TooLarge(_))));
+    let note = ods(
+        r#"<table:table table:name="Data"><table:table-row table:number-rows-repeated="1048576"><table:table-cell table:number-columns-repeated="16384"><office:annotation><text:p>n</text:p></office:annotation></table:table-cell></table:table-row></table:table>"#,
+    );
+    assert!(matches!(read_ods(&note), Err(IoError::TooLarge(_))));
+}
+
+/// Smaller reader fixes: a link inside a note is the note's, a text result that looks like an
+/// error stays text when the file says it is text, a drive path is not relative, and a filter
+/// on a column outside its range is dropped.
+#[test]
+fn ods_reader_keeps_what_the_file_says() {
+    let (wb, _) = read_ods(&row(
+        r#"<table:table-cell office:value-type="string"><text:p>x</text:p><office:annotation><text:p><text:a xlink:href="https://note.example" xmlns:xlink="http://www.w3.org/1999/xlink">n</text:a></text:p></office:annotation></table:table-cell>
+        <table:table-cell table:formula="of:=&quot;#Go!&quot;" office:value-type="string" calcext:value-type="string" xmlns:calcext="urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0"><text:p>#Go!</text:p></table:table-cell>
+        <table:table-cell office:value-type="string"><text:p><text:a xlink:href="C:\docs\a.ods" xmlns:xlink="http://www.w3.org/1999/xlink">d</text:a></text:p></table:table-cell>"#,
+    ))
+    .unwrap();
+    let sh = &wb.sheets[0];
+    assert!(!sh.hyperlinks.contains_key(&CellRef::new(0, 0)));
+    assert!(sh.comments.contains_key(&CellRef::new(0, 0)));
+    assert_eq!(sh.value(CellRef::new(0, 1)), text("#Go!"));
+    assert_eq!(sh.hyperlinks.get(&CellRef::new(0, 2)).map(|h| h.target.as_str()), Some("C:\\docs\\a.ods"));
+    let mut wb = gridcraft_model::Workbook::new();
+    std::sync::Arc::make_mut(&mut wb.sheets[0])
+        .hyperlinks
+        .insert(CellRef::new(0, 0), gridcraft_model::Hyperlink { target: "C:\\docs\\a.ods".into(), tooltip: None, external: true });
+    let (back, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+    assert_eq!(back.sheets[0].hyperlinks.get(&CellRef::new(0, 0)).map(|h| h.target.as_str()), Some("C:\\docs\\a.ods"));
+}

@@ -26,6 +26,10 @@ const MAX_MERGES: u64 = 100_000;
 const MAX_TEXT: u64 = 256 * 1024 * 1024;
 const MAX_SHEETS: usize = 1024;
 const MAX_LINE_ENTRIES: usize = 200_000;
+/// The most conditional-format ranges kept, over all rules (each rule holds its ranges).
+const MAX_CF_RANGES: u64 = 1_000_000;
+/// The most pictures, charts and shapes on one sheet.
+const MAX_FRAMES: usize = 10_000;
 const MAX_STYLE_DEPTH: usize = 32;
 /// LibreOffice's defaults for a document that states none.
 const ODS_FONT: &str = "Liberation Sans";
@@ -54,9 +58,7 @@ pub(crate) fn has_mimetype(bytes: &[u8]) -> bool {
     (&mut file).take(OdsKind::Template.mimetype().len() as u64 + 1).read_to_end(&mut value).is_ok() && kinds.iter().any(|m| value == m.as_bytes())
 }
 
-fn xml_error(e: impl std::fmt::Display) -> IoError {
-    IoError::Xml(format!("ODS: {e}"))
-}
+use dom::xml_error;
 
 /// Whether `bytes` are an ODS package encrypted with a password to open (its manifest holds
 /// encryption data). Damaged or unreadable packages are not.
@@ -233,8 +235,6 @@ struct SheetState {
     col: u32,
     cols: Vec<LineRun>,
     rows: Vec<LineRun>,
-    row_level: u8,
-    col_level: u8,
     /// Group levels hidden (`table:display="false"`) at each depth.
     row_group_hidden: Vec<bool>,
     col_group_hidden: Vec<bool>,
@@ -290,6 +290,21 @@ struct NameDef {
     range: bool,
     /// The cell its relative references are relative to.
     base: Option<String>,
+}
+
+/// Adds a sheet's pictures, charts and shapes, up to [`MAX_FRAMES`].
+fn add_frames(frames: &mut Vec<Frame>, more: Vec<Frame>, report: &mut ReadReport) {
+    let room = MAX_FRAMES.saturating_sub(frames.len());
+    if more.len() > room {
+        report.warn("Some ODS pictures, charts and shapes beyond the import limit were not imported.");
+    }
+    frames.extend(more.into_iter().take(room));
+}
+
+/// A cell's own link: the first `text:a` in its paragraphs (not one inside its note or a
+/// drawing).
+fn cell_link(c: &Elem) -> Option<&Elem> {
+    c.elems().filter(|p| p.is(Ns::Text, "p") || p.is(Ns::Text, "h")).find_map(|p| p.descendants(Ns::Text, "a").into_iter().next())
 }
 
 /// The style of the merge holding `at` among the merges still open, and the column where that
@@ -356,6 +371,7 @@ pub(crate) struct Import {
     merges: u64,
     text: u64,
     images: Vec<(usize, Frame)>,
+    cf_ranges: u64,
 }
 
 fn attr_u32(e: &Elem, ns: Ns, name: &str, default: u32, limit: u32) -> Result<u32, IoError> {
@@ -404,6 +420,7 @@ impl Import {
             merges: 0,
             text: 0,
             images: Vec::new(),
+            cf_ranges: 0,
         }
     }
 
@@ -505,7 +522,6 @@ impl Import {
         }
     }
 
-    /// The properties of a named style with its ancestors.
     /// An automatic style, or the named style of that name when none is automatic.
     fn style_def(&self, name: &str) -> Option<&CellStyleDef> {
         self.auto.get(name).or_else(|| self.named.get(name))
@@ -629,8 +645,6 @@ impl Import {
             col: 0,
             cols: Vec::new(),
             rows: Vec::new(),
-            row_level: 0,
-            col_level: 0,
             row_group_hidden: Vec::new(),
             col_group_hidden: Vec::new(),
             header_rows: None,
@@ -688,7 +702,7 @@ impl Import {
             size: style.width,
             optimal: false,
             hidden,
-            outline: st.col_level,
+            outline: st.col_group_hidden.len().min(7) as u8,
             collapsed: collapsed && hidden,
             style: default_style.filter(|s| *s != StyleId::DEFAULT),
             page_break: style.page_break,
@@ -735,13 +749,25 @@ impl Import {
         let row_default = self.default_cell_style(e);
         let Some(st) = self.sheet.as_mut() else { return Ok(()) };
         let start_row = st.row;
-        let mut open_merges = std::mem::take(&mut st.open_merges);
-        let col_defaults =
-            st.col_defaults.get_or_insert_with(|| st.cols.iter().filter_map(|c| c.style.map(|s| (c.start, c.start + c.count, s))).collect()).clone();
         let end = start_row.checked_add(repeat).filter(|n| *n <= MAX_ROWS);
-        let last_row = end.unwrap_or(MAX_ROWS).saturating_sub(1).max(start_row);
+        if start_row >= MAX_ROWS {
+            // Past the sheet's last row nothing is read; only content is worth a warning.
+            if e.elems()
+                .any(|c| c.attr(Ns::Office, "value-type").is_some() || c.attr(Ns::Table, "formula").is_some() || c.child(Ns::Text, "p").is_some())
+            {
+                self.report.warn("Some ODS rows beyond row 1,048,576 were not imported.");
+            }
+            return Ok(());
+        }
+        let mut open_merges = std::mem::take(&mut st.open_merges);
+        if st.col_defaults.is_none() {
+            st.col_defaults = Some(st.cols.iter().filter_map(|c| c.style.map(|s| (c.start, c.start + c.count, s))).collect());
+        }
+        let col_defaults = st.col_defaults.take().unwrap_or_default();
+        let rows = end.unwrap_or(MAX_ROWS) - start_row;
+        let last_row = start_row + rows.max(1) - 1;
         let mut col = 0u32;
-        let mut kept: Vec<RowCell<'_>> = Vec::new();
+        let mut row_has_content = false;
         for c in e.elems() {
             let covered = c.is(Ns::Table, "covered-table-cell");
             if !(c.is(Ns::Table, "table-cell") || covered) {
@@ -761,7 +787,7 @@ impl Import {
             // What hangs off a cell even when it is empty: a note, a drawing, a validation, a link.
             let has_extras = c.elems().any(|k| k.is(Ns::Office, "annotation") || k.ns == Ns::Draw)
                 || c.attr(Ns::Table, "content-validation-name").is_some()
-                || c.children(Ns::Text, "p").any(|p| !p.descendants(Ns::Text, "a").is_empty());
+                || cell_link(c).is_some();
             let cend = match col.checked_add(crepeat).filter(|n| *n <= MAX_COLS) {
                 Some(n) => n,
                 None => {
@@ -774,10 +800,13 @@ impl Import {
             // A repeat spanning columns with different default styles is split at their edges.
             let mut seg = col;
             while seg < cend {
-                let col_default = col_defaults.iter().find(|(a, b, _)| seg >= *a && seg < *b);
+                // The column runs are in order: the one holding `seg` is the last starting at or
+                // before it, and the next one starts where `seg`'s run of no default ends.
+                let at = col_defaults.partition_point(|(a, _, _)| *a <= seg);
+                let col_default = at.checked_sub(1).and_then(|i| col_defaults.get(i)).filter(|(_, b, _)| seg < *b);
                 let mut seg_end = match col_default {
                     Some((_, b, _)) => (*b).min(cend),
-                    None => col_defaults.iter().map(|(a, _, _)| *a).filter(|a| *a > seg).min().unwrap_or(cend).min(cend),
+                    None => col_defaults.get(at).map_or(cend, |(a, _, _)| (*a).min(cend)),
                 };
                 // A covered run is split at the edges of the merges it lies under.
                 let mut own = own_style;
@@ -798,30 +827,21 @@ impl Import {
                     open_merges.insert(seg, (RangeRef::new(CellRef::new(start_row, seg), to), cell.style));
                 }
                 if cell.has_content() || cell.style != fallback || width > 1 || height > 1 || has_extras {
-                    kept.push(RowCell { col: seg, count: seg_end - seg, width, height, cell, fallback, el: c });
+                    row_has_content |= cell.has_content();
+                    // Placed at once, so the import limits apply as the row is read.
+                    self.place(start_row, rows, RowCell { col: seg, count: seg_end - seg, width, height, cell, fallback, el: c })?;
                 }
                 seg = seg_end;
             }
             col = cend;
         }
-        if let Some(st) = self.sheet.as_mut() {
-            st.open_merges = open_merges;
+        if row_has_content && end.is_none() {
+            self.report.warn("Some ODS rows beyond row 1,048,576 were not imported.");
         }
-        let row_has_content = kept.iter().any(|k| k.cell.has_content());
-        if start_row >= MAX_ROWS || end.is_none() {
-            if row_has_content {
-                self.report.warn("Some ODS rows beyond row 1,048,576 were not imported.");
-            }
-            if start_row >= MAX_ROWS {
-                return Ok(());
-            }
-        }
-        let end = end.unwrap_or(MAX_ROWS);
-        let rows = end - start_row;
-        for k in kept {
-            self.place(start_row, rows, k)?;
-        }
+        let end = start_row + rows;
         let Some(st) = self.sheet.as_mut() else { return Ok(()) };
+        st.open_merges = open_merges;
+        st.col_defaults = Some(col_defaults);
         if row_has_content {
             st.last_content_row = Some(end - 1);
         }
@@ -836,7 +856,7 @@ impl Import {
                 size: rs.height,
                 optimal: rs.optimal,
                 hidden,
-                outline: st.row_level,
+                outline: st.row_group_hidden.len().min(7) as u8,
                 collapsed: collapsed && hidden,
                 style: row_default,
                 page_break: rs.page_break,
@@ -849,12 +869,16 @@ impl Import {
     /// Whether an empty cell's own format is worth a stored cell for each of `count` copies:
     /// always for a few, and for long runs (what writers emit for whole-column formatting) only
     /// when it looks different from what the cell falls back to — its fill or borders.
-    fn blank_worth_storing(&self, style: StyleId, fallback: StyleId, count: u64) -> bool {
+    fn blank_worth_storing(&mut self, style: StyleId, fallback: StyleId, count: u64) -> bool {
         if count <= 1000 {
             return true;
         }
         let (a, b) = (self.wb.styles.get(style), self.wb.styles.get(fallback));
-        a.fill != b.fill || a.borders != b.borders
+        let visible = a.fill != b.fill || a.borders != b.borders;
+        if !visible {
+            self.report.warn("Some ODS formatting of long runs of empty cells (other than fill and borders) was not imported.");
+        }
+        visible
     }
 
     /// Stores a (repeated) cell and what hangs off it: merges, notes, links, validation, pictures.
@@ -894,40 +918,35 @@ impl Import {
         if merged {
             self.merges = self.merges.saturating_add(count);
         }
+        // What hangs off the cell element: a note, a link, a validation, pictures.
+        let comment = el.child(Ns::Office, "annotation").map(read_annotation);
+        let link = cell_link(el).and_then(|a| Some(hyperlink(a.attr(Ns::XLink, "href")?, a.attr(Ns::Office, "title"))));
+        // Each copy of a note or link is stored: they count as cells.
+        if comment.is_some() || link.is_some() {
+            self.cells = self.cells.saturating_add(count);
+        }
         if self.cells > MAX_CELLS || self.merges > MAX_MERGES || self.text > MAX_TEXT {
             return Err(IoError::TooLarge("ODS expands beyond the import limit (4 million cells, 100000 merges or 256 MiB of text)".into()));
         }
-        let el = Some(el);
-        // Extras of the cell element: a note, a link, a validation, pictures.
-        let mut comment = None;
-        let mut link = None;
-        let mut validation = None;
-        let mut mapped = None;
+        let validation = el.attr(Ns::Table, "content-validation-name").map(str::to_string);
+        let mapped = el.attr(Ns::Table, "style-name").filter(|n| self.style_def(n).is_some_and(|d| !d.maps.is_empty())).map(str::to_string);
         let mut frames = Vec::new();
-        if let Some(c) = el {
-            if let Some(a) = c.child(Ns::Office, "annotation") {
-                comment = Some(read_annotation(a));
-            }
-            if let Some(a) = c.descendants(Ns::Text, "a").first()
-                && let Some(href) = a.attr(Ns::XLink, "href")
-            {
-                link = Some(hyperlink(href, a.attr(Ns::Office, "title")));
-            }
-            validation = c.attr(Ns::Table, "content-validation-name").map(str::to_string);
-            mapped = c.attr(Ns::Table, "style-name").filter(|n| self.style_def(n).is_some_and(|d| !d.maps.is_empty())).map(str::to_string);
-            drawings(c, Some(CellRef::new(row, col)), &self.draw, &mut frames);
-        }
+        drawings(el, Some(CellRef::new(row, col)), &self.draw, &mut frames);
+        let store = store && !cell.is_blank();
         let Some(st) = self.sheet.as_mut() else { return Ok(()) };
-        for r in row..row + rows {
+        // Each position gets what it stores (a validation or conditions cover the range whole).
+        let per_position = store || merged || comment.is_some() || link.is_some();
+        for r in (row..row + rows).filter(|_| per_position) {
             for c in col..col + cols {
                 let pos = CellRef::new(r, c);
-                if store && !cell.is_blank() {
+                if store {
                     let mut stored = cell.clone();
                     if let Some(f) = stored.formula.as_mut().filter(|f| f.array.is_some()) {
-                        // A matrix formula's range moves with each repeat.
+                        // A matrix formula's range moves with each repeat, within the sheet.
                         let f = Arc::make_mut(f);
                         if let Some(a) = f.array {
-                            f.array = Some(RangeRef::new(pos, CellRef::new(pos.row + a.height() - 1, pos.col + a.width() - 1)));
+                            let end = CellRef::new((pos.row + a.height() - 1).min(MAX_ROWS - 1), (pos.col + a.width() - 1).min(MAX_COLS - 1));
+                            f.array = Some(RangeRef::new(pos, end));
                         }
                     }
                     st.sheet.cells.set(pos, stored);
@@ -949,13 +968,12 @@ impl Import {
         if let Some(v) = validation {
             st.validation_cells.entry(v).or_default().push(RangeRef::new(CellRef::new(row, col), CellRef::new(row + rows - 1, col + cols - 1)));
         }
-        st.frames.extend(frames);
+        add_frames(&mut st.frames, frames, &mut self.report);
         Ok(())
     }
 
-    /// The value, formula and number format of a cell element.
-    /// With the cell comes the number format its value type implies (a date or a time), for a
-    /// cell whose style doesn't set one.
+    /// The value and formula of a cell element, with the number format its value type implies
+    /// (a date or a time) for a cell whose style doesn't set one.
     fn convert(&mut self, c: &Elem, at: CellRef) -> Result<(Cell, Option<&'static str>), IoError> {
         let error = c.attr(Ns::CalcExt, "value-type") == Some("error");
         let kind = if error { Some("error") } else { c.attr(Ns::Office, "value-type") };
@@ -1004,7 +1022,10 @@ impl Import {
         };
         // Older writers cache a formula's error as its text (`Err:508`, `#VALUE!`).
         let value = match value {
-            Value::Text(t) if formula_text.is_some() && is_error_text(&t) => Value::Error(error_value(&t)),
+            // A file that states the result's type (`calcext:value-type`) says when it is text.
+            Value::Text(t) if formula_text.is_some() && c.attr(Ns::CalcExt, "value-type").is_none() && is_error_text(&t) => {
+                Value::Error(error_value(&t))
+            }
             v => v,
         };
         let mut cell = Cell::value(value);
@@ -1062,8 +1083,12 @@ impl Import {
             if r.page_break && r.start > 0 {
                 st.sheet.print.row_breaks.push(r.start);
             }
-            // The run that fills the rest of the sheet is the default height already.
+            // The run that fills the rest of the sheet is the default height already. Its cell
+            // style past the content can't be kept for a million rows: it is reported.
             if Some(r.start) == tail_start && (r.start > last || r.style.is_none()) {
+                if r.style.is_some() {
+                    self.report.warn("Some ODS formatting of whole empty rows to the end of a sheet was not imported.");
+                }
                 continue;
             }
             // An optimal height close to one line is one line of the default font (the sheet's
@@ -1138,6 +1163,9 @@ impl Import {
     }
 
     pub(crate) fn finish_names(&mut self) {
+        // The names already defined, by scope and folded name: one definition per name and scope.
+        let mut defined: std::collections::HashSet<(Option<usize>, String)> =
+            self.wb.names.iter().map(|n| (n.scope, n.name.to_lowercase())).collect();
         for NameDef { name, scope, text, range, base } in std::mem::take(&mut self.names) {
             let formula = if range {
                 // `$Sheet1.$A$1:.$B$2`, possibly several ranges separated by spaces.
@@ -1152,7 +1180,12 @@ impl Import {
             } else {
                 // An expression that no longer reads (`$#REF!.$C$17`, a deleted sheet) is kept
                 // as the error it calculates to, as LibreOffice keeps it.
-                formula::from_odf(&text).unwrap_or_else(|| "#REF!".into())
+                formula::from_odf(&text).unwrap_or_else(|| {
+                    if !text.contains("#REF") {
+                        self.report.warn("Some ODS named expressions use syntax GridCraft doesn't read; they were kept as #REF!.");
+                    }
+                    "#REF!".into()
+                })
             };
             // A reference that no longer reads (a deleted sheet) is an error, as it calculates.
             let formula = if gridcraft_formula::parse(&formula).is_ok() { formula } else { "#REF!".to_string() };
@@ -1167,7 +1200,7 @@ impl Import {
                 continue;
             }
             // A name defined twice in one scope keeps its first definition.
-            if self.wb.names.iter().any(|n| n.name.eq_ignore_ascii_case(&name) && n.scope == scope) {
+            if !defined.insert((scope, name.to_lowercase())) {
                 continue;
             }
             self.wb.names.push(DefinedName { name, scope, formula, comment: String::new(), hidden: false });
@@ -1240,6 +1273,12 @@ impl Import {
                 }
             }
         }
+        // A criterion for a column outside the range has nothing to filter.
+        let width = range.width();
+        if criteria.iter().any(|(f, _)| *f >= width) {
+            self.report.warn("Some ODS filter conditions name columns outside their range and were not imported.");
+            criteria.retain(|(f, _)| *f < width);
+        }
         if let Some(sheet) = self.wb.sheets.get_mut(idx) {
             Arc::make_mut(sheet).autofilter = Some(AutoFilter { range, criteria });
         }
@@ -1285,6 +1324,9 @@ impl Import {
             }
             for rule in cf.elems() {
                 if let Some(r) = self.cf_rule(rule) {
+                    if !self.take_cf_ranges(ranges.len()) {
+                        break;
+                    }
                     out.push(CondFormat { ranges: ranges.clone(), rule: r, priority, stop_if_true: false });
                     priority += 1;
                 }
@@ -1296,9 +1338,20 @@ impl Import {
         }
     }
 
+    /// Takes `n` conditional-format ranges from the import's budget; false (with a warning) when
+    /// it is spent.
+    fn take_cf_ranges(&mut self, n: usize) -> bool {
+        self.cf_ranges = self.cf_ranges.saturating_add(n as u64);
+        let ok = self.cf_ranges <= MAX_CF_RANGES;
+        if !ok {
+            self.report.warn("Some ODS conditional formatting beyond the import limit was not imported.");
+        }
+        ok
+    }
+
     /// ODF's own conditional styles (`style:map` on a cell style), for files without
     /// LibreOffice's richer `calcext:conditional-formats`.
-    fn style_map_formats(&self, st: &mut SheetState) {
+    fn style_map_formats(&mut self, st: &mut SheetState) {
         if st.has_calcext_formats {
             return;
         }
@@ -1306,11 +1359,14 @@ impl Import {
         names.sort_by(|a, b| a.0.cmp(&b.0));
         let mut priority = st.sheet.cond_formats.len() as u32 + 1;
         for (name, ranges) in names {
-            let Some(def) = self.style_def(&name) else { continue };
+            let Some(maps) = self.style_def(&name).map(|d| d.maps.clone()) else { continue };
             let ranges = merge_ranges(ranges);
-            for (cond, apply, _) in &def.maps {
+            for (cond, apply, _) in &maps {
                 let style = Box::new(self.dxf(apply));
                 if let Some(rule) = map_condition(cond, style) {
+                    if !self.take_cf_ranges(ranges.len()) {
+                        return;
+                    }
                     st.sheet.cond_formats.push(CondFormat { ranges: ranges.clone(), rule, priority, stop_if_true: true });
                     priority += 1;
                 }
@@ -1384,7 +1440,7 @@ impl Import {
         let mut out = Vec::new();
         drawings(shapes, None, &self.draw, &mut out);
         if let Some(st) = self.sheet.as_mut() {
-            st.frames.extend(out);
+            add_frames(&mut st.frames, out, &mut self.report);
         }
     }
 
@@ -1487,7 +1543,6 @@ impl Import {
     }
 }
 
-/// The anchor of a picture: its cell and offset from the sheet origin or its anchor cell.
 /// One `table:filter-condition` as the column it filters and an autofilter criterion.
 fn filter_criterion(cond: &Elem) -> Option<(u32, FilterCriterion)> {
     let field = cond.attr(Ns::Table, "field-number").and_then(|f| f.parse::<u32>().ok())?;
@@ -1523,6 +1578,7 @@ fn filter_criterion(cond: &Elem) -> Option<(u32, FilterCriterion)> {
     Some((field, crit))
 }
 
+/// The anchor of a picture: its cell and offset from the sheet origin or its anchor cell.
 fn place_anchor(sheet: &Sheet, f: &Frame) -> Anchor {
     let (x, y) = (f.x as f32, f.y as f32);
     let (cell, dx, dy) = match f.cell {
@@ -1656,11 +1712,32 @@ fn read_annotation(a: &Elem) -> Comment {
 }
 
 /// An ODF link target: `#Sheet2.A1` is a place in this workbook, anything else a URL or file.
+/// `r` with every anchor relative (a link names a place, not a fixed reference).
+fn relative(mut r: gridcraft_formula::Reference) -> gridcraft_formula::Reference {
+    use gridcraft_formula::RefKind;
+    let rel = |a: &mut gridcraft_formula::Anchor| {
+        a.row_abs = false;
+        a.col_abs = false;
+    };
+    match &mut r.kind {
+        RefKind::Cell(a) => rel(a),
+        RefKind::Range(a, b) => {
+            rel(a);
+            rel(b);
+        }
+        RefKind::Cols(_, a0, _, a1) | RefKind::Rows(_, a0, _, a1) => {
+            *a0 = false;
+            *a1 = false;
+        }
+    }
+    r
+}
+
 fn hyperlink(href: &str, title: Option<&str>) -> Hyperlink {
     let tooltip = title.map(str::to_string);
     if let Some(local) = href.strip_prefix('#') {
         let target = match formula::parse_odf_ref(local) {
-            Some(r) => gridcraft_formula::printer::reference_a1(&r).replace('$', ""),
+            Some(r) => gridcraft_formula::printer::reference_a1(&relative(r)),
             // A sheet alone (`#Sheet2`) is its first cell.
             _ if !local.contains('.') => format!("{}!A1", gridcraft_formula::quote_sheet(local.trim_matches('\''))),
             _ => local.to_string(),
@@ -1673,12 +1750,9 @@ fn hyperlink(href: &str, title: Option<&str>) -> Hyperlink {
     Hyperlink { target, tooltip, external: true }
 }
 
-/// A link that is neither a URL with a scheme nor an absolute path.
+/// A link that is neither a URL with a scheme (nor a drive, `C:`) nor an absolute path.
 pub(crate) fn is_relative(href: &str) -> bool {
-    let scheme = href
-        .split_once(':')
-        .is_some_and(|(s, _)| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) && s.len() > 1);
-    !scheme && !href.starts_with('/') && !href.starts_with('\\') && !href.starts_with('#')
+    !href.starts_with('#') && crate::passthrough::is_relative_path(href)
 }
 
 /// `text` with its relative references moved from `base` to A1 (wrapping around the sheet edge,
@@ -2021,13 +2095,11 @@ impl Sink for Import {
             (Ns::Table, "table") if self.spreadsheet_seen && self.sheet.is_none() => self.open_table(el)?,
             (Ns::Table, "table-row-group") => {
                 if let Some(st) = self.sheet.as_mut() {
-                    st.row_level = st.row_level.saturating_add(1).min(7);
                     st.row_group_hidden.push(el.attr(Ns::Table, "display") == Some("false"));
                 }
             }
             (Ns::Table, "table-column-group") => {
                 if let Some(st) = self.sheet.as_mut() {
-                    st.col_level = st.col_level.saturating_add(1).min(7);
                     st.col_group_hidden.push(el.attr(Ns::Table, "display") == Some("false"));
                 }
             }
@@ -2059,13 +2131,11 @@ impl Sink for Import {
             (Ns::Table, "table") if self.sheet.as_ref().is_some_and(|s| s.depth == self.depth + 1) => self.finish_sheet(),
             (Ns::Table, "table-row-group") => {
                 if let Some(st) = self.sheet.as_mut() {
-                    st.row_level = st.row_level.saturating_sub(1);
                     st.row_group_hidden.pop();
                 }
             }
             (Ns::Table, "table-column-group") => {
                 if let Some(st) = self.sheet.as_mut() {
-                    st.col_level = st.col_level.saturating_sub(1);
                     st.col_group_hidden.pop();
                 }
             }

@@ -156,7 +156,7 @@ fn rebase(target: &str, from: &Folder, to: &Folder) -> Option<String> {
 }
 
 /// Not empty, no root, no scheme or drive (`file:`, `http:`, `C:`).
-fn is_relative_path(target: &str) -> bool {
+pub(crate) fn is_relative_path(target: &str) -> bool {
     let scheme = target.split_once(':').is_some_and(|(s, _)| {
         s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     });

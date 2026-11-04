@@ -226,7 +226,7 @@ pub(crate) trait Sink {
     fn subtree(&mut self, el: Elem) -> Result<(), IoError>;
 }
 
-fn xml_error(e: impl std::fmt::Display) -> IoError {
+pub(crate) fn xml_error(e: impl std::fmt::Display) -> IoError {
     IoError::Xml(format!("ODS: {e}"))
 }
 
