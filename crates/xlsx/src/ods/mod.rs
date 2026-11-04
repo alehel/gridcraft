@@ -18,5 +18,5 @@ mod style;
 mod write;
 
 pub(crate) use read::has_mimetype;
-pub use read::{is_flat_ods, read_fods, read_ods};
+pub use read::{is_encrypted_ods, is_flat_ods, read_fods, read_ods};
 pub use write::{Display as OdsDisplay, write_fods, write_ods, write_ods_with};

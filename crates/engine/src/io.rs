@@ -51,6 +51,9 @@ impl FileKind {
 pub const PASSWORD_REQUIRED: &str = "is password-protected. Enter its password to open it.";
 /// The error for a wrong password contains this.
 pub const WRONG_PASSWORD: &str = "The password is incorrect.";
+/// The error for a password-protected (encrypted) ODS file, which can't be opened yet. It never
+/// contains [`PASSWORD_REQUIRED`]: asking for a password GridCraft can't use would mislead.
+pub const ENCRYPTED_ODS: &str = "is password-protected. GridCraft can't open password-protected OpenDocument files yet. Open it in LibreOffice, save a copy without the password, and open that copy.";
 /// The first open warning of a workbook decrypted with its password.
 pub const DECRYPTED_NOTICE: &str = "This workbook was password-protected. GridCraft saves it without the password.";
 
@@ -284,8 +287,14 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
         _ => kind.filter(|k| matches!(k, FileKind::Ods | FileKind::Xlsb)),
     };
     if let Some(import) = import {
-        let read = if import == FileKind::Ods { gridcraft_xlsx::read_ods } else { gridcraft_xlsx::read_xlsb };
-        let (wb, report) = read(bytes).map_err(|e| EngineError::Other(format!("We can't import '{name}': {e}")))?;
+        if import == FileKind::Ods {
+            if gridcraft_xlsx::is_encrypted_ods(bytes) {
+                return Err(EngineError::Other(format!("'{name}' {ENCRYPTED_ODS}")));
+            }
+            let (wb, report) = gridcraft_xlsx::read_ods(bytes).map_err(|e| EngineError::Other(format!("We can't open '{name}': {e}")))?;
+            return Ok((wb, report.warnings));
+        }
+        let (wb, report) = gridcraft_xlsx::read_xlsb(bytes).map_err(|e| EngineError::Other(format!("We can't import '{name}': {e}")))?;
         return Ok((wb, report.warnings));
     }
     // Text named `.xlsx` is read as text.

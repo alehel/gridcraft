@@ -53,13 +53,24 @@ fn xml_error(e: impl std::fmt::Display) -> IoError {
     IoError::Xml(format!("ODS: {e}"))
 }
 
+/// Whether `bytes` are an ODS package encrypted with a password to open (its manifest holds
+/// encryption data). Damaged or unreadable packages are not.
+pub fn is_encrypted_ods(bytes: &[u8]) -> bool {
+    if !has_mimetype(bytes) {
+        return false;
+    }
+    let Ok(mut package) = Package::open(bytes) else { return false };
+    let Ok(Some(manifest)) = package.read_limited("META-INF/manifest.xml", 16 * 1024 * 1024) else { return false };
+    dom::parse_tree(&manifest).is_ok_and(|root| !root.descendants(Ns::Manifest, "encryption-data").is_empty())
+}
+
 fn check_manifest(bytes: &[u8]) -> Result<(), IoError> {
     let root = dom::parse_tree(bytes)?;
     if !root.is(Ns::Manifest, "manifest") {
         return Err(xml_error("expected one manifest:manifest root"));
     }
     if !root.descendants(Ns::Manifest, "encryption-data").is_empty() {
-        return Err(IoError::Format("encrypted ODS files are not supported".into()));
+        return Err(IoError::Format("the file is password-protected (encrypted), which GridCraft can't open yet".into()));
     }
     Ok(())
 }

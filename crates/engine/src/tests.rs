@@ -2500,6 +2500,34 @@ fn ods_opens_with_formulas_and_saves_back_as_ods() {
     );
 }
 
+/// A password-protected ODS file is refused with a message that says so and what to do, and
+/// never asks for a password GridCraft can't use.
+#[test]
+fn encrypted_ods_says_it_is_password_protected() {
+    use std::io::{Cursor, Write};
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, data) in [
+        ("mimetype", "application/vnd.oasis.opendocument.spreadsheet"),
+        (
+            "META-INF/manifest.xml",
+            r#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml" manifest:size="100"><manifest:encryption-data manifest:checksum-type="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0#sha256-1k" manifest:checksum="AAAA"><manifest:algorithm manifest:algorithm-name="http://www.w3.org/2001/04/xmlenc#aes256-cbc" manifest:initialisation-vector="AAAA"/></manifest:encryption-data></manifest:file-entry></manifest:manifest>"#,
+        ),
+        ("content.xml", "\u{1}\u{2}not xml, encrypted bytes"),
+    ] {
+        zip.start_file(name, options).unwrap();
+        zip.write_all(data.as_bytes()).unwrap();
+    }
+    let bytes = zip.finish().unwrap().into_inner();
+    assert!(gridcraft_xlsx::is_encrypted_ods(&bytes));
+    assert!(!gridcraft_xlsx::is_encrypted_ods(&ods_fixture()));
+    for name in ["Budget.ods", "Budget.xlsx"] {
+        let err = crate::io::open_bytes(name, &bytes).unwrap_err().to_string();
+        assert!(err.contains(&format!("'{name}' {}", crate::io::ENCRYPTED_ODS)), "{err}");
+        assert!(!err.contains(crate::io::PASSWORD_REQUIRED), "{err}");
+    }
+}
+
 #[test]
 fn flat_ods_opens_and_saves_as_flat_xml() {
     let mut s = s();
