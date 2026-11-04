@@ -133,6 +133,7 @@ pub(crate) fn read(root: &Elem) -> Option<ChartDraft> {
         let bubble = own_class.trim_start_matches("chart:") == "bubble";
         let (values, x, bubble_sizes) = match (bubble, domains.as_slice()) {
             (true, [y, x, ..]) => (y.clone(), Some(x.clone()), Some(values)),
+            (true, [y]) => (y.clone(), None, Some(values)),
             (_, [x, ..]) => (values, Some(x.clone()), None),
             _ => (values, None, None),
         };
@@ -296,9 +297,10 @@ pub(crate) fn write(c: &Chart, theme: &Theme) -> ChartDoc {
             styles,
             r#"<style:style style:name="chs{i}" style:family="chart"><style:chart-properties{label}/><style:graphic-properties{graphic}/></style:style>"#
         );
-        // A bubble series' values are its sizes; its y values are a domain, before the x.
+        // A bubble series' values are its sizes; its y values are always a domain, before the
+        // x. With no sizes stated, the y values size the bubbles too, as ODF has them nowhere else.
         let bubble = c.kind == ChartKind::Bubble;
-        let sizes = s.bubble_sizes.as_deref().and_then(odf_range).filter(|_| bubble);
+        let sizes = if bubble { Some(s.bubble_sizes.as_deref().and_then(odf_range).unwrap_or_else(|| values.clone())) } else { None };
         let _ = write!(
             series,
             r#"<chart:series chart:style-name="chs{i}" chart:values-cell-range-address="{}""#,
@@ -452,6 +454,18 @@ mod tests {
             (s.values.as_str(), s.categories.as_deref(), s.bubble_sizes.as_deref()),
             ("Data!$B$2:$B$4", Some("Data!$A$2:$A$4"), Some("Data!$C$2:$C$4"))
         );
+        // No x values: the y values stay the y values.
+        let mut no_x = chart.clone();
+        no_x.series[0].categories = None;
+        let d = read(&parse_tree(write(&no_x, &Theme::default()).package().as_bytes()).unwrap()).unwrap();
+        let s = &d.series[0];
+        assert_eq!((s.values.as_str(), s.categories.as_deref(), s.bubble_sizes.as_deref()), ("Data!$B$2:$B$4", None, Some("Data!$C$2:$C$4")));
+        // No sizes: the y values size the bubbles, and the x values stay the x values.
+        let mut no_sizes = chart;
+        no_sizes.series[0].bubble_sizes = None;
+        let d = read(&parse_tree(write(&no_sizes, &Theme::default()).package().as_bytes()).unwrap()).unwrap();
+        let s = &d.series[0];
+        assert_eq!((s.values.as_str(), s.categories.as_deref()), ("Data!$B$2:$B$4", Some("Data!$A$2:$A$4")));
     }
 
     /// A series over several ranges reads as their union, and writes back as the list.

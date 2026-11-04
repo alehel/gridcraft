@@ -796,3 +796,45 @@ fn ods_writer_round_two() {
     assert!(back.names.iter().any(|n| n.name == "Sales"));
     assert_eq!(back.sheets[0].shapes.first().map(|s| s.text.as_str()), Some("a  b"));
 }
+
+/// A page wider than tall with no stated orientation is landscape, and its paper is the page
+/// turned: a 17×11 in page is landscape Tabloid, not portrait Ledger printed sideways.
+#[test]
+fn ods_wide_page_without_orientation_is_turned_paper() {
+    let flat = r#"<?xml version="1.0"?><office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" office:mimetype="application/vnd.oasis.opendocument.spreadsheet"><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="17in" fo:page-height="11in"/></style:page-layout><style:style style:name="ta1" style:family="table" style:master-page-name="Default"/></office:automatic-styles><office:master-styles><style:master-page style:name="Default" style:page-layout-name="pm1"/></office:master-styles><office:body><office:spreadsheet><table:table table:name="S" table:style-name="ta1"><table:table-row><table:table-cell/></table:table-row></table:table></office:spreadsheet></office:body></office:document>"#;
+    let (wb, _) = crate::read_fods(flat.as_bytes()).unwrap();
+    let p = &wb.sheets[0].print;
+    assert_eq!(p.orientation, gridcraft_model::Orientation::Landscape);
+    assert_eq!(p.paper, "Tabloid");
+}
+
+/// Round-three reader limits: each position's copy of a repeated note counts as text, and an
+/// empty unstyled cell spanning many column styles isn't split at their edges.
+#[test]
+fn ods_repeated_notes_and_column_runs_are_bounded() {
+    let styles = r#"<style:style style:name="ce1" style:family="table-cell"><style:text-properties fo:font-weight="bold"/></style:style><style:style style:name="ce2" style:family="table-cell"><style:text-properties fo:font-style="italic"/></style:style>"#;
+    let note = "x".repeat(100_000);
+    let notes = format!(
+        r#"<table:table table:name="Data"><table:table-row table:number-rows-repeated="100"><table:table-cell table:number-columns-repeated="4000"><office:annotation><text:p>{note}</text:p></office:annotation></table:table-cell></table:table-row></table:table>"#
+    );
+    assert!(matches!(read_ods(&styled_ods(styles, &notes)), Err(crate::IoError::TooLarge(_))));
+    let columns: String = (0..16384).map(|i| format!(r#"<table:table-column table:default-cell-style-name="ce{}"/>"#, 1 + i % 2)).collect();
+    let rows = r#"<table:table-row><table:table-cell table:number-columns-repeated="16384"/></table:table-row>"#.repeat(2500);
+    let (wb, _) = read_ods(&styled_ods(styles, &format!(r#"<table:table table:name="Data">{columns}{rows}</table:table>"#))).unwrap();
+    assert!(wb.sheets[0].cells.is_empty());
+}
+
+/// Page layouts kept for the sheets that use them count against one limit over the document.
+#[test]
+fn ods_kept_page_layouts_are_bounded() {
+    let filler = "<a/>".repeat(800_000);
+    // Each in its own styles block, as one element may hold only so many.
+    let styles: String = (0..3)
+        .map(|i| format!(r#"<style:page-layout style:name="pm{i}">{filler}</style:page-layout>"#))
+        .collect::<Vec<_>>()
+        .join("</office:automatic-styles><office:automatic-styles>");
+    let (_, report) =
+        read_ods(&styled_ods(&styles, r#"<table:table table:name="Data"><table:table-row><table:table-cell/></table:table-row></table:table>"#))
+            .unwrap();
+    assert!(report.warnings.iter().any(|w| w.contains("page styles")), "{:?}", report.warnings);
+}

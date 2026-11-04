@@ -374,6 +374,18 @@ impl DocState {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| self.title.clone())
     }
+
+    /// The workbook format this document is kept in, as an extension: `ods` or `fods` for an
+    /// OpenDocument one (by what its content was when opened, else by its name), else `xlsx`,
+    /// as Save keeps the document's own file. What Save As and a download keep when no other
+    /// type is chosen.
+    pub fn workbook_format(&self) -> &'static str {
+        match self.content_kind.or_else(|| io::FileKind::from_path(&self.display_title())) {
+            Some(io::FileKind::Ods) => "ods",
+            Some(io::FileKind::Fods) => "fods",
+            _ => "xlsx",
+        }
+    }
 }
 
 /// Engine-side preferences.

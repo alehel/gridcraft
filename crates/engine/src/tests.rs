@@ -2541,7 +2541,16 @@ fn flat_ods_opens_and_saves_as_flat_xml() {
         let mut t = super::tests::s();
         t.execute("file.open", json!({"name": name, "base64": saved["base64"]})).unwrap();
         assert_eq!(v(&t, "A2"), Value::Number(42.0), "{name}");
+        // Save As keeps the format it was in under an unknown name; one that isn't what its
+        // name says was imported, and saves as a workbook.
+        let kept = if name == "book.ods" { "xlsx" } else { "fods" };
+        assert_eq!(t.active().unwrap().workbook_format(), kept, "{name}");
     }
+    let mut t = super::tests::s();
+    assert_eq!(t.active().unwrap().workbook_format(), "xlsx");
+    let ods = t.execute("file.saveBytes", json!({"format": "ods"})).unwrap();
+    t.execute("file.open", json!({"name": "data.dat", "base64": ods["base64"]})).unwrap();
+    assert_eq!(t.active().unwrap().workbook_format(), "ods");
 }
 
 #[test]

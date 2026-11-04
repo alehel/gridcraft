@@ -64,7 +64,7 @@ pub(crate) fn from_odf(src: &str) -> Option<String> {
 
 /// OpenFormula functions whose last argument defaults to TRUE where the Excel function they
 /// become requires it: name and the full argument count.
-const TRUE_BY_DEFAULT: [(&str, usize); 2] = [("CHISQDIST", 3), ("FDIST", 4)];
+const TRUE_BY_DEFAULT: [(&str, usize); 6] = [("CHISQDIST", 3), ("EXPONDIST", 3), ("FDIST", 4), ("GAMMADIST", 4), ("NORMDIST", 4), ("POISSON", 3)];
 
 /// Adds the defaulted `TRUE` to the call whose `Func` token is at `func`, when it was given one
 /// argument fewer than `full`.
@@ -781,6 +781,8 @@ mod tests {
         assert_eq!(from_odf("of:=SUM([.A1:$Sheet2.B2])").as_deref(), Some("SUM(#REF!)"));
         // Cumulative defaults to TRUE in OpenFormula; Excel requires it.
         assert_eq!(from_odf("of:=CHISQDIST(1;2)").as_deref(), Some("CHISQ.DIST(1,2,TRUE)"));
+        assert_eq!(from_odf("of:=NORMDIST(1;0;1)").as_deref(), Some("NORMDIST(1,0,1,TRUE)"));
+        assert_eq!(from_odf("of:=POISSON(1;2;FALSE())").as_deref(), Some("POISSON(1,2,FALSE)"));
         // Some writers separate arguments with `,`; a bare word that spells a cell reads as that
         // cell, as LibreOffice reads it.
         assert_eq!(from_odf("OFFSET(cat1,0,2,,)").as_deref(), Some("OFFSET(CAT1,0,2,,)"));

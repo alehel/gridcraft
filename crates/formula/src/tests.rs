@@ -576,7 +576,10 @@ fn parse_tokens_reads_another_syntaxs_tokens() {
     let r = |col| Tok::Ref(Reference { sheet: SheetSel::Current, kind: RefKind::Cell(Anchor { row: 0, col, row_abs: false, col_abs: false }) });
     let toks = |ts: Vec<Tok>| ts.into_iter().map(|tok| Token { tok, start: 0, end: 0 }).collect::<Vec<_>>();
     let e = crate::parse_tokens(toks(vec![Tok::Func("SUM".into()), r(0), Tok::Op("~"), r(1), Tok::RParen])).unwrap();
-    assert!(matches!(&e, Expr::Call(_, args) if matches!(args.as_slice(), [Expr::Binary(BinOp::Union, ..)])));
+    // A union argument is bracketed, as `SUM((A1,B1))` prints.
+    assert!(
+        matches!(&e, Expr::Call(_, args) if matches!(args.as_slice(), [Expr::Paren(inner)] if matches!(**inner, Expr::Binary(BinOp::Union, ..))))
+    );
     let e = crate::parse_tokens(toks(vec![r(0), Tok::Space, r(1)])).unwrap();
     assert!(matches!(e, Expr::Binary(BinOp::Intersect, ..)));
 }
