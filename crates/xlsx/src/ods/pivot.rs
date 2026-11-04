@@ -97,14 +97,7 @@ fn field(f: &Elem) -> PivotField {
 pub(crate) fn read(p: &Elem, id: u32) -> Option<(String, PivotTable)> {
     let (sheet, target) = formula::range_on_sheet(p.attr(Ns::Table, "target-range-address")?)?;
     let source = p.child(Ns::Table, "source-cell-range").and_then(|s| s.attr(Ns::Table, "cell-range-address")).and_then(formula::range_on_sheet)?;
-    let src = {
-        let a = gridcraft_formula::Anchor { row: source.1.start.row, col: source.1.start.col, row_abs: true, col_abs: true };
-        let b = gridcraft_formula::Anchor { row: source.1.end.row, col: source.1.end.col, row_abs: true, col_abs: true };
-        gridcraft_formula::printer::reference_a1(&gridcraft_formula::Reference {
-            sheet: gridcraft_formula::SheetSel::Named(source.0.clone()),
-            kind: gridcraft_formula::RefKind::Range(a, b),
-        })
-    };
+    let src = gridcraft_formula::printer::reference_a1(&formula::absolute(&source.0, source.1, false));
     let mut pt = PivotTable { id, name: p.attr(Ns::Table, "name").unwrap_or("DataPilot1").to_string(), source: src, ..PivotTable::default() };
     let mut layout_seen = false;
     for f in p.children(Ns::Table, "data-pilot-field") {

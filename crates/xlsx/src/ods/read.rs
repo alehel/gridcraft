@@ -77,7 +77,7 @@ fn check_manifest(bytes: &[u8]) -> Result<(), IoError> {
         return Err(xml_error("expected one manifest:manifest root"));
     }
     if !root.descendants(Ns::Manifest, "encryption-data").is_empty() {
-        return Err(IoError::Format("the file is password-protected (encrypted), which GridCraft can't open yet".into()));
+        return Err(IoError::Encrypted);
     }
     Ok(())
 }
@@ -1223,12 +1223,7 @@ impl Import {
             && !self.wb.names.iter().any(|n| n.name.eq_ignore_ascii_case(name))
             && self.wb.sheets.iter().any(|s| s.name == sheet)
         {
-            let a = gridcraft_formula::Anchor { row: range.start.row, col: range.start.col, row_abs: true, col_abs: true };
-            let b = gridcraft_formula::Anchor { row: range.end.row, col: range.end.col, row_abs: true, col_abs: true };
-            let r = gridcraft_formula::Reference {
-                sheet: gridcraft_formula::SheetSel::Named(sheet.clone()),
-                kind: gridcraft_formula::RefKind::Range(a, b),
-            };
+            let r = formula::absolute(&sheet, range, false);
             self.wb.names.push(DefinedName {
                 name: name.to_string(),
                 scope: None,

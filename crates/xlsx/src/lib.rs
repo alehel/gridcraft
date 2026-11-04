@@ -65,6 +65,9 @@ pub enum IoError {
     Format(String),
     #[error("the file is too large: {0}")]
     TooLarge(String),
+    /// Encrypted with a password to open, in a scheme the reader can't decrypt.
+    #[error("the file is password-protected (encrypted), which GridCraft can't open yet")]
+    Encrypted,
 }
 
 /// What a lenient read skipped or repaired.

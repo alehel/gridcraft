@@ -293,8 +293,13 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
             "'{name}' is a legacy binary file but not an Excel workbook (no workbook stream). GridCraft can't open it."
         )));
     }
-    // Content wins over the extension: an ODS or XLSB package is imported as what it is,
-    // whatever it is called; the extension only decides when the bytes don't say.
+    // Content wins over the extension: a flat OpenDocument spreadsheet (XML text), an ODS or
+    // an XLSB package is read as what it is, whatever it is called; the extension only decides
+    // when the bytes don't say.
+    if gridcraft_xlsx::is_flat_ods(bytes) {
+        let (wb, report) = gridcraft_xlsx::read_fods(bytes).map_err(|e| EngineError::Other(format!("We can't open '{name}': {e}")))?;
+        return Ok((wb, report.warnings, FileKind::Fods));
+    }
     let import = match sniffed {
         gridcraft_xlsx::Format::Ods => Some(FileKind::Ods),
         gridcraft_xlsx::Format::Xlsb => Some(FileKind::Xlsb),
@@ -304,10 +309,12 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
     };
     if let Some(import) = import {
         if import == FileKind::Ods {
-            if gridcraft_xlsx::is_encrypted_ods(bytes) {
-                return Err(EngineError::Other(format!("'{name}' {ENCRYPTED_ODS}")));
-            }
-            let (wb, report) = gridcraft_xlsx::read_ods(bytes).map_err(|e| EngineError::Other(format!("We can't open '{name}': {e}")))?;
+            let (wb, report) = gridcraft_xlsx::read_ods(bytes).map_err(|e| {
+                EngineError::Other(match e {
+                    gridcraft_xlsx::IoError::Encrypted => format!("'{name}' {ENCRYPTED_ODS}"),
+                    e => format!("We can't open '{name}': {e}"),
+                })
+            })?;
             return Ok((wb, report.warnings, FileKind::Ods));
         }
         let (wb, report) = gridcraft_xlsx::read_xlsb(bytes).map_err(|e| EngineError::Other(format!("We can't import '{name}': {e}")))?;
@@ -324,8 +331,8 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
         })?;
         return Ok((wb, report.warnings, FileKind::Xlsx));
     }
-    // A flat OpenDocument spreadsheet is XML text, whatever its name.
-    if kind == Some(FileKind::Fods) || gridcraft_xlsx::is_flat_ods(bytes) {
+    // Named `.fods` but not recognisably one: the flat reader says what is wrong with it.
+    if kind == Some(FileKind::Fods) {
         let (wb, report) = gridcraft_xlsx::read_fods(bytes).map_err(|e| EngineError::Other(format!("We can't open '{name}': {e}")))?;
         return Ok((wb, report.warnings, FileKind::Fods));
     }

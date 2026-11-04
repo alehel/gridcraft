@@ -38,27 +38,10 @@ fn range_text(list: &str) -> Option<String> {
 
 /// One ODF range address as an absolute A1 reference.
 fn one_range(addr: &str) -> Option<String> {
-    let mut r = formula::parse_odf_ref(addr)?;
+    let r = formula::parse_odf_ref(addr)?;
+    let gridcraft_formula::SheetSel::Named(sheet) = &r.sheet else { return None };
     // `Title.B1:Title.B1` names one cell.
-    if let gridcraft_formula::RefKind::Range(a, b) = r.kind
-        && a.row == b.row
-        && a.col == b.col
-    {
-        r.kind = gridcraft_formula::RefKind::Cell(a);
-    }
-    let abs = |a: &mut gridcraft_formula::Anchor| {
-        a.row_abs = true;
-        a.col_abs = true;
-    };
-    match &mut r.kind {
-        gridcraft_formula::RefKind::Cell(a) => abs(a),
-        gridcraft_formula::RefKind::Range(a, b) => {
-            abs(a);
-            abs(b);
-        }
-        _ => {}
-    }
-    Some(gridcraft_formula::printer::reference_a1(&r))
+    Some(gridcraft_formula::printer::reference_a1(&formula::absolute(sheet, r.range(), true)))
 }
 
 fn styles_of(root: &Elem) -> HashMap<String, &Elem> {
@@ -198,7 +181,13 @@ fn odf_range(a1: &str) -> Option<String> {
     let mut pending = vec![&e];
     while let Some(x) = pending.pop() {
         match x {
-            gridcraft_formula::Expr::Ref(r) => refs.push(formula::address(r)),
+            // A cell range address names cells: whole columns and rows by their cells.
+            gridcraft_formula::Expr::Ref(r) => refs.push(match (&r.sheet, &r.kind) {
+                (gridcraft_formula::SheetSel::Named(s), gridcraft_formula::RefKind::Cols(..) | gridcraft_formula::RefKind::Rows(..)) => {
+                    formula::address(&formula::absolute(s, r.range(), false))
+                }
+                _ => formula::address(r),
+            }),
             gridcraft_formula::Expr::Paren(inner) => pending.push(inner),
             gridcraft_formula::Expr::Binary(gridcraft_formula::BinOp::Union, a, b) => {
                 pending.push(b);

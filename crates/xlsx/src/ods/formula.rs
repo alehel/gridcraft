@@ -15,8 +15,10 @@ use gridcraft_formula::{Anchor, BinOp, Dialect, Expr, RefKind, Reference, SheetS
 
 use super::names::{excel_to_odf, odf_to_excel};
 
-/// Longest formula text translated; longer text is kept unevaluated.
-const MAX_LEN: usize = 64 * 1024;
+/// Longest formula text translated; longer text is kept unevaluated. OpenFormula spells a
+/// formula longer than A1 does (`[.A1]` for `A1`): this allows what A1 holds, at most
+/// [`gridcraft_formula::MAX_FORMULA_LEN`] characters, and the parser holds its tokens to that.
+const MAX_LEN: usize = 4 * gridcraft_formula::MAX_FORMULA_LEN;
 
 /// The syntax a formula attribute's namespace prefix names.
 enum Syntax<'a> {
@@ -52,7 +54,7 @@ pub(crate) fn parse_odf(src: &str) -> Option<Expr> {
         Syntax::Excel(body) => gridcraft_formula::parse(body).ok()?,
         Syntax::Open(body) => gridcraft_formula::parse_tokens(tokens(body)?).ok()?,
     };
-    Some(in_parens(e.map(&mut |e| enclose_unions(default_arguments(e)))))
+    Some(e)
 }
 
 /// [`parse_odf`] as A1 formula text without the `=`.
@@ -60,38 +62,36 @@ pub(crate) fn from_odf(src: &str) -> Option<String> {
     parse_odf(src).map(|e| gridcraft_formula::print(&e))
 }
 
-/// OpenFormula's `CHISQDIST` and `FDIST` default their `Cumulative` argument to TRUE; the Excel
-/// functions they become require it.
-fn default_arguments(e: Expr) -> Expr {
-    match e {
-        Expr::Call(name, mut args) if (name == "CHISQ.DIST" && args.len() == 2) || (name == "F.DIST" && args.len() == 3) => {
-            // As OpenFormula writes the constant, so it reads back the same.
-            args.push(Expr::Call("TRUE".into(), Vec::new()));
-            Expr::Call(name, args)
+/// OpenFormula functions whose last argument defaults to TRUE where the Excel function they
+/// become requires it: name and the full argument count.
+const TRUE_BY_DEFAULT: [(&str, usize); 2] = [("CHISQDIST", 3), ("FDIST", 4)];
+
+/// Adds the defaulted `TRUE` to the call whose `Func` token is at `func`, when it was given one
+/// argument fewer than `full`.
+fn add_default_true(toks: &mut Vec<Token>, func: usize, full: usize) {
+    let (mut depth, mut commas, mut any) = (1usize, 0usize, false);
+    let mut close = None;
+    for (k, t) in toks.iter().enumerate().skip(func + 1) {
+        match t.tok {
+            Tok::LParen | Tok::Func(_) | Tok::LBrace => depth += 1,
+            Tok::RParen | Tok::RBrace => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(k);
+                    break;
+                }
+            }
+            Tok::Comma if depth == 1 => commas += 1,
+            _ => {}
         }
-        other => other,
+        any = true;
     }
-}
-
-/// A union in parentheses: A1 text writes a union only there, while OpenFormula's `~` stands
-/// anywhere (`SUM([.A1]~[.B1])`).
-fn in_parens(e: Expr) -> Expr {
-    match e {
-        Expr::Binary(BinOp::Union, ..) => Expr::Paren(Box::new(e)),
-        other => other,
-    }
-}
-
-/// `e` with each union directly under it (not in a union or parentheses) put in parentheses.
-fn enclose_unions(e: Expr) -> Expr {
-    let all = |v: Vec<Expr>| v.into_iter().map(in_parens).collect::<Vec<_>>();
-    match e {
-        Expr::Binary(op, a, b) if op != BinOp::Union => Expr::Binary(op, Box::new(in_parens(*a)), Box::new(in_parens(*b))),
-        Expr::Unary(op, x) => Expr::Unary(op, Box::new(in_parens(*x))),
-        Expr::Call(name, args) => Expr::Call(name, all(args)),
-        Expr::Invoke(f, args) => Expr::Invoke(Box::new(in_parens(*f)), all(args)),
-        Expr::Array(rows) => Expr::Array(rows.into_iter().map(all).collect()),
-        other => other,
+    let Some(close) = close else { return };
+    let given = if any { commas + 1 } else { 0 };
+    if given + 1 == full {
+        let at = toks.get(close).map_or(0, |t| t.start);
+        let tok = |tok| Token { tok, start: at, end: at };
+        toks.splice(close..close, [tok(Tok::Comma), tok(Tok::Bool(true))]);
     }
 }
 
@@ -101,6 +101,7 @@ fn tokens(body: &str) -> Option<Vec<Token>> {
     let at = |i: usize| chars.get(i).map(|c| c.1);
     let pos = |i: usize| chars.get(i).map_or(body.len(), |c| c.0);
     let mut out = Vec::new();
+    let mut defaults: Vec<(usize, usize)> = Vec::new();
     let mut braces = 0usize;
     let mut i = 0usize;
     while let Some(c) = at(i) {
@@ -245,29 +246,51 @@ fn tokens(body: &str) -> Option<Vec<Token>> {
                 Tok::Number(n)
             }
             c if c.is_alphabetic() || c == '_' || c == '\\' => {
-                let (w, j) = word(&chars, i)?;
-                // A function name is followed (possibly after spaces) by `(`, which it takes.
-                let mut k = j;
-                while at(k) == Some(' ') {
-                    k += 1;
-                }
-                if at(k) == Some('(') {
-                    i = k + 1;
-                    Tok::Func(odf_to_excel(&w))
-                } else {
-                    i = j;
-                    match w.to_ascii_uppercase().as_str() {
-                        "TRUE" => Tok::Bool(true),
-                        "FALSE" => Tok::Bool(false),
-                        _ => Tok::Word(w),
-                    }
-                }
+                let (tok, next) = name_token(&chars, i, out.len(), &mut defaults)?;
+                i = next;
+                tok
             }
             _ => return None,
         };
         out.push(Token { tok, start: pos(start), end: pos(i) });
     }
+    // Later calls first, so earlier indices stay put.
+    for (func, full) in defaults.into_iter().rev() {
+        add_default_true(&mut out, func, full);
+    }
     Some(out)
+}
+
+/// The name starting at `i`: a function (its `(` taken, its index noted in `defaults` when an
+/// argument defaults to TRUE), the constants `TRUE()`/`FALSE()` or `TRUE`/`FALSE`, or a defined
+/// name; and the index after it.
+fn name_token(chars: &[(usize, char)], i: usize, index: usize, defaults: &mut Vec<(usize, usize)>) -> Option<(Tok, usize)> {
+    let at = |k: usize| chars.get(k).map(|c| c.1);
+    let (w, j) = word(chars, i)?;
+    let skip_spaces = |mut k: usize| {
+        while at(k) == Some(' ') {
+            k += 1;
+        }
+        k
+    };
+    let constant = match w.to_ascii_uppercase().as_str() {
+        "TRUE" => Some(true),
+        "FALSE" => Some(false),
+        _ => None,
+    };
+    // A function name is followed (possibly after spaces) by `(`, which it takes.
+    let open = skip_spaces(j);
+    if at(open) != Some('(') {
+        return Some((constant.map_or(Tok::Word(w), Tok::Bool), j));
+    }
+    let close = skip_spaces(open + 1);
+    if let Some(b) = constant.filter(|_| at(close) == Some(')')) {
+        return Some((Tok::Bool(b), close + 1));
+    }
+    if let Some((_, full)) = TRUE_BY_DEFAULT.iter().find(|(n, _)| n.eq_ignore_ascii_case(&w)) {
+        defaults.push((index, *full));
+    }
+    Some((Tok::Func(odf_to_excel(&w)), open + 1))
 }
 
 /// The index of the `]` closing a reference opened before `from` (quoted sheet names may hold
@@ -353,12 +376,17 @@ fn split_sheet(s: &str) -> (Option<&str>, &str) {
 /// text that isn't one end of a reference.
 fn parse_end(s: &str) -> Option<OdfEnd> {
     let (sheet, cell) = split_sheet(s.trim());
+    // A `#` outside quotes in the sheet part names another document (`'file:///x.ods'#Sheet1`)
+    // or a deleted sheet (`#REF!`): neither is a sheet of this workbook.
+    if sheet.is_some_and(|sh| sh.split('\'').step_by(2).any(|unquoted| unquoted.contains('#'))) {
+        return None;
+    }
     let sheet = match sheet {
         // `[.A1]`: the formula's own sheet.
         Some("") | None => None,
         Some(sh) => Some(gridcraft_core::unquote_sheet(sh.strip_prefix('$').unwrap_or(sh))),
     };
-    if cell.contains('#') || sheet.as_deref().is_some_and(|s| s.starts_with('#')) {
+    if cell.contains('#') {
         return None;
     }
     let b = cell.as_bytes();
@@ -414,9 +442,6 @@ fn split_range(s: &str) -> Option<(&str, &str)> {
 /// first doesn't (the formula's own sheet isn't known here).
 pub(crate) fn parse_odf_ref(inner: &str) -> Option<Reference> {
     let inner = inner.trim();
-    if inner.starts_with('\'') && inner.contains("'#") {
-        return None;
-    }
     let Some((a, b)) = split_range(inner) else {
         let end = parse_end(inner)?;
         let sheet = end.sheet.clone().map_or(SheetSel::Current, SheetSel::Named);
@@ -498,6 +523,14 @@ pub(crate) fn range_address(sheet: &str, r: RangeRef) -> String {
     )
 }
 
+/// `range` on `sheet` as an absolute reference (a single cell when `cell` and it is one).
+pub(crate) fn absolute(sheet: &str, range: RangeRef, cell: bool) -> Reference {
+    let a = Anchor { row: range.start.row, col: range.start.col, row_abs: true, col_abs: true };
+    let b = Anchor { row: range.end.row, col: range.end.col, row_abs: true, col_abs: true };
+    let kind = if cell && range.start == range.end { RefKind::Cell(a) } else { RefKind::Range(a, b) };
+    Reference { sheet: SheetSel::Named(sheet.to_string()), kind }
+}
+
 /// Looks up a table's ranges for structured references, which ODF formulas have no syntax for.
 pub(crate) trait Tables {
     /// The sheet and range a structured reference covers at `at`, or `None` (written as `#REF!`).
@@ -544,13 +577,7 @@ impl Dialect for OpenFormula<'_> {
 
     fn struct_ref(&self, s: &mut String, st: &StructRef) {
         match self.tables.resolve(st, self.at) {
-            Some((sheet, range)) => {
-                let a = Anchor { row: range.start.row, col: range.start.col, row_abs: true, col_abs: true };
-                let b = Anchor { row: range.end.row, col: range.end.col, row_abs: true, col_abs: true };
-                let kind =
-                    if range.start == range.end && !st.specifiers.contains(&StructItem::All) { RefKind::Cell(a) } else { RefKind::Range(a, b) };
-                write_ref(s, &Reference { sheet: SheetSel::Named(sheet), kind });
-            }
+            Some((sheet, range)) => write_ref(s, &absolute(&sheet, range, !st.specifiers.contains(&StructItem::All))),
             None => s.push_str("#REF!"),
         }
     }
@@ -685,7 +712,11 @@ mod tests {
         rt("of:=SUM([.A:.A])", "SUM(A:A)");
         rt("of:=SUM([.$1:.$3])", "SUM($1:$3)");
         rt("of:=SUM([$Sheet1.A1:$Sheet3.B2])", "SUM(Sheet1:Sheet3!A1:B2)");
-        rt("of:=IF([.A1]=\"a;b\";TRUE();FALSE())", "IF(A1=\"a;b\",TRUE(),FALSE())");
+        rt("of:=IF([.A1]=\"a;b\";TRUE();FALSE())", "IF(A1=\"a;b\",TRUE,FALSE)");
+        // Constants in an inline array read back.
+        rt("of:=SUM({1;TRUE()})", "SUM({1,TRUE})");
+        // A sheet whose name holds `'#` is a sheet, not another document.
+        assert_eq!(from_odf("of:=['a''#b'.A1]").as_deref(), Some("'a''#b'!A1"));
         rt("of:=SUM({1;2|3;4})", "SUM({1,2;3,4})");
         rt("of:=[.A1]&\"x\"\"y\"", "A1&\"x\"\"y\"");
         rt("of:=1E+20*-[.B1]%", "1E+20*-B1%");
@@ -708,7 +739,7 @@ mod tests {
         // A range whose second end alone names a sheet can't be placed.
         assert_eq!(from_odf("of:=SUM([.A1:$Sheet2.B2])").as_deref(), Some("SUM(#REF!)"));
         // Cumulative defaults to TRUE in OpenFormula; Excel requires it.
-        assert_eq!(from_odf("of:=CHISQDIST(1;2)").as_deref(), Some("CHISQ.DIST(1,2,TRUE())"));
+        assert_eq!(from_odf("of:=CHISQDIST(1;2)").as_deref(), Some("CHISQ.DIST(1,2,TRUE)"));
         // Some writers separate arguments with `,`; a bare word that spells a cell reads as that
         // cell, as LibreOffice reads it.
         assert_eq!(from_odf("OFFSET(cat1,0,2,,)").as_deref(), Some("OFFSET(CAT1,0,2,,)"));

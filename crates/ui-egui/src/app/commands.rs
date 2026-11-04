@@ -382,10 +382,15 @@ impl SheetApp {
             "saveAs" => {
                 // `format` (a workbook extension: xlsx by default, or ods) picks the suggested name
                 // and what a name without an extension is saved as.
-                let format = params.get("format").and_then(Json::as_str).filter(|f| matches!(*f, "xlsx" | "ods")).unwrap_or("xlsx");
+                let chosen = params.get("format").and_then(Json::as_str).filter(|f| matches!(*f, "xlsx" | "ods"));
+                let format = chosen.unwrap_or("xlsx");
                 let title = self.session.active().map(|d| d.display_title()).unwrap_or_else(|| "Book1".into());
-                let suggested =
-                    if format == "xlsx" { title } else { std::path::Path::new(&title).with_extension(format).to_string_lossy().into_owned() };
+                // A format chosen (Backstage's file type) names the file; plain Save As suggests
+                // the workbook's own name.
+                let suggested = match chosen {
+                    Some(f) => std::path::Path::new(&title).with_extension(f).to_string_lossy().into_owned(),
+                    None => title,
+                };
                 if let Some(pick) = &self.services.pick_save {
                     if let Some(path) = pick(&suggested) {
                         let path = if std::path::Path::new(&path).extension().is_none() { format!("{path}.{format}") } else { path };

@@ -57,9 +57,13 @@ pub fn parse_closing_parens<T>(src: &str, parse: impl Fn(&str) -> Result<T, Pars
 
 /// Parses tokens another syntax's tokenizer produced (OpenFormula, say) with this grammar.
 /// Spaces are taken as the tokenizer gave them: a [`Tok::Space`] is the intersection operator.
-/// `Op("~")` is a union anywhere (A1 text writes one only inside parentheses: the caller adds
-/// them where it prints one).
+/// `Op("~")` is a union anywhere; where A1 would read a comma as something else (an argument,
+/// an operand), the union is put in parentheses, so the expression prints as it means. At most
+/// [`MAX_FORMULA_LEN`] tokens, as A1 text is held to that many characters.
 pub fn parse_tokens(toks: Vec<Token>) -> Result<Expr, ParseError> {
+    if toks.len() > MAX_FORMULA_LEN {
+        return Err(ParseError { msg: format!("formula has more than {MAX_FORMULA_LEN} tokens"), pos: 0 });
+    }
     let mut p = Parser { toks, i: 0, depth: 0, input: false };
     let e = p.expr(0, false)?;
     match p.peek() {
@@ -84,6 +88,15 @@ fn parse_top(src: &str, locale: crate::FormulaLocale, allow_union: bool) -> Resu
     match p.peek() {
         Tok::Eof => Ok(e),
         t => Err(p.err(format!("unexpected {}", describe(t)))),
+    }
+}
+
+/// A union (only `~` makes one where unions aren't allowed) in the parentheses A1 needs around
+/// it there.
+fn enclose_union(e: Expr, allow_union: bool) -> Expr {
+    match e {
+        Expr::Binary(BinOp::Union, ..) if !allow_union => Expr::Paren(Box::new(e)),
+        other => other,
     }
 }
 
@@ -261,10 +274,13 @@ impl Parser {
             }
             self.next();
             let rhs = self.expr(bp + 1, allow_union)?;
+            if op != BinOp::Union {
+                lhs = enclose_union(lhs, allow_union);
+            }
             lhs = combine(op, lhs, rhs);
         }
         self.depth -= 1;
-        Ok(lhs)
+        Ok(enclose_union(lhs, allow_union))
     }
 
     fn args(&mut self) -> Result<Vec<Expr>, ParseError> {

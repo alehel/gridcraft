@@ -2536,8 +2536,8 @@ fn flat_ods_opens_and_saves_as_flat_xml() {
     let saved = s.execute("file.saveBytes", json!({"format": "fods"})).unwrap();
     let bytes = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
     assert!(bytes.starts_with(b"<?xml") && gridcraft_xlsx::is_flat_ods(&bytes));
-    // By name, and by content under another name.
-    for name in ["book.fods", "book.xml"] {
+    // By name, and by content under another name, `.ods` included.
+    for name in ["book.fods", "book.xml", "book.ods"] {
         let mut t = super::tests::s();
         t.execute("file.open", json!({"name": name, "base64": saved["base64"]})).unwrap();
         assert_eq!(v(&t, "A2"), Value::Number(42.0), "{name}");
@@ -2594,6 +2594,8 @@ fn ods_templates_open_untitled_and_save_with_the_template_mimetype() {
     s.execute("file.open", json!({"name": "Invoice.ots", "base64": crate::io::base64_encode(&ods_fixture())})).unwrap();
     assert_eq!(s.doc().unwrap().display_title(), "Invoice.ods");
     assert_eq!(s.doc().unwrap().path, None);
+    // It is no file yet: `CELL("filename")` names none.
+    assert_eq!(s.doc().unwrap().wb.source_path, None);
     let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "Invoice.ots").unwrap();
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
     let mut mime = String::new();
