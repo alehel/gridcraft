@@ -374,7 +374,8 @@ pub(crate) fn to_style(p: &Props, base: &Style, num_fmt: Option<String>) -> Styl
 
 // ------------------------------------------------------------------------------------- writing
 
-fn hex(c: Color, theme: &gridcraft_model::Theme) -> Option<String> {
+/// A colour as ODF writes it (`#rrggbb`), `None` for automatic.
+pub(crate) fn hex(c: Color, theme: &gridcraft_model::Theme) -> Option<String> {
     c.resolve(theme).map(|[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}"))
 }
 

@@ -19,6 +19,9 @@ pub enum PasswordHash {
     Legacy(u16),
     /// An iterated, salted hash as stored in the file: algorithm name, base64 hash and salt.
     Iterated { algorithm: String, hash: String, salt: String, spin_count: u32 },
+    /// An OpenDocument protection key: the base64 SHA-256 digest of the password's UTF-8 bytes,
+    /// unsalted (ODF 1.3 part 3 §19.699, `table:protection-key`).
+    Sha256Digest(String),
 }
 
 impl PasswordHash {
@@ -35,19 +38,10 @@ impl PasswordHash {
 
     /// Whether `password` matches. `Err` when the hash can't be checked (unsupported algorithm,
     /// broken base64, spin count over [`MAX_SPIN_COUNT`]).
-    /// The algorithm name of an OpenDocument protection key: the SHA-256 digest of the
-    /// password's UTF-8 bytes, unsalted (ODF 1.3 part 3 §19.699, `table:protection-key`).
-    pub const ODF_SHA256: &'static str = "ODF-SHA-256";
-
-    /// An OpenDocument protection key (base64 SHA-256 of the password) as read from a file.
-    pub fn odf_sha256(key: &str) -> PasswordHash {
-        PasswordHash::Iterated { algorithm: Self::ODF_SHA256.into(), hash: key.trim().to_string(), salt: String::new(), spin_count: 0 }
-    }
-
     pub fn verify(&self, password: &str) -> Result<bool, String> {
         match self {
             PasswordHash::Legacy(h) => Ok(legacy_hash(password) == *h),
-            PasswordHash::Iterated { algorithm, hash, .. } if algorithm == Self::ODF_SHA256 => {
+            PasswordHash::Sha256Digest(hash) => {
                 let want = crate::b64::decode(hash).ok_or_else(|| "the stored password hash is damaged".to_string())?;
                 Ok(sha2::Sha256::digest(password.as_bytes()).as_slice() == want.as_slice())
             }
@@ -149,10 +143,10 @@ mod tests {
     #[test]
     fn odf_protection_keys_verify() -> Result<(), Box<dyn std::error::Error>> {
         // SHA-256 of "abc", base64.
-        let h = PasswordHash::odf_sha256("ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=");
+        let h = PasswordHash::Sha256Digest("ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=".into());
         assert!(h.verify("abc")?);
         assert!(!h.verify("abd")?);
-        assert!(PasswordHash::odf_sha256("!!").verify("abc").is_err());
+        assert!(PasswordHash::Sha256Digest("!!".into()).verify("abc").is_err());
         Ok(())
     }
 }

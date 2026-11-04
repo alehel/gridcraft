@@ -5,11 +5,12 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use gridcraft_model::{Chart, ChartKind, Color, LegendPos, Series, Theme};
+use gridcraft_model::{Chart, ChartKind, LegendPos, Series, Theme};
 
 use super::dom::{Elem, Ns};
 use super::formula;
 use super::style::color;
+use super::style::hex;
 use crate::xml::{esc, esc_attr};
 
 /// What a chart object says, before it is anchored on its sheet.
@@ -212,10 +213,6 @@ fn class_of(kind: ChartKind) -> (&'static str, bool, bool, bool, bool) {
     }
 }
 
-fn hex(c: Color, theme: &Theme) -> Option<String> {
-    c.resolve(theme).map(|[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}"))
-}
-
 fn title_xml(o: &mut String, tag: &str, text: &Option<String>) {
     if let Some(t) = text.as_deref().filter(|t| !t.is_empty()) {
         let _ = write!(o, "<chart:{tag}>");
@@ -373,7 +370,7 @@ mod tests {
                 name: Some("Data!$B$1".into()),
                 categories: Some("Data!$A$2:$A$4".into()),
                 values: "Data!$B$2:$B$4".into(),
-                color: Some(Color::Rgb(0x004586)),
+                color: Some(gridcraft_model::Color::Rgb(0x004586)),
                 ..Series::default()
             }],
             legend: LegendPos::Right,
@@ -399,6 +396,6 @@ mod tests {
         assert_eq!(d.series[0].values, "Data!$B$2:$B$4");
         assert_eq!(d.series[0].categories.as_deref(), Some("Data!$A$2:$A$4"));
         assert_eq!(d.series[0].name.as_deref(), Some("Data!$B$1"));
-        assert_eq!(d.series[0].color, Some(Color::Rgb(0x004586)));
+        assert_eq!(d.series[0].color, Some(gridcraft_model::Color::Rgb(0x004586)));
     }
 }

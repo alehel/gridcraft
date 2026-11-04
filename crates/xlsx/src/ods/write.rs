@@ -918,7 +918,7 @@ impl<'a> Writer<'a> {
             let path = format!("Pictures/{}.{ext}", self.pictures.len() + 1);
             let (x, y) = anchor_pt(sh, &img.anchor);
             let image = if self.flat {
-                format!("<draw:image><office:binary-data>{}</office:binary-data></draw:image>", super::b64::encode(&img.data))
+                format!("<draw:image><office:binary-data>{}</office:binary-data></draw:image>", gridcraft_model::b64::encode(&img.data))
             } else {
                 format!(r#"<draw:image xlink:href="{}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/>"#, esc_attr(&path))
             };
@@ -1075,7 +1075,7 @@ impl<'a> Writer<'a> {
 /// (Excel's salted hashes can't be turned into one), so others protect without a password.
 fn protection_key(p: Option<&gridcraft_model::PasswordHash>) -> String {
     match p {
-        Some(gridcraft_model::PasswordHash::Iterated { algorithm, hash, .. }) if algorithm == gridcraft_model::PasswordHash::ODF_SHA256 => {
+        Some(gridcraft_model::PasswordHash::Sha256Digest(hash)) => {
             format!(" table:protection-key=\"{}\" table:protection-key-digest-algorithm=\"http://www.w3.org/2000/09/xmldsig#sha256\"", esc_attr(hash))
         }
         _ => String::new(),

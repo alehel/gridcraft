@@ -3,7 +3,6 @@
 //! Format reference: OASIS ODF 1.3, parts 2 (OpenFormula) and 3 (schema):
 //! <https://docs.oasis-open.org/office/OpenDocument/v1.3/os/part3-schema/OpenDocument-v1.3-os-part3-schema.html>.
 
-mod b64;
 mod chart;
 mod dom;
 mod formula;

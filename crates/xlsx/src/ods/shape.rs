@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use gridcraft_model::{Color, Shape, ShapeFormat, ShapeKind, ShapeTextAlign, ShapeTextAnchor, Theme};
 
 use super::dom::{Elem, Ns};
-use super::style::{color, length_pt};
+use super::style::{color, hex, length_pt};
 use crate::xml::{esc, esc_attr};
 
 /// A shape as read, its box in points from the sheet's origin (or from its cell's corner).
@@ -142,10 +142,6 @@ pub(crate) fn read(e: &Elem, styles: &DrawStyles) -> Option<ShapeDraft> {
 }
 
 // ------------------------------------------------------------------------------------- writing
-
-fn hex(c: Color, theme: &Theme) -> Option<String> {
-    c.resolve(theme).map(|[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}"))
-}
 
 /// The graphic style of a shape (`style:style` family graphic) named `name`.
 pub(crate) fn style_xml(name: &str, s: &Shape, theme: &Theme) -> String {

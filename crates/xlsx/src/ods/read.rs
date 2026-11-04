@@ -656,7 +656,7 @@ impl Import {
         let key = e.attr(Ns::Table, "protection-key").filter(|k| !k.trim().is_empty())?;
         let algorithm = e.attr(Ns::Table, "protection-key-digest-algorithm").unwrap_or("http://www.w3.org/2000/09/xmldsig#sha1");
         if algorithm.ends_with("#sha256") && e.attr(Ns::LoExt, "protection-key-digest-algorithm-2").is_none() {
-            return Some(gridcraft_model::PasswordHash::odf_sha256(key));
+            return Some(gridcraft_model::PasswordHash::Sha256Digest(key.trim().to_string()));
         }
         self.report.warn("Some ODS protection passwords use a digest GridCraft can't check; the protection was kept without its password.");
         None
@@ -1598,7 +1598,7 @@ fn read_frame(f: &Elem, cell: Option<CellRef>) -> Option<Frame> {
     // A flat document holds a chart's document, or a picture's bytes, inline.
     let inline = match (obj.and_then(|o| o.child(Ns::Office, "document")), img.and_then(|i| i.child(Ns::Office, "binary-data"))) {
         (Some(doc), _) => Some(Inline::Chart(Box::new(doc.clone()))),
-        (None, Some(data)) => super::b64::decode(&data.raw_text(), 64 * 1024 * 1024).map(Inline::Picture),
+        (None, Some(data)) => gridcraft_model::b64::decode_limited(&data.raw_text(), 64 * 1024 * 1024).map(Inline::Picture),
         _ => None,
     };
     let frame = Frame { cell, x: len("x"), y: len("y"), width: len("width"), height: len("height"), ..Frame::default() };
