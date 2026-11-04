@@ -488,14 +488,16 @@ fn ods_autofilter_criteria_round_trip() {
         (4, F::Values { values: vec!["x".into()], blanks: false }),
         (5, custom(("=", "abc*"), Some(("<>", "*z")), true)),
         (6, custom((">", "100"), None, true)),
+        (7, custom(("=", "East"), Some(("=", "West")), false)),
+        (8, custom(("=", "a?c"), None, true)),
     ];
     let mut wb = gridcraft_model::Workbook::new();
     let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
-    for c in 0..7 {
+    for c in 0..9 {
         sh.set_value(CellRef::new(0, c), text("h"));
         sh.set_value(CellRef::new(1, c), Value::Number(1.0));
     }
-    sh.autofilter = Some(AutoFilter { range: RangeRef::new(CellRef::new(0, 0), CellRef::new(1, 6)), criteria: criteria.clone() });
+    sh.autofilter = Some(AutoFilter { range: RangeRef::new(CellRef::new(0, 0), CellRef::new(1, 8)), criteria: criteria.clone() });
     let bytes = write_ods(&wb).unwrap();
     let (back, _) = read_ods(&bytes).unwrap();
     assert_eq!(back.sheets[0].autofilter.as_ref().map(|f| f.criteria.clone()), Some(criteria));
@@ -742,4 +744,55 @@ fn ods_repeated_extras_are_read_once() {
     .unwrap();
     assert!(wb.sheets[0].rows.len() < 10, "{}", wb.sheets[0].rows.len());
     assert!(!report.warnings.iter().any(|w| w.contains("row and column sizes")), "{:?}", report.warnings);
+}
+
+/// What round two's writer review found missing: a table keeps its name (as a database range),
+/// shape text keeps its spaces, the calculation settings say how the workbook calculates, and a
+/// row's style reaches past the written cells.
+#[test]
+fn ods_writer_round_two() {
+    use gridcraft_model::{Shape, ShapeKind, Table};
+    let mut wb = gridcraft_model::Workbook::new();
+    let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    sh.set_value(CellRef::new(0, 0), text("h"));
+    sh.set_value(CellRef::new(1, 0), Value::Number(1.0));
+    sh.tables.push(Table {
+        id: 1,
+        name: "Sales".into(),
+        range: RangeRef::new(CellRef::new(0, 0), CellRef::new(1, 0)),
+        header_row: true,
+        totals_row: false,
+        columns: vec![],
+        style: String::new(),
+        banded_rows: false,
+        banded_cols: false,
+        first_col: false,
+        last_col: false,
+        filter_button: true,
+        filter: vec![],
+        table_type: None,
+        connection_id: None,
+    });
+    sh.shapes.push(Shape {
+        id: 1,
+        kind: ShapeKind::TextBox,
+        anchor: gridcraft_model::Anchor { width: 100.0, height: 40.0, ..Default::default() },
+        fill: gridcraft_model::Color::Auto,
+        line: gridcraft_model::Color::Auto,
+        text: "a  b".into(),
+        format: gridcraft_model::ShapeFormat::default(),
+        math: Default::default(),
+    });
+    let bold = wb.styles.derive(gridcraft_model::StyleId::DEFAULT, |s| s.font.bold = true);
+    let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    sh.rows.entry(4).or_default().style = Some(bold);
+    let bytes = write_ods(&wb).unwrap();
+    let mut content = String::new();
+    std::io::Read::read_to_string(&mut zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap().by_name("content.xml").unwrap(), &mut content)
+        .unwrap();
+    assert!(content.contains(r#"table:case-sensitive="false""#));
+    assert!(content.contains(r#"<table:table-cell table:number-columns-repeated="16383"/>"#), "row style filler");
+    let (back, _) = read_ods(&bytes).unwrap();
+    assert!(back.names.iter().any(|n| n.name == "Sales"));
+    assert_eq!(back.sheets[0].shapes.first().map(|s| s.text.as_str()), Some("a  b"));
 }

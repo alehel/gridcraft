@@ -1590,7 +1590,8 @@ fn filter_criterion(cond: &Elem) -> Option<(u32, FilterCriterion)> {
             let blanks = set.iter().any(String::is_empty);
             FilterCriterion::Values { values: set.into_iter().filter(|v| !v.is_empty()).collect(), blanks }
         }
-        "=" => FilterCriterion::Values { values: vec![value], blanks: false },
+        // A bare `=` is a comparison (a value list lists its items).
+        "=" => FilterCriterion::Custom { a: ("=".into(), value), b: None, and: true },
         "empty" => FilterCriterion::Values { values: vec![], blanks: true },
         "top values" | "bottom values" | "top percent" | "bottom percent" => FilterCriterion::Top10 {
             bottom: op.starts_with("bottom"),

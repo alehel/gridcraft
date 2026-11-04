@@ -463,8 +463,14 @@ impl<'a> Writer<'a> {
         body.push('>');
         let calc = &self.wb.calc;
         let d1904 = self.wb.date_system == DateSystem::D1904;
-        if calc.iterative || calc.precision_as_displayed || d1904 {
-            let _ = write!(body, "<table:calculation-settings table:precision-as-shown=\"{}\">", calc.precision_as_displayed);
+        {
+            // Always stated: ODF's defaults (case-sensitive text, regular expressions in
+            // criteria, labels found automatically) are not how the workbook calculates.
+            let _ = write!(
+                body,
+                "<table:calculation-settings table:case-sensitive=\"false\" table:precision-as-shown=\"{}\" table:automatic-find-labels=\"false\" table:use-regular-expressions=\"false\" table:use-wildcards=\"true\">",
+                calc.precision_as_displayed
+            );
             if d1904 {
                 body.push_str("<table:null-date table:date-value=\"1904-01-01\"/>");
             }
@@ -553,21 +559,38 @@ impl<'a> Writer<'a> {
 
     fn database_ranges(&self) -> String {
         let mut o = String::new();
-        for (i, sh) in self.wb.sheets.iter().enumerate() {
-            let Some(f) = &sh.autofilter else { continue };
+        // One database range: its name, range, whether it shows filter buttons, its filter.
+        let range = |o: &mut String,
+                     name: &str,
+                     sheet: &str,
+                     r: RangeRef,
+                     header: bool,
+                     buttons: bool,
+                     criteria: &[(u32, gridcraft_model::FilterCriterion)]| {
             let _ = write!(
                 o,
-                r#"<table:database-range table:name="__Anonymous_Sheet_DB__{i}" table:target-range-address="{}" table:display-filter-buttons="true">"#,
-                esc_attr(&formula::range_address(&sh.name, f.range))
+                r#"<table:database-range table:name="{}" table:target-range-address="{}" table:contains-header="{header}" table:display-filter-buttons="{buttons}">"#,
+                esc_attr(name),
+                esc_attr(&formula::range_address(sheet, r))
             );
-            if !f.criteria.is_empty() {
+            if !criteria.is_empty() {
                 o.push_str("<table:filter><table:filter-and>");
-                for (col, crit) in &f.criteria {
-                    filter_condition(&mut o, *col, crit);
+                for (col, crit) in criteria {
+                    filter_condition(o, *col, crit);
                 }
                 o.push_str("</table:filter-and></table:filter>");
             }
             o.push_str("</table:database-range>");
+        };
+        for (i, sh) in self.wb.sheets.iter().enumerate() {
+            if let Some(f) = &sh.autofilter {
+                range(&mut o, &format!("__Anonymous_Sheet_DB__{i}"), &sh.name, f.range, true, true, &f.criteria);
+            }
+            // A table is ODF's named database range: its name stays usable in formulas. Its
+            // filter isn't written: a database range with buttons reads as the sheet's autofilter.
+            for t in &sh.tables {
+                range(&mut o, &t.name, &sh.name, t.range, t.header_row, false, &[]);
+            }
         }
         if o.is_empty() { o } else { format!("<table:database-ranges>{o}</table:database-ranges>") }
     }
@@ -745,9 +768,13 @@ impl<'a> Writer<'a> {
         let end = max_col + 1;
         let mut edges: Vec<u32> = vec![0, end];
         for &c in singles {
-            edges.extend([c, c + 1]);
+            edges.extend([c, c.saturating_add(1)]);
         }
-        for (r, name) in reach.active() {
+        // The ranges reaching the row by first column, swept along with the runs: each run
+        // looks only at the ranges open at its first column.
+        let mut by_start: Vec<&(RangeRef, Option<&str>)> = reach.active().collect();
+        by_start.sort_by_key(|(r, _)| r.start.col);
+        for (r, name) in &by_start {
             // A merge's first cell stands alone.
             if name.is_none() && r.start.row == row {
                 edges.extend([r.start.col, r.start.col.saturating_add(1)]);
@@ -758,13 +785,19 @@ impl<'a> Writer<'a> {
         edges.sort_unstable();
         edges.dedup();
         let row_style = sh.rows.get(&row).and_then(|r| r.style);
+        let (mut next, mut open): (usize, Vec<&(RangeRef, Option<&str>)>) = (0, Vec::new());
         for w in edges.windows(2) {
             let [a, b] = [w.first().copied().unwrap_or(0), w.get(1).copied().unwrap_or(end)];
             let pos = CellRef::new(row, a);
+            while let Some(r) = by_start.get(next).filter(|(r, _)| r.start.col <= a) {
+                open.push(r);
+                next += 1;
+            }
+            open.retain(|(r, _)| r.end.col >= a);
             let mut covered = false;
             let mut anchor = None;
             let mut validation = None;
-            for (r, name) in reach.active().filter(|(r, _)| r.contains(pos)) {
+            for (r, name) in open.iter().copied().filter(|(r, _)| r.contains(pos)) {
                 match name {
                     Some(n) => validation = Some(*n),
                     None if r.start == pos => anchor = Some((r.width(), r.height())),
@@ -818,6 +851,10 @@ impl<'a> Writer<'a> {
             } else {
                 let _ = write!(out, ">{inner}</{tag}>");
             }
+        }
+        // A row's own style reaches across the sheet, past the cells written.
+        if row_style.is_some() && end < MAX_COLS {
+            let _ = write!(out, "<table:table-cell table:number-columns-repeated=\"{}\"/>", MAX_COLS - end);
         }
     }
 
@@ -1130,7 +1167,7 @@ fn duration(days: f64) -> String {
 }
 
 /// Text as `text:p` paragraphs with ODF's whitespace elements, optionally as one link.
-fn paragraphs(out: &mut String, text: &str, link: Option<&str>) {
+pub(crate) fn paragraphs(out: &mut String, text: &str, link: Option<&str>) {
     for line in text.split('\n') {
         out.push_str("<text:p>");
         if let Some(l) = link {
@@ -1313,23 +1350,19 @@ fn filter_condition(o: &mut String, col: u32, crit: &gridcraft_model::FilterCrit
         F::Values { values, blanks: true } if values.is_empty() => {
             let _ = write!(o, r#"<table:filter-condition table:field-number="{col}" table:value="" table:operator="empty"/>"#);
         }
-        F::Values { values, blanks } => match values.as_slice() {
-            [only] if !blanks => {
-                let _ = write!(o, r#"<table:filter-condition table:field-number="{col}" table:value="{}" table:operator="="/>"#, esc_attr(only));
+        // A value list always lists its items (one too): a bare `=` is a custom comparison.
+        F::Values { values, blanks } => {
+            let first = values.first().map(String::as_str).unwrap_or_default();
+            let _ = write!(o, r#"<table:filter-condition table:field-number="{col}" table:value="{}" table:operator="=">"#, esc_attr(first));
+            for v in values {
+                let _ = write!(o, r#"<table:filter-set-item table:value="{}"/>"#, esc_attr(v));
             }
-            _ => {
-                let first = values.first().map(String::as_str).unwrap_or_default();
-                let _ = write!(o, r#"<table:filter-condition table:field-number="{col}" table:value="{}" table:operator="=">"#, esc_attr(first));
-                for v in values {
-                    let _ = write!(o, r#"<table:filter-set-item table:value="{}"/>"#, esc_attr(v));
-                }
-                // The "(Blanks)" choice is an empty item.
-                if *blanks {
-                    o.push_str(r#"<table:filter-set-item table:value=""/>"#);
-                }
-                o.push_str("</table:filter-condition>");
+            // The "(Blanks)" choice is an empty item.
+            if *blanks {
+                o.push_str(r#"<table:filter-set-item table:value=""/>"#);
             }
-        },
+            o.push_str("</table:filter-condition>");
+        }
         F::Custom { a, b, and } => {
             // The filter is an AND of its columns: a column's two conditions joined by OR nest.
             let or = !and && b.is_some();

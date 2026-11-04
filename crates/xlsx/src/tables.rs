@@ -88,25 +88,10 @@ pub fn paper_name(id: u32) -> Option<&'static str> {
     PAPERS.iter().find(|(i, _)| *i == id).map(|(_, n)| *n)
 }
 
-/// The file ID for a paper name. Spelling is loose like `known_paper`'s — spaces, hyphens,
-/// underscores and parentheses don't matter, and the JIS/ISO and Japanese-envelope spellings the
-/// page-setup commands take are folded onto the name in [`PAPERS`].
+/// The file ID for a paper name, spelled any way [`gridcraft_model::paper::canonical`] takes.
 pub fn paper_id(name: &str) -> Option<u32> {
-    let norm = |s: &str| s.trim().to_ascii_lowercase().replace([' ', '-', '_', '(', ')'], "");
-    let normalized = norm(name);
-    let alias = match normalized.as_str() {
-        "b4jis" => "b4",
-        "b5jis" => "b5",
-        "b6jis" => "b6",
-        "postcard" => "japanesepostcard",
-        "doublepostcard" => "japanesedoublepostcard",
-        "chou#3" => "japaneseenvelope#3",
-        "chou#4" => "japaneseenvelope#4",
-        "kaku#2" => "japaneseenvelopekaku#2",
-        "kaku#3" => "japaneseenvelopekaku#3",
-        other => other,
-    };
-    PAPERS.iter().find(|(_, n)| norm(n) == alias).map(|(i, _)| *i)
+    let name = gridcraft_model::paper::canonical(name)?;
+    PAPERS.iter().find(|(_, n)| *n == name).map(|(i, _)| *i)
 }
 
 /// Functions introduced after Excel 2007 that files store with the `_xlfn.` prefix. Entries with

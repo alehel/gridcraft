@@ -259,7 +259,8 @@ fn page_setup(s: &mut Session, p: &Json) -> Result<Json> {
         None => None,
         Some(name) => {
             known_paper(name).ok_or_else(|| bad(CMD, format!("unknown paper size `{name}`")))?;
-            Some(name.trim().to_string())
+            // Stored under its table name, which every file format knows.
+            Some(gridcraft_model::paper::canonical(name).unwrap_or(name.trim()).to_string())
         }
     };
     let margin_src = p.get("margins").filter(|m| m.is_object()).unwrap_or(p);

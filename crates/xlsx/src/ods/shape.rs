@@ -9,7 +9,7 @@ use gridcraft_model::{Color, Shape, ShapeFormat, ShapeKind, ShapeTextAlign, Shap
 
 use super::dom::{Elem, Ns};
 use super::style::{color, hex, length_pt};
-use crate::xml::{esc, esc_attr};
+use crate::xml::esc_attr;
 
 /// A shape as read, its box in points from the sheet's origin (or from its cell's corner).
 pub(crate) struct ShapeDraft {
@@ -221,8 +221,8 @@ pub(crate) fn shape_xml(s: &Shape, style: &str, x: f32, y: f32, z: usize) -> Opt
     let w = s.anchor.width * 0.75;
     let h = s.anchor.height * 0.75;
     let mut text = String::new();
-    for line in s.text.split('\n').filter(|_| !s.text.is_empty()) {
-        let _ = write!(text, "<text:p>{}</text:p>", esc(line));
+    if !s.text.is_empty() {
+        super::write::paragraphs(&mut text, &s.text, None);
     }
     let common = format!(r#"draw:z-index="{z}" draw:name="Shape {}" draw:style-name="{style}""#, s.id);
     Some(match s.kind {
