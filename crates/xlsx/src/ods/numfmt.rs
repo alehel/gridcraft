@@ -172,9 +172,13 @@ fn digits(e: &Elem, out: &mut String, scientific: bool) {
             out.push(if i < min_decimals { '0' } else { '#' });
         }
     }
-    if let Some(f) = e.attr(Ns::Number, "display-factor").and_then(|f| f.parse::<f64>().ok()) {
-        let mut f = f;
-        while f >= 1000.0 {
+    // Each trailing comma scales by a thousand; a factor past 1000^6 (or not a finite number)
+    // is no format anyone writes.
+    if let Some(mut f) = e.attr(Ns::Number, "display-factor").and_then(|f| f.parse::<f64>().ok()).filter(|f| f.is_finite()) {
+        for _ in 0..6 {
+            if f < 1000.0 {
+                break;
+            }
             out.push(',');
             f /= 1000.0;
         }

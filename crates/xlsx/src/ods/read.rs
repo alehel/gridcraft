@@ -3,7 +3,7 @@
 //! named ranges, data validation, conditional formatting, autofilters, pictures, frozen panes,
 //! sheet settings and document properties.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use gridcraft_core::date::{days_in_month, serial_from_ymd};
@@ -229,6 +229,12 @@ struct SheetState {
     /// Cells whose style carries `style:map` conditions, by style name.
     mapped: HashMap<String, Vec<RangeRef>>,
     has_calcext_formats: bool,
+    /// Merges that may still reach the rows to come, by first column, with their first cell's
+    /// style: a covered cell shows that style, as LibreOffice draws a merged area.
+    open_merges: BTreeMap<u32, (RangeRef, StyleId)>,
+    /// The columns' default cell styles as (first, end, style) runs, built once the columns are
+    /// read (they precede the rows).
+    col_defaults: Option<Vec<(u32, u32, StyleId)>>,
 }
 
 /// What a flat document holds inline instead of a part of its package.
@@ -261,9 +267,35 @@ struct ValidationDef {
 /// A defined name as read: name, scope, ODF expression or range, whether a range, base cell.
 type NameDef = (String, Option<usize>, String, bool, Option<String>);
 
-/// A cell as a row holds it before it is placed: column, repeat, width and height spanned, the
-/// cell, and its element (for notes, links and pictures).
-type RowCell<'a> = (u32, u32, u32, u32, Cell, Option<&'a Elem>);
+/// The style of the merge holding `at` among the merges still open, and the column where that
+/// answer ends (the merge's right edge, or the next merge's left one), dropping merges that ended
+/// above `at`. Merges don't overlap, so the one starting nearest at or left of `at` is the only
+/// candidate.
+fn merge_style(open: &mut BTreeMap<u32, (RangeRef, StyleId)>, at: CellRef) -> (Option<StyleId>, u32) {
+    let next = |open: &BTreeMap<u32, (RangeRef, StyleId)>| open.range(at.col.saturating_add(1)..).next().map_or(MAX_COLS, |(k, _)| *k);
+    loop {
+        let Some((&key, &(m, style))) = open.range(..=at.col).next_back() else { return (None, next(open)) };
+        if m.end.row < at.row {
+            open.remove(&key);
+            continue;
+        }
+        return if m.contains(at) { (Some(style), m.end.col.saturating_add(1)) } else { (None, next(open)) };
+    }
+}
+
+/// A run of cells as a row holds it before it is placed.
+struct RowCell<'a> {
+    col: u32,
+    count: u32,
+    /// Columns and rows a merge's first cell spans (1 and 1 otherwise).
+    width: u32,
+    height: u32,
+    cell: Cell,
+    /// The style the cell shows when it isn't stored: its row's or column's.
+    fallback: StyleId,
+    /// The cell element, for notes, links, validation and pictures.
+    el: &'a Elem,
+}
 
 pub(crate) struct Import {
     pub wb: Workbook,
@@ -593,6 +625,8 @@ impl Import {
             external: original.starts_with('\'') && original.contains("'#"),
             mapped: HashMap::new(),
             has_calcext_formats: false,
+            open_merges: BTreeMap::new(),
+            col_defaults: None,
         });
         Ok(())
     }
@@ -644,24 +678,51 @@ impl Import {
         Ok(())
     }
 
+    /// The default cell style a row or column states (`table:default-cell-style-name`), when it
+    /// is not the default style.
+    fn default_cell_style(&mut self, e: &Elem) -> Option<StyleId> {
+        let id = self.style_id(e.attr(Ns::Table, "default-cell-style-name")?);
+        (id != StyleId::DEFAULT).then_some(id)
+    }
+
+    /// The style a cell is stored with: its own (or, when it is covered by a merge, the merge's
+    /// first cell's), else what it falls back to, with the format its value implies (a date or
+    /// time) and line wrapping for typed text of several lines (LibreOffice shows each paragraph
+    /// on its own line, wrapped or not; the model breaks lines only in wrapped cells). The model
+    /// drops a stored cell in the default style, so a cell that sets the default back over a
+    /// formatted row or column gets the default's look-alike.
+    fn cell_style(&mut self, own: Option<StyleId>, fallback: StyleId, implied: Option<&str>, cell: &Cell) -> StyleId {
+        let mut style = own.unwrap_or(fallback);
+        if let Some(code) = implied
+            && self.wb.styles.get(style).num_fmt.as_str().eq_ignore_ascii_case("General")
+        {
+            style = self.wb.styles.derive(style, |st| st.num_fmt = NumFmt::new(code));
+        }
+        if cell.formula.is_none() && matches!(&cell.value, Value::Text(t) if t.contains('\n')) && !self.wb.styles.get(style).align.wrap {
+            style = self.wb.styles.derive(style, |st| st.align.wrap = true);
+        }
+        if style == StyleId::DEFAULT && fallback != StyleId::DEFAULT {
+            style = self.default_twin();
+        }
+        style
+    }
+
     fn row(&mut self, e: &Elem) -> Result<(), IoError> {
+        if self.sheet.as_ref().is_none_or(|s| s.external) {
+            return Ok(());
+        }
         let repeat = attr_u32(e, Ns::Table, "number-rows-repeated", 1, u32::MAX)?;
         let rs = e.attr(Ns::Table, "style-name").and_then(|n| self.row_styles.get(n)).cloned().unwrap_or_default();
         let hidden = matches!(e.attr(Ns::Table, "visibility"), Some("collapse" | "filter"));
-        let row_default = match e.attr(Ns::Table, "default-cell-style-name") {
-            Some(n) if n != "Default" => Some(self.style_id(n)),
-            _ => None,
-        };
-        // The column default styles, for cells without their own style.
-        let col_defaults: Vec<(u32, u32, StyleId)> = self
-            .sheet
-            .as_ref()
-            .map(|s| s.cols.iter().filter_map(|c| c.style.map(|st| (c.start, c.start + c.count, st))).collect())
-            .unwrap_or_default();
-        let Some(start_row) = self.sheet.as_ref().map(|s| s.row) else { return Ok(()) };
+        let row_default = self.default_cell_style(e);
+        let Some(st) = self.sheet.as_mut() else { return Ok(()) };
+        let start_row = st.row;
+        let mut open_merges = std::mem::take(&mut st.open_merges);
+        let col_defaults =
+            st.col_defaults.get_or_insert_with(|| st.cols.iter().filter_map(|c| c.style.map(|s| (c.start, c.start + c.count, s))).collect()).clone();
         let end = start_row.checked_add(repeat).filter(|n| *n <= MAX_ROWS);
+        let last_row = end.unwrap_or(MAX_ROWS).saturating_sub(1).max(start_row);
         let mut col = 0u32;
-        let mut row_has_content = false;
         let mut kept: Vec<RowCell<'_>> = Vec::new();
         for c in e.elems() {
             let covered = c.is(Ns::Table, "covered-table-cell");
@@ -677,14 +738,14 @@ impl Import {
             }
             let width = if covered { 1 } else { attr_u32(c, Ns::Table, "number-columns-spanned", 1, MAX_COLS)? };
             let height = if covered { 1 } else { attr_u32(c, Ns::Table, "number-rows-spanned", 1, MAX_ROWS)? };
-            let converted = self.convert(c, CellRef::new(start_row, col))?;
-            let explicit_style = c.attr(Ns::Table, "style-name").map(|n| self.style_id(n));
+            let (value_cell, implied) = self.convert(c, CellRef::new(start_row, col))?;
+            let own_style = c.attr(Ns::Table, "style-name").map(|n| self.style_id(n));
             let has_extras =
                 c.elems().any(|k| k.is(Ns::Office, "annotation") || k.ns == Ns::Draw) || c.attr(Ns::Table, "content-validation-name").is_some();
             let cend = match col.checked_add(crepeat).filter(|n| *n <= MAX_COLS) {
                 Some(n) => n,
                 None => {
-                    if converted.has_content() {
+                    if value_cell.has_content() {
                         self.report.warn("Some ODS columns beyond column XFD were not imported.");
                     }
                     MAX_COLS
@@ -694,77 +755,51 @@ impl Import {
             let mut seg = col;
             while seg < cend {
                 let col_default = col_defaults.iter().find(|(a, b, _)| seg >= *a && seg < *b);
-                let seg_end = match col_default {
+                let mut seg_end = match col_default {
                     Some((_, b, _)) => (*b).min(cend),
                     None => col_defaults.iter().map(|(a, _, _)| *a).filter(|a| *a > seg).min().unwrap_or(cend).min(cend),
                 };
-                let col_style = col_default.map(|(_, _, s)| *s).unwrap_or(StyleId::DEFAULT);
-                let mut cell = converted.clone();
-                let style = explicit_style.or(row_default).or(col_default.map(|(_, _, s)| *s));
-                if let Some(s) = style {
-                    // A date or time value keeps a date format when its style has none.
-                    cell.style = if cell.style != StyleId::DEFAULT && self.wb.styles.get(s).num_fmt.as_str() == "General" {
-                        let code = self.wb.styles.get(cell.style).num_fmt.clone();
-                        self.wb.styles.derive(s, |st| st.num_fmt = code)
-                    } else {
-                        s
-                    };
+                // A covered run is split at the edges of the merges it lies under.
+                let mut own = own_style;
+                if covered {
+                    let (anchor, edge) = merge_style(&mut open_merges, CellRef::new(start_row, seg));
+                    seg_end = seg_end.min(edge.max(seg + 1));
+                    own = anchor.or(own_style);
                 }
-                if cell.formula.is_none() {
-                    self.wrap_lines(&mut cell);
+                // What the model shows for a cell it doesn't hold: the row's style, else the column's.
+                let fallback = row_default.or(col_default.map(|(_, _, s)| *s)).unwrap_or(StyleId::DEFAULT);
+                let mut cell = value_cell.clone();
+                cell.style = self.cell_style(own, fallback, implied, &cell);
+                if width > 1 || height > 1 {
+                    let to = CellRef::new(
+                        last_row.saturating_add(height - 1).min(MAX_ROWS - 1),
+                        (seg_end - 1).saturating_add(width - 1).min(MAX_COLS - 1),
+                    );
+                    open_merges.insert(seg, (RangeRef::new(CellRef::new(start_row, seg), to), cell.style));
                 }
-                // A cell set back to the default style under a formatted row or column keeps it.
-                if cell.style == StyleId::DEFAULT && (row_default.is_some() || col_style != StyleId::DEFAULT) {
-                    cell.style = self.default_twin();
-                }
-                // Blank cells that only repeat the row's or column's default style need no entry.
-                let interesting =
-                    cell.has_content() || (cell.style != col_style && Some(cell.style) != row_default) || width > 1 || height > 1 || has_extras;
-                if interesting {
-                    if cell.has_content() {
-                        row_has_content = true;
-                    }
-                    kept.push((seg, seg_end - seg, width, height, cell, Some(c)));
+                if cell.has_content() || cell.style != fallback || width > 1 || height > 1 || has_extras {
+                    kept.push(RowCell { col: seg, count: seg_end - seg, width, height, cell, fallback, el: c });
                 }
                 seg = seg_end;
             }
             col = cend;
         }
-        if start_row >= MAX_ROWS {
-            if kept.iter().any(|k| k.4.has_content()) {
+        if let Some(st) = self.sheet.as_mut() {
+            st.open_merges = open_merges;
+        }
+        let row_has_content = kept.iter().any(|k| k.cell.has_content());
+        if start_row >= MAX_ROWS || end.is_none() {
+            if row_has_content {
                 self.report.warn("Some ODS rows beyond row 1,048,576 were not imported.");
             }
-            return Ok(());
+            if start_row >= MAX_ROWS {
+                return Ok(());
+            }
         }
-        let end = match end {
-            Some(e) => e,
-            None => {
-                if kept.iter().any(|k| k.4.has_content()) {
-                    self.report.warn("Some ODS rows beyond row 1,048,576 were not imported.");
-                }
-                MAX_ROWS
-            }
-        };
+        let end = end.unwrap_or(MAX_ROWS);
         let rows = end - start_row;
-        for (col, count, width, height, cell, el) in kept {
-            // Long runs of empty cells whose format shows nothing (alignment, fonts, number
-            // formats) are what spreadsheet writers emit for whole-column formatting; storing a
-            // million of them would cost far more than it shows.
-            if rows > 1000
-                && !cell.has_content()
-                && width == 1
-                && height == 1
-                && !el.is_some_and(|e| e.elems().next().is_some() || e.attr(Ns::Table, "content-validation-name").is_some())
-            {
-                let st = self.wb.styles.get(cell.style);
-                let b = &st.borders;
-                if st.fill.pattern == gridcraft_model::PatternType::None
-                    && [b.left, b.right, b.top, b.bottom, b.diag_down, b.diag_up].iter().all(|l| l.is_none())
-                {
-                    continue;
-                }
-            }
-            self.place(start_row, rows, col, count, width, height, cell, el)?;
+        for k in kept {
+            self.place(start_row, rows, k)?;
         }
         let Some(st) = self.sheet.as_mut() else { return Ok(()) };
         if row_has_content {
@@ -791,23 +826,40 @@ impl Import {
         Ok(())
     }
 
+    /// Whether an empty cell's own format is worth a stored cell for each of `count` copies:
+    /// always for a few, and for long runs (what writers emit for whole-column formatting) only
+    /// when it looks different from what the cell falls back to — its fill or borders.
+    fn blank_worth_storing(&self, style: StyleId, fallback: StyleId, count: u64) -> bool {
+        if count <= 1000 {
+            return true;
+        }
+        let (a, b) = (self.wb.styles.get(style), self.wb.styles.get(fallback));
+        a.fill != b.fill || a.borders != b.borders
+    }
+
     /// Stores a (repeated) cell and what hangs off it: merges, notes, links, validation, pictures.
-    #[allow(clippy::too_many_arguments)]
-    fn place(&mut self, row: u32, rows: u32, col: u32, cols: u32, width: u32, height: u32, cell: Cell, el: Option<&Elem>) -> Result<(), IoError> {
+    fn place(&mut self, row: u32, rows: u32, k: RowCell<'_>) -> Result<(), IoError> {
+        let RowCell { col, count: cols, width, height, cell, fallback, el } = k;
         let count = u64::from(rows) * u64::from(cols);
+        let merged = width > 1 || height > 1;
+        // A formatted empty cell is stored within its own budget; what hangs off it (a merge, a
+        // note, a link, a validation) is kept regardless.
+        let mut store = true;
         if cell.has_content() {
             self.cells = self.cells.saturating_add(count);
             if let Value::Text(t) = &cell.value {
                 self.text = self.text.saturating_add(count.saturating_mul(t.len() as u64));
             }
-        } else {
-            self.blanks = self.blanks.saturating_add(count);
-            if self.blanks > MAX_STYLED_BLANKS {
-                self.report.warn("Some ODS formatting of empty cells beyond the import limit was not imported.");
-                return Ok(());
+        } else if cell.style != fallback {
+            store = self.blank_worth_storing(cell.style, fallback, count);
+            if store {
+                self.blanks = self.blanks.saturating_add(count);
+                if self.blanks > MAX_STYLED_BLANKS {
+                    self.report.warn("Some ODS formatting of empty cells beyond the import limit was not imported.");
+                    store = false;
+                }
             }
         }
-        let merged = width > 1 || height > 1;
         if merged {
             self.merges = self.merges.saturating_add(count);
         }
@@ -822,6 +874,7 @@ impl Import {
         if merged && ((cols > 1 && width > 1) || (rows > 1 && height > 1)) {
             return Err(IoError::Format("repeated ODS cells have overlapping merges".into()));
         }
+        let el = Some(el);
         // Extras of the cell element: a note, a link, a validation, pictures.
         let mut comment = None;
         let mut link = None;
@@ -848,7 +901,7 @@ impl Import {
         for r in row..row + rows {
             for c in col..col + cols {
                 let pos = CellRef::new(r, c);
-                if !cell.is_blank() {
+                if store && !cell.is_blank() {
                     let mut stored = cell.clone();
                     if let Some(f) = stored.formula.as_mut().filter(|f| f.array.is_some()) {
                         // A matrix formula's range moves with each repeat.
@@ -881,7 +934,9 @@ impl Import {
     }
 
     /// The value, formula and number format of a cell element.
-    fn convert(&mut self, c: &Elem, at: CellRef) -> Result<Cell, IoError> {
+    /// With the cell comes the number format its value type implies (a date or a time), for a
+    /// cell whose style doesn't set one.
+    fn convert(&mut self, c: &Elem, at: CellRef) -> Result<(Cell, Option<&'static str>), IoError> {
         let error = c.attr(Ns::CalcExt, "value-type") == Some("error");
         let kind = if error { Some("error") } else { c.attr(Ns::Office, "value-type") };
         let text = || c.paragraphs_text();
@@ -955,21 +1010,7 @@ impl Import {
                 None => self.report.warn("Some ODS formulas use syntax GridCraft doesn't read; their saved results were kept as values."),
             }
         }
-        if let Some(code) = fmt {
-            cell.style = self.wb.styles.derive(StyleId::DEFAULT, |s| s.num_fmt = NumFmt::new(code));
-        }
-        Ok(cell)
-    }
-
-    /// LibreOffice shows each paragraph of a cell's text on its own line whether or not the cell
-    /// wraps; in the model only wrapped cells break lines, so such cells wrap.
-    fn wrap_lines(&mut self, cell: &mut Cell) {
-        if let Value::Text(t) = &cell.value
-            && t.contains('\n')
-            && !self.wb.styles.get(cell.style).align.wrap
-        {
-            cell.style = self.wb.styles.derive(cell.style, |s| s.align.wrap = true);
-        }
+        Ok((cell, fmt))
     }
 
     fn finish_sheet(&mut self) {
@@ -1079,22 +1120,6 @@ impl Import {
                 let mut v = def.v.clone();
                 v.ranges = merge_ranges(ranges);
                 st.sheet.validations.push(v);
-            }
-        }
-        // A merged area shows its first cell's format, as LibreOffice draws it.
-        let twin = if st.sheet.merges.is_empty() { StyleId::DEFAULT } else { self.default_twin() };
-        for m in st.sheet.merges.clone() {
-            let anchor = st.sheet.style_id(m.start);
-            // The default style can't be stored over a formatted row or column: its twin can.
-            let stored = if anchor == StyleId::DEFAULT { twin } else { anchor };
-            for r in m.start.row..=m.end.row {
-                for c in m.start.col..=m.end.col {
-                    let pos = CellRef::new(r, c);
-                    let here = st.sheet.style_id(pos);
-                    if pos != m.start && here != anchor && here != stored {
-                        st.sheet.set_style(pos, if st.sheet.cell(pos).is_some() && anchor == StyleId::DEFAULT { anchor } else { stored });
-                    }
-                }
             }
         }
         self.images.extend(st.frames.drain(..).map(|f| (index, f)));

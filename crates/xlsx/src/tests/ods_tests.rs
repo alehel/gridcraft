@@ -371,3 +371,73 @@ fn ods_links_keep_their_targets() {
         assert_eq!(target(&wb, 3), "Data!B2");
     }
 }
+
+/// A styled ODS body: `styles` goes in `office:automatic-styles`.
+fn styled_ods(styles: &str, tables: &str) -> Vec<u8> {
+    let content = format!(
+        r#"<?xml version="1.0"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:automatic-styles>{styles}</office:automatic-styles><office:body><office:spreadsheet>{tables}</office:spreadsheet></office:body></office:document-content>"#
+    );
+    make_zip(&[("mimetype", MIME), ("META-INF/manifest.xml", MANIFEST), ("content.xml", content.as_bytes())])
+}
+
+const FILLED: &str =
+    r##"<style:style style:name="ce1" style:family="table-cell"><style:table-cell-properties fo:background-color="#ff0000"/></style:style>"##;
+
+/// Covered cells show their merge's first cell's format, read as each covered cell is met.
+#[test]
+fn ods_covered_cells_take_the_merge_anchor_style() {
+    let (wb, _) = read_ods(&styled_ods(
+        FILLED,
+        r#"<table:table table:name="Data"><table:table-row><table:table-cell table:style-name="ce1" table:number-columns-spanned="2" table:number-rows-spanned="2"/><table:covered-table-cell/></table:table-row><table:table-row><table:covered-table-cell/><table:covered-table-cell/></table:table-row></table:table>"#,
+    ))
+    .unwrap();
+    let sheet = &wb.sheets[0];
+    let anchor = sheet.style_id(CellRef::new(0, 0));
+    assert_ne!(anchor, gridcraft_model::StyleId::DEFAULT);
+    for at in [CellRef::new(0, 1), CellRef::new(1, 0), CellRef::new(1, 1)] {
+        assert_eq!(sheet.style_id(at), anchor, "{at:?}");
+    }
+}
+
+/// One repeated covered run lying under several merges takes each merge's style in turn.
+#[test]
+fn ods_covered_run_under_several_merges_splits_at_their_edges() {
+    let styles = format!(
+        r##"{FILLED}<style:style style:name="ce2" style:family="table-cell"><style:table-cell-properties fo:background-color="#00ff00"/></style:style><style:style style:name="ce3" style:family="table-cell"><style:table-cell-properties fo:background-color="#0000ff"/></style:style>"##
+    );
+    let (wb, _) = read_ods(&styled_ods(
+        &styles,
+        r#"<table:table table:name="Data"><table:table-row><table:table-cell/><table:table-cell table:style-name="ce1" table:number-rows-spanned="2"/><table:table-cell table:style-name="ce2" table:number-rows-spanned="2"/></table:table-row><table:table-row><table:covered-table-cell table:number-columns-repeated="3" table:style-name="ce3"/></table:table-row></table:table>"#,
+    ))
+    .unwrap();
+    let sheet = &wb.sheets[0];
+    assert_eq!(sheet.style_id(CellRef::new(1, 1)), sheet.style_id(CellRef::new(0, 1)));
+    assert_eq!(sheet.style_id(CellRef::new(1, 2)), sheet.style_id(CellRef::new(0, 2)));
+    assert_ne!(sheet.style_id(CellRef::new(1, 1)), sheet.style_id(CellRef::new(1, 2)));
+    // A covered cell under no merge keeps its own style.
+    assert_ne!(sheet.style_id(CellRef::new(1, 0)), gridcraft_model::StyleId::DEFAULT);
+}
+
+/// A sheet-sized merge reads in time: covered cells aren't visited one by one afterwards.
+#[test]
+fn ods_huge_merge_does_not_hang() {
+    let (wb, _) = read_ods(&styled_ods(
+        FILLED,
+        r#"<table:table table:name="Data"><table:table-row><table:table-cell table:style-name="ce1" table:number-columns-spanned="16384" table:number-rows-spanned="1048576"/></table:table-row></table:table>"#,
+    ))
+    .unwrap();
+    assert_eq!(wb.sheets[0].merges.len(), 1);
+}
+
+/// A display factor that never shrinks below a thousand is no hang.
+#[test]
+fn ods_infinite_display_factor_does_not_hang() {
+    let styles = r#"<number:number-style style:name="N1"><number:number number:display-factor="inf"/></number:number-style><number:number-style style:name="N2"><number:number number:display-factor="1e300"/></number:number-style><style:style style:name="ce1" style:family="table-cell" style:data-style-name="N1"/><style:style style:name="ce2" style:family="table-cell" style:data-style-name="N2"/>"#;
+    let (wb, _) = read_ods(&styled_ods(
+        styles,
+        r#"<table:table table:name="Data"><table:table-row><table:table-cell table:style-name="ce1" office:value-type="float" office:value="1"/><table:table-cell table:style-name="ce2" office:value-type="float" office:value="1"/></table:table-row></table:table>"#,
+    ))
+    .unwrap();
+    let code = wb.styles.get(wb.sheets[0].style_id(CellRef::new(0, 1))).num_fmt.as_str().to_string();
+    assert!(code.matches(',').count() <= 6, "{code}");
+}
