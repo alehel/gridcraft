@@ -777,9 +777,14 @@ pub(crate) fn write_style(name: &str, code: &str) -> Option<String> {
         sections.push(Section { parts: vec![Part::General], ..Section::default() });
     }
     // Stated conditions that read back as Excel's implicit ones keep their meaning, except a
-    // lone `>=0`: read implicitly, its negatives would take the first section without their
-    // sign. They are stated as the General they show (`[>=0]0;@`, `[>=0]0`).
-    if explicit && sections.len() == 2 && sections.first().is_some_and(|s| s.cond.as_deref().is_none_or(|c| c == ">=0")) {
+    // lone `>=0` before the other values (General) or text: read implicitly, its negatives
+    // would take the first section without their sign. They are stated as the General they
+    // show (`[>=0]0`, `[>=0]0;@`). A section of the user's own for them stays as it is.
+    let general = Section { parts: vec![Part::General], ..Section::default() };
+    if let [first, rest] = sections.as_slice()
+        && first.cond.as_deref() == Some(">=0")
+        && (*rest == general || rest.parts.contains(&Part::Text))
+    {
         sections.insert(1, Section { cond: Some("<0".into()), parts: vec![Part::Lit("-".into()), Part::General], ..Section::default() });
     }
     let n = sections.len();
@@ -1190,6 +1195,9 @@ mod tests {
             ("[>=0]0.00;@", "0.00;-General;@"),
             ("[>=0]\"p\";@", "\"p\";-General;@"),
             ("@;@", "@;@"),
+            // Round six: a negative section of the user's own is kept.
+            ("[>=0]0;[Red]0", "0;[Red]0"),
+            ("[>=0]0.00;\"x\"", "0.00;\"x\""),
             // Round three: a last conditional section keeps its condition; a time has no
             // made-up negative section.
             ("[>100]0;[<-100]-0", "[>100]0;[<-100]-0"),
