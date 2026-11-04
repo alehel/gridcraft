@@ -486,16 +486,25 @@ fn ods_autofilter_criteria_round_trip() {
         (2, F::Values { values: vec!["a".into(), "b".into()], blanks: true }),
         (3, custom((">=", "1"), Some(("<=", "9")), true)),
         (4, F::Values { values: vec!["x".into()], blanks: false }),
+        (5, custom(("=", "abc*"), Some(("<>", "*z")), true)),
+        (6, custom((">", "100"), None, true)),
     ];
     let mut wb = gridcraft_model::Workbook::new();
     let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
-    for c in 0..5 {
+    for c in 0..7 {
         sh.set_value(CellRef::new(0, c), text("h"));
         sh.set_value(CellRef::new(1, c), Value::Number(1.0));
     }
-    sh.autofilter = Some(AutoFilter { range: RangeRef::new(CellRef::new(0, 0), CellRef::new(1, 4)), criteria: criteria.clone() });
-    let (back, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+    sh.autofilter = Some(AutoFilter { range: RangeRef::new(CellRef::new(0, 0), CellRef::new(1, 6)), criteria: criteria.clone() });
+    let bytes = write_ods(&wb).unwrap();
+    let (back, _) = read_ods(&bytes).unwrap();
     assert_eq!(back.sheets[0].autofilter.as_ref().map(|f| f.criteria.clone()), Some(criteria));
+    // Numbers are compared as numbers, prefixes as prefixes.
+    let mut content = String::new();
+    std::io::Read::read_to_string(&mut zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap().by_name("content.xml").unwrap(), &mut content)
+        .unwrap();
+    assert!(content.contains(r#"table:value="100" table:data-type="number" table:operator="&gt;""#), "{content}");
+    assert!(content.contains(r#"table:value="abc" table:operator="begins""#));
 }
 
 /// What the writer used to lose: a link into a sheet whose name needs quotes, a link on an
@@ -691,4 +700,19 @@ fn ods_reader_keeps_what_the_file_says() {
         .insert(CellRef::new(0, 0), gridcraft_model::Hyperlink { target: "C:\\docs\\a.ods".into(), tooltip: None, external: true });
     let (back, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
     assert_eq!(back.sheets[0].hyperlinks.get(&CellRef::new(0, 0)).map(|h| h.target.as_str()), Some("C:\\docs\\a.ods"));
+}
+
+/// Columns to repeat on each printed page are written and nest with column groups, as rows do.
+#[test]
+fn ods_title_columns_round_trip() {
+    let mut wb = gridcraft_model::Workbook::new();
+    let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    sh.set_value(CellRef::new(0, 4), Value::Number(1.0));
+    for c in [0, 1] {
+        sh.cols.entry(c).or_default().outline = 1;
+    }
+    sh.print.title_cols = Some((1, 2));
+    let (back, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+    assert_eq!(back.sheets[0].print.title_cols, Some((1, 2)));
+    assert_eq!(back.sheets[0].cols.get(&0).map(|c| c.outline), Some(1));
 }

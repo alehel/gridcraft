@@ -1538,6 +1538,17 @@ impl Import {
     }
 }
 
+/// ODF filter operators that are Excel comparisons with wildcards: the ODF operator, Excel's,
+/// and whether a `*` stands before and after the value (`contains` is `=*x*`).
+pub(crate) const WILDCARD_OPS: [(&str, &str, bool, bool); 6] = [
+    ("contains", "=", true, true),
+    ("!contains", "<>", true, true),
+    ("begins", "=", false, true),
+    ("!begins", "<>", false, true),
+    ("ends", "=", true, false),
+    ("!ends", "<>", true, false),
+];
+
 /// One `table:filter-condition` as the column it filters and an autofilter criterion.
 fn filter_criterion(cond: &Elem) -> Option<(u32, FilterCriterion)> {
     let field = cond.attr(Ns::Table, "field-number").and_then(|f| f.parse::<u32>().ok())?;
@@ -1558,14 +1569,13 @@ fn filter_criterion(cond: &Elem) -> Option<(u32, FilterCriterion)> {
             count: value.parse::<f64>().ok().map_or(10, |v| v.clamp(1.0, 500.0) as u32),
         },
         o => {
-            let (op, v) = match o {
-                "begins" => ("=", format!("{value}*")),
-                "ends" => ("=", format!("*{value}")),
-                "contains" => ("=", format!("*{value}*")),
-                "!contains" => ("<>", format!("*{value}*")),
-                "!=" => ("<>", value),
-                "<" | ">" | "<=" | ">=" => (o, value),
-                _ => ("=", value),
+            let (op, v) = match WILDCARD_OPS.iter().find(|(odf, ..)| *odf == o) {
+                Some((_, op, before, after)) => (*op, format!("{}{value}{}", if *before { "*" } else { "" }, if *after { "*" } else { "" })),
+                None => match o {
+                    "!=" => ("<>", value),
+                    "<" | ">" | "<=" | ">=" => (o, value),
+                    _ => ("=", value),
+                },
             };
             FilterCriterion::Custom { a: (op.to_string(), v), b: None, and: true }
         }

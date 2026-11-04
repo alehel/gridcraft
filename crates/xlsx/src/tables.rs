@@ -57,7 +57,7 @@ pub use gridcraft_core::color::INDEXED;
 
 /// Paper sizes (`pageSetup paperSize`) we name. ID 12/13 are the JIS B4/B5 that
 /// `pageLayout.pageSetup` calls `B4`/`B5`; 42 is ISO B4, and 43–88 are the Japanese postcards,
-/// envelopes and B6. The engine's `known_paper` uses the same names and sizes.
+/// envelopes and B6. Their sizes are in `gridcraft_model::paper`, under the same names.
 const PAPERS: [(u32, &str); 23] = [
     (1, "Letter"),
     (3, "Tabloid"),

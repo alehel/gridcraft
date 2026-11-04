@@ -5733,3 +5733,21 @@ fn pivot_new_sheet_destination_respects_workbook_structure_protection() {
     }
     assert!(s.execute("insert.pivotTable", json!({"source": "A1:B3", "location": "New"})).is_err());
 }
+
+/// A dynamic array saved as ODS keeps its spill: the formula spans the range it fills, and the
+/// spilled values are cached in their cells.
+#[test]
+fn ods_keeps_a_dynamic_arrays_spill() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A1", "input": "=SEQUENCE(5)"})).unwrap();
+    assert_eq!(v(&s, "A5"), Value::Number(5.0));
+    let saved = s.execute("file.saveBytes", json!({"format": "ods"})).unwrap();
+    let bytes = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
+    let (wb, _) = gridcraft_xlsx::read_ods(&bytes).unwrap();
+    let sh = &wb.sheets[0];
+    for r in 0..5 {
+        assert_eq!(sh.value(CellRef::new(r, 0)), Value::Number(f64::from(r + 1)), "row {r}");
+    }
+    let f = sh.cell(CellRef::new(0, 0)).and_then(|c| c.formula.clone()).unwrap();
+    assert_eq!(f.array.map(|a| a.height()), Some(5));
+}

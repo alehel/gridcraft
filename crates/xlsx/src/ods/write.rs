@@ -248,6 +248,59 @@ impl<'s> Reach<'s> {
     }
 }
 
+/// The outline groups and the header block (rows or columns to repeat on each printed page)
+/// around lines (rows or columns) written in order. The header block holds lines only, never a
+/// group's edge: inside it the outline stays at its first line's level.
+struct Outline {
+    /// `row` or `column`.
+    axis: &'static str,
+    level: u8,
+    header: Option<(u32, u32)>,
+}
+
+impl Outline {
+    /// `title`'s span (either order), when it starts on the sheet of `max` lines, ending on it.
+    fn new(axis: &'static str, title: Option<(u32, u32)>, max: u32) -> Outline {
+        let header = title.map(|(a, b)| (a.min(b), a.max(b).min(max - 1))).filter(|(a, _)| *a < max);
+        Outline { axis, level: 0, header }
+    }
+
+    /// Before a run starting at `line` in group level `outline`: the groups and header it opens.
+    fn enter(&mut self, out: &mut String, line: u32, outline: u8, hidden: bool) {
+        let in_header = self.header.is_some_and(|(a, b)| line > a && line <= b);
+        let target = if in_header { self.level } else { outline.min(7) };
+        while self.level < target {
+            self.level += 1;
+            let _ = write!(out, "<table:table-{}-group{}>", self.axis, if hidden { " table:display=\"false\"" } else { "" });
+        }
+        self.close_to(out, target);
+        if self.header.is_some_and(|(a, _)| a == line) {
+            let _ = write!(out, "<table:table-header-{}s>", self.axis);
+        }
+    }
+
+    /// Whether a run may go on from the line before `next` to `next`: not across the header's
+    /// edges.
+    fn continues(&self, next: u32) -> bool {
+        self.header.is_none_or(|(a, b)| next != a && next.checked_sub(1) != Some(b))
+    }
+
+    /// After a run of `count` lines from `line`: the header it closes.
+    fn leave(&mut self, out: &mut String, line: u32, count: u32) {
+        if self.header.is_some_and(|(_, b)| b >= line && b - line < count) {
+            let _ = write!(out, "</table:table-header-{}s>", self.axis);
+        }
+    }
+
+    /// Closes groups down to `level` (0: all).
+    fn close_to(&mut self, out: &mut String, level: u8) {
+        while self.level > level {
+            self.level -= 1;
+            let _ = write!(out, "</table:table-{}-group>", self.axis);
+        }
+    }
+}
+
 fn px_to_in(px: f32) -> String {
     format!("{:.4}in", f64::from(px) / 96.0)
 }
@@ -299,6 +352,10 @@ impl<'a> Writer<'a> {
 
     /// A table-cell style named `name`: what `s` sets beyond `base`, with its data style.
     fn cell_style_xml(&mut self, name: &str, s: &Style, base: &Style, parent: Option<&str>, named: bool) -> String {
+        // The font a style names is declared with the document's font faces.
+        if s.font.name != base.font.name {
+            self.font(&s.font.name);
+        }
         let data = if s.num_fmt != base.num_fmt { self.data_style(s.num_fmt.as_str(), named) } else { None };
         let mut o = format!(r#"<style:style style:name="{}" style:family="table-cell""#, esc_attr(name));
         if let Some(p) = parent {
@@ -375,9 +432,6 @@ impl<'a> Writer<'a> {
         let ids: Vec<(StyleId, String)> = self.cell_styles.iter().map(|(k, v)| (*k, v.clone())).collect();
         for (id, name) in ids {
             let s = self.wb.styles.get(id).clone();
-            if s.font.name != default.font.name {
-                self.font(&s.font.name);
-            }
             o.push_str(&self.cell_style_xml(&name, &s, &default, Some("Default"), false));
         }
         o.push_str("<style:style style:name=\"gr1\" style:family=\"graphic\"><style:graphic-properties draw:stroke=\"none\" draw:fill=\"none\"/></style:style>");
@@ -549,7 +603,7 @@ impl<'a> Writer<'a> {
             max_row = max_row.max(c.row);
             max_col = max_col.max(c.col);
         }
-        for c in sh.hyperlinks.keys() {
+        for c in sh.hyperlinks.keys().chain(sh.spill.keys()) {
             max_row = max_row.max(c.row);
             max_col = max_col.max(c.col);
         }
@@ -559,10 +613,15 @@ impl<'a> Writer<'a> {
         if let Some((&c, _)) = sh.cols.iter().next_back() {
             max_col = max_col.max(c);
         }
-        // Rows to repeat on each printed page are rows like any other: they're written out.
-        if let Some((a, b)) = sh.print.title_rows {
-            max_row = max_row.max(a.max(b).min(MAX_ROWS - 1));
+        // Rows and columns to repeat on each printed page are lines like any other.
+        if let Some((_, b)) = Outline::new("row", sh.print.title_rows, MAX_ROWS).header {
+            max_row = max_row.max(b);
         }
+        if let Some((_, b)) = Outline::new("column", sh.print.title_cols, MAX_COLS).header {
+            max_col = max_col.max(b);
+        }
+        // What the model holds past the grid (only a hostile one) is not written.
+        let (mut max_row, mut max_col) = (max_row.min(MAX_ROWS - 1), max_col.min(MAX_COLS - 1));
         self.columns(sh, max_col, out);
         // Validations: one per rule, named on the cells it covers.
         let mut valid_at: Vec<(RangeRef, String)> = Vec::new();
@@ -571,6 +630,9 @@ impl<'a> Writer<'a> {
             let first = v.ranges.first().map(|r| r.start).unwrap_or_default();
             self.validations.push((name.clone(), validation_xml(&name, v, &sh.name, first, self.wb)));
             for r in &v.ranges {
+                if r.start.row >= MAX_ROWS || r.start.col >= MAX_COLS {
+                    continue;
+                }
                 let r = RangeRef::new(r.start, CellRef::new(r.end.row.min(MAX_ROWS - 1), r.end.col.min(MAX_COLS - 1)));
                 valid_at.push((r, name.clone()));
                 max_row = max_row.max(r.end.row);
@@ -584,25 +646,16 @@ impl<'a> Writer<'a> {
     }
 
     fn columns(&mut self, sh: &Sheet, max_col: u32, out: &mut String) {
-        let mut level = 0u8;
+        let mut outline = Outline::new("column", sh.print.title_cols, MAX_COLS);
         let mut col = 0u32;
         let default_w = sh.default_col_width;
         while col < MAX_COLS {
             let info = sh.cols.get(&col).cloned().unwrap_or_default();
-            // A run of identical columns.
-            // Past the sheet's extent, the rest of the columns are one run.
+            outline.enter(out, col, info.outline, info.hidden);
+            // A run of identical columns; past the sheet's extent, the rest are one run.
             let mut end = if col > max_col { MAX_COLS } else { col + 1 };
-            while end <= max_col && sh.cols.get(&end).cloned().unwrap_or_default() == info {
+            while end <= max_col && sh.cols.get(&end).cloned().unwrap_or_default() == info && outline.continues(end) {
                 end += 1;
-            }
-            while level < info.outline.min(7) {
-                level += 1;
-                let hidden = info.hidden && info.outline >= level;
-                let _ = write!(out, "<table:table-column-group{}>", if hidden { " table:display=\"false\"" } else { "" });
-            }
-            while level > info.outline.min(7) {
-                level -= 1;
-                out.push_str("</table:table-column-group>");
             }
             let w = info.size.unwrap_or(default_w);
             let name = self.col_style(w);
@@ -615,24 +668,22 @@ impl<'a> Writer<'a> {
             }
             let style = info.style.map(|s| self.cell_style(s)).unwrap_or_else(|| "Default".into());
             let _ = write!(out, " table:default-cell-style-name=\"{}\"/>", esc_attr(&style));
+            outline.leave(out, col, end - col);
             col = end;
         }
-        while level > 0 {
-            level -= 1;
-            out.push_str("</table:table-column-group>");
-        }
+        outline.close_to(out, 0);
     }
 
     fn rows(&mut self, sh: &Sheet, max_row: u32, max_col: u32, valid_at: &[(RangeRef, String)], out: &mut String) {
         let mut reach = Reach::new(&sh.merges, valid_at);
         // The columns of each row's cells, notes and links: the rows that can't repeat.
         let mut singles: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-        for pos in sh.cells.iter().map(|(c, _)| c).chain(sh.comments.keys().copied()).chain(sh.hyperlinks.keys().copied()) {
+        let spilled = sh.spill.keys().copied().filter(|p| p.row < MAX_ROWS && p.col < MAX_COLS);
+        for pos in sh.cells.iter().map(|(c, _)| c).chain(sh.comments.keys().copied()).chain(sh.hyperlinks.keys().copied()).chain(spilled) {
             singles.entry(pos.row).or_default().push(pos.col);
         }
         // The rows to repeat on each printed page (`table()` counts them in the extent).
-        let header = sh.print.title_rows.map(|(a, b)| (a.min(b), a.max(b).min(max_row)));
-        let mut level = 0u8;
+        let mut outline = Outline::new("row", sh.print.title_rows, MAX_ROWS);
         let mut row = 0u32;
         let default_h = sh.default_row_height;
         let default_row = LineInfo::default();
@@ -640,10 +691,7 @@ impl<'a> Writer<'a> {
             let info = *sh.rows.get(&row).unwrap_or(&default_row);
             if row > max_row {
                 // The rest of the sheet: empty rows of the default height, in no outline group.
-                while level > 0 {
-                    level -= 1;
-                    out.push_str("</table:table-row-group>");
-                }
+                outline.close_to(out, 0);
                 let name = self.row_style(default_h, true);
                 let _ = write!(
                     out,
@@ -653,21 +701,7 @@ impl<'a> Writer<'a> {
                 break;
             }
             reach.at(row);
-            // A header block holds rows only, never a row group's edge: inside it the outline
-            // stays at its first row's level.
-            let in_header = header.is_some_and(|(a, b)| row > a && row <= b);
-            let target = if in_header { level } else { info.outline.min(7) };
-            while level < target {
-                level += 1;
-                let _ = write!(out, "<table:table-row-group{}>", if info.hidden { " table:display=\"false\"" } else { "" });
-            }
-            while level > target {
-                level -= 1;
-                out.push_str("</table:table-row-group>");
-            }
-            if header.is_some_and(|(a, _)| a == row) {
-                out.push_str("<table:table-header-rows>");
-            }
+            outline.enter(out, row, info.outline, info.hidden);
             // Rows without cells, notes or links repeat while alike: the same line settings, and
             // the same merges and validations reaching them.
             let mut repeat = 1u32;
@@ -676,7 +710,7 @@ impl<'a> Writer<'a> {
                 while row + repeat <= max_row
                     && row + repeat < change
                     && sh.rows.get(&(row + repeat)).unwrap_or(&default_row) == &info
-                    && header.is_none_or(|(a, b)| row + repeat != a && row + repeat - 1 != b)
+                    && outline.continues(row + repeat)
                 {
                     repeat += 1;
                 }
@@ -698,15 +732,10 @@ impl<'a> Writer<'a> {
             let cols = singles.get(&row).map(Vec::as_slice).unwrap_or_default();
             self.row_cells(sh, row, max_col, cols, &reach, out);
             out.push_str("</table:table-row>");
-            if header.is_some_and(|(_, b)| b >= row && b < row + repeat) {
-                out.push_str("</table:table-header-rows>");
-            }
+            outline.leave(out, row, repeat);
             row += repeat;
         }
-        while level > 0 {
-            level -= 1;
-            out.push_str("</table:table-row-group>");
-        }
+        outline.close_to(out, 0);
     }
 
     /// One row's cells, as runs: each cell, note, link or merge's first cell alone, and between
@@ -720,9 +749,9 @@ impl<'a> Writer<'a> {
         for (r, name) in reach.active() {
             // A merge's first cell stands alone.
             if name.is_none() && r.start.row == row {
-                edges.extend([r.start.col, r.start.col + 1]);
+                edges.extend([r.start.col, r.start.col.saturating_add(1)]);
             }
-            edges.extend([r.start.col, r.end.col + 1]);
+            edges.extend([r.start.col, r.end.col.saturating_add(1)]);
         }
         edges.retain(|c| *c <= end);
         edges.sort_unstable();
@@ -744,10 +773,10 @@ impl<'a> Writer<'a> {
             let cell = sh.cell(pos);
             let tag = if covered { "table:covered-table-cell" } else { "table:table-cell" };
             let _ = write!(out, "<{tag}");
-            // A run takes its row's or column's default style; a cell states its own.
-            let style = cell.map(|c| c.style).unwrap_or_else(|| sh.style_id(pos));
+            // A run takes its row's or column's default style; a cell states its own when it
+            // isn't the default everywhere.
             let inherited = row_style.or_else(|| sh.cols.get(&a).and_then(|c| c.style)).unwrap_or(StyleId::DEFAULT);
-            if style != inherited || cell.is_some() && style != StyleId::DEFAULT {
+            if let Some(style) = cell.map(|c| c.style).filter(|s| *s != StyleId::DEFAULT || inherited != StyleId::DEFAULT) {
                 let name = self.cell_style(style);
                 let _ = write!(out, " table:style-name=\"{}\"", esc_attr(&name));
             }
@@ -776,7 +805,9 @@ impl<'a> Writer<'a> {
                 paragraphs(&mut inner, &text, None);
                 inner.push_str("</office:annotation>");
             }
-            if let Some(c) = cell {
+            // A spilled value is cached in its cell of the matrix.
+            let spilled = cell.is_none().then(|| sh.spill.get(&pos)).flatten().map(|v| Cell { value: v.clone(), formula: None, ..Cell::default() });
+            if let Some(c) = cell.or(spilled.as_ref()) {
                 self.cell_value(sh, pos, c, out, &mut inner);
             } else if let Some(l) = self.link(sh, pos) {
                 paragraphs(&mut inner, "", Some(&l));
@@ -811,7 +842,9 @@ impl<'a> Writer<'a> {
         {
             let text = formula::to_odf(&e, pos, Some(&sh.name), &WbTables(self.wb));
             let _ = write!(out, " table:formula=\"{}\"", esc_attr(&text));
-            if let Some(a) = f.array {
+            // A dynamic array's spill is written as the matrix it fills, as ODF has no spill.
+            let matrix = f.array.or_else(|| sh.spill_ranges.get(&pos).copied().filter(|r| !r.is_single()));
+            if let Some(a) = matrix {
                 let _ = write!(out, " table:number-matrix-columns-spanned=\"{}\" table:number-matrix-rows-spanned=\"{}\"", a.width(), a.height());
             }
         }
@@ -882,10 +915,13 @@ impl<'a> Writer<'a> {
             return;
         }
         out.push_str("<table:shapes>");
+        // One stacking order over shapes, charts and pictures, in the order they are drawn.
+        let mut z = 0usize;
         for shp in &sh.shapes {
             let name = format!("shp{}", self.graphics.len() + 1);
             let (x, y) = anchor_pt(sh, &shp.anchor);
-            if let Some(xml) = super::shape::shape_xml(shp, &name, x, y, self.graphics.len()) {
+            if let Some(xml) = super::shape::shape_xml(shp, &name, x, y, z) {
+                z += 1;
                 out.push_str(&xml);
                 self.graphics.push(super::shape::style_xml(&name, shp, &self.wb.theme));
             }
@@ -903,16 +939,16 @@ impl<'a> Writer<'a> {
             };
             let _ = write!(
                 out,
-                r#"<draw:frame draw:z-index="{}" draw:name="Chart {}" svg:width="{}pt" svg:height="{}pt" svg:x="{x}pt" svg:y="{y}pt">{object}</draw:frame>"#,
-                self.objects.len(),
+                r#"<draw:frame draw:z-index="{z}" draw:name="Chart {}" svg:width="{}pt" svg:height="{}pt" svg:x="{x}pt" svg:y="{y}pt">{object}</draw:frame>"#,
                 c.id,
                 c.anchor.width * 0.75,
                 c.anchor.height * 0.75,
             );
             self.objects.push((dir, content));
+            z += 1;
         }
         for img in &sh.images {
-            let ext = picture_extension(&img.mime);
+            let ext = crate::drawing::image_ext(&img.mime, &img.data);
             let path = format!("Pictures/{}.{ext}", self.pictures.len() + 1);
             let (x, y) = anchor_pt(sh, &img.anchor);
             let image = if self.flat {
@@ -922,8 +958,7 @@ impl<'a> Writer<'a> {
             };
             let _ = write!(
                 out,
-                r#"<draw:frame draw:z-index="{}" draw:name="Image {}" draw:style-name="gr1" svg:width="{}pt" svg:height="{}pt" svg:x="{x}pt" svg:y="{y}pt">{image}"#,
-                self.pictures.len(),
+                r#"<draw:frame draw:z-index="{z}" draw:name="Image {}" draw:style-name="gr1" svg:width="{}pt" svg:height="{}pt" svg:x="{x}pt" svg:y="{y}pt">{image}"#,
                 img.id,
                 img.anchor.width * 0.75,
                 img.anchor.height * 0.75,
@@ -933,6 +968,7 @@ impl<'a> Writer<'a> {
             }
             out.push_str("</draw:frame>");
             self.pictures.push((path, img.mime.clone(), img.data.clone()));
+            z += 1;
         }
         out.push_str("</table:shapes>");
     }
@@ -958,8 +994,13 @@ impl<'a> Writer<'a> {
             let target: Vec<String> = cf.ranges.iter().map(|r| formula::range_address(&sh.name, *r)).collect();
             let base_addr = format!("{}.{}{}", formula::quote_sheet(&sh.name), col_to_letters(base.col), base.row + 1);
             let expr = |t: &str| formula::odf_expr(t, base, &sh.name, &tables);
-            let entry = |k: &CfValueKind| -> (String, &'static str) {
+            // A threshold as ODF writes it. The range's lowest and highest values are `minimum`
+            // and `maximum`, except in an icon set, whose entries are all lower bounds: there the
+            // lowest value is 0 percent.
+            let entry = |k: &CfValueKind, icons: bool| -> (String, &'static str) {
                 match k {
+                    CfValueKind::Min if icons => ("0".into(), "percent"),
+                    CfValueKind::Max if icons => ("100".into(), "percent"),
                     CfValueKind::Min => ("0".into(), "minimum"),
                     CfValueKind::Max => ("0".into(), "maximum"),
                     CfValueKind::Number(n) => (crate::xml::num(*n), "number"),
@@ -973,7 +1014,7 @@ impl<'a> Writer<'a> {
                 CfRule::ColorScale { stops } => {
                     let mut s = String::from("<calcext:color-scale>");
                     for (k, c) in stops {
-                        let (v, t) = entry(k);
+                        let (v, t) = entry(k, false);
                         let _ = write!(
                             s,
                             r#"<calcext:color-scale-entry calcext:value="{}" calcext:type="{t}" calcext:color="{}"/>"#,
@@ -985,10 +1026,8 @@ impl<'a> Writer<'a> {
                     s
                 }
                 CfRule::DataBar { min, max, color, gradient, show_value } => {
-                    let (a, ta) = entry(min);
-                    let (b, tb) = entry(max);
-                    let ta = if ta == "minimum" { "auto-minimum" } else { ta };
-                    let tb = if tb == "maximum" { "auto-maximum" } else { tb };
+                    let (a, ta) = entry(min, false);
+                    let (b, tb) = entry(max, false);
                     format!(
                         r##"<calcext:data-bar calcext:positive-color="{}" calcext:negative-color="#ff0000" calcext:gradient="{gradient}" calcext:show-value="{show_value}" calcext:axis-color="#000000"><calcext:formatting-entry calcext:value="{}" calcext:type="{ta}"/><calcext:formatting-entry calcext:value="{}" calcext:type="{tb}"/></calcext:data-bar>"##,
                         hex(color),
@@ -999,8 +1038,7 @@ impl<'a> Writer<'a> {
                 CfRule::IconSet { set, thresholds, show_value, .. } => {
                     let mut s = format!(r#"<calcext:icon-set calcext:icon-set-type="{}" calcext:show-value="{show_value}">"#, esc_attr(set));
                     for k in thresholds {
-                        let (v, t) = entry(k);
-                        let t = if t == "minimum" { "number" } else { t };
+                        let (v, t) = entry(k, true);
                         let _ = write!(s, r#"<calcext:formatting-entry calcext:value="{}" calcext:type="{t}"/>"#, esc_attr(&v));
                     }
                     s.push_str("</calcext:icon-set>");
@@ -1080,21 +1118,6 @@ fn protection_key(p: Option<&gridcraft_model::PasswordHash>) -> String {
     }
 }
 
-/// The file extension for a picture of media type `mime`.
-fn picture_extension(mime: &str) -> &str {
-    match mime {
-        "image/jpeg" => "jpg",
-        "image/svg+xml" => "svg",
-        "image/tiff" => "tif",
-        "image/x-emf" | "image/emf" => "emf",
-        "image/x-wmf" | "image/wmf" => "wmf",
-        _ => match mime.strip_prefix("image/") {
-            Some(sub) if !sub.is_empty() && sub.chars().all(|c| c.is_ascii_alphanumeric()) => sub,
-            _ => "png",
-        },
-    }
-}
-
 /// An ISO 8601 duration (`PT12H30M00S`) for a day fraction.
 fn duration(days: f64) -> String {
     let total_ms = (days * 86_400_000.0).round() as i64;
@@ -1112,48 +1135,53 @@ fn paragraphs(out: &mut String, text: &str, link: Option<&str>) {
         if let Some(l) = link {
             let _ = write!(out, "<text:a xlink:href=\"{}\" xlink:type=\"simple\">", esc_attr(l));
         }
-        let mut spaces = 0usize;
-        let mut first = true;
-        let flush = |out: &mut String, spaces: &mut usize, first: bool| {
-            if *spaces == 0 {
-                return;
-            }
-            // One ordinary space survives XML whitespace collapsing unless it starts the line.
-            if first {
-                let _ = write!(out, "<text:s text:c=\"{spaces}\"/>");
-            } else {
-                out.push(' ');
-                if *spaces > 1 {
-                    let _ = write!(out, "<text:s text:c=\"{}\"/>", *spaces - 1);
-                }
-            }
-            *spaces = 0;
-        };
-        for ch in line.chars() {
-            match ch {
-                ' ' => spaces += 1,
-                '\t' => {
-                    flush(out, &mut spaces, first);
-                    out.push_str("<text:tab/>");
-                    first = false;
-                }
-                '\r' => {}
-                c => {
-                    flush(out, &mut spaces, first);
-                    first = false;
-                    let mut b = [0u8; 4];
-                    out.push_str(&esc(c.encode_utf8(&mut b)));
-                }
-            }
-        }
-        // Trailing spaces would collapse: write them explicitly.
-        if spaces > 0 {
-            let _ = write!(out, "<text:s text:c=\"{spaces}\"/>");
-        }
+        push_text(out, line);
         if link.is_some() {
             out.push_str("</text:a>");
         }
         out.push_str("</text:p>");
+    }
+}
+
+/// Text inside a paragraph, its spaces and tabs written so XML whitespace rules keep them
+/// (ODF 1.3 part 3 §6.1.2).
+pub(crate) fn push_text(out: &mut String, line: &str) {
+    let mut spaces = 0usize;
+    let mut first = true;
+    let flush = |out: &mut String, spaces: &mut usize, first: bool| {
+        if *spaces == 0 {
+            return;
+        }
+        // One ordinary space survives XML whitespace collapsing unless it starts the line.
+        if first {
+            let _ = write!(out, "<text:s text:c=\"{spaces}\"/>");
+        } else {
+            out.push(' ');
+            if *spaces > 1 {
+                let _ = write!(out, "<text:s text:c=\"{}\"/>", *spaces - 1);
+            }
+        }
+        *spaces = 0;
+    };
+    for ch in line.chars() {
+        match ch {
+            ' ' => spaces += 1,
+            '\t' => {
+                flush(out, &mut spaces, first);
+                out.push_str("<text:tab/>");
+                first = false;
+            }
+            '\r' => {}
+            c => {
+                flush(out, &mut spaces, first);
+                first = false;
+                crate::xml::push_esc(out, c.encode_utf8(&mut [0u8; 4]));
+            }
+        }
+    }
+    // Trailing spaces would collapse: write them explicitly.
+    if spaces > 0 {
+        let _ = write!(out, "<text:s text:c=\"{spaces}\"/>");
     }
 }
 
@@ -1273,6 +1301,11 @@ fn validation_xml(name: &str, v: &Validation, sheet: &str, base: CellRef, wb: &W
     o
 }
 
+/// Whether a filter value compared by `operator` is a number.
+fn compared_as_number(value: &str, operator: &str) -> bool {
+    matches!(operator, "<" | ">" | "<=" | ">=" | "=" | "!=") && value.trim().parse::<f64>().is_ok_and(f64::is_finite)
+}
+
 fn filter_condition(o: &mut String, col: u32, crit: &gridcraft_model::FilterCriterion) {
     use gridcraft_model::FilterCriterion as F;
     match crit {
@@ -1303,17 +1336,26 @@ fn filter_condition(o: &mut String, col: u32, crit: &gridcraft_model::FilterCrit
                 o.push_str("<table:filter-or>");
             }
             for (op, v) in std::iter::once(a).chain(b.iter()) {
-                let (op, v) = match (op.as_str(), v.strip_prefix('*').and_then(|x| x.strip_suffix('*'))) {
-                    ("=", Some(inner)) => ("contains", inner.to_string()),
-                    ("<>", Some(inner)) => ("!contains", inner.to_string()),
-                    ("<>", None) => ("!=", v.clone()),
-                    (o, _) => (o, v.clone()),
+                // A wildcard at either end is one of ODF's text operators.
+                let wildcard = super::read::WILDCARD_OPS.iter().find_map(|(odf, x, before, after)| {
+                    let inner = v.strip_prefix('*').filter(|_| *before).unwrap_or(v);
+                    let inner = inner.strip_suffix('*').filter(|_| *after).unwrap_or(inner);
+                    let shape = (v.starts_with('*'), v.ends_with('*') && v.len() > 1) == (*before, *after);
+                    (op == x && shape && !inner.is_empty() && !inner.contains(['*', '?'])).then(|| (*odf, inner.to_string()))
+                });
+                let (operator, value) = match wildcard {
+                    Some(w) => w,
+                    None if op == "<>" => ("!=", v.clone()),
+                    None => (op.as_str(), v.clone()),
                 };
+                // A number is compared as one (ODF compares text by default).
+                let number = compared_as_number(&value, operator);
                 let _ = write!(
                     o,
-                    r#"<table:filter-condition table:field-number="{col}" table:value="{}" table:operator="{}"/>"#,
-                    esc_attr(&v),
-                    esc_attr(op)
+                    r#"<table:filter-condition table:field-number="{col}" table:value="{}"{} table:operator="{}"/>"#,
+                    esc_attr(&value),
+                    if number { r#" table:data-type="number""# } else { "" },
+                    esc_attr(operator)
                 );
             }
             if or {
