@@ -187,9 +187,13 @@ fn unprotect_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     })
 }
 
-/// A new Excel-compatible (SHA-512, salted) hash of `pw`. The salt mixes `what` is protected
-/// with the document, a counter and the clock, so equal passwords get different hashes.
+/// A new hash of `pw` in the form the document's format keeps: OpenDocument's SHA-256 key for an
+/// ODS workbook, else Excel's (SHA-512, salted). The salt mixes `what` is protected with the
+/// document, a counter and the clock, so equal passwords get different hashes.
 fn new_password_hash(d: &DocState, what: &str, pw: &str) -> PasswordHash {
+    if matches!(d.workbook_format(), "ods" | "fods") {
+        return PasswordHash::new_sha256_digest(pw);
+    }
     static SALT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SALT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let seed = format!("{what}\u{0}{n}\u{0}{}\u{0}{}", d.uid, gridcraft_calc::now_serial().to_bits());

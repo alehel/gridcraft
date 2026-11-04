@@ -36,6 +36,11 @@ impl PasswordHash {
         }
     }
 
+    /// An OpenDocument protection key for a new password: the SHA-256 digest ODF stores.
+    pub fn new_sha256_digest(password: &str) -> PasswordHash {
+        PasswordHash::Sha256Digest(crate::b64::encode(&sha2::Sha256::digest(password.as_bytes())))
+    }
+
     /// Whether `password` matches. `Err` when the hash can't be checked (unsupported algorithm,
     /// broken base64, spin count over [`MAX_SPIN_COUNT`]).
     pub fn verify(&self, password: &str) -> Result<bool, String> {

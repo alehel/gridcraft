@@ -254,6 +254,11 @@ fn tokens(body: &str) -> Option<Vec<Token>> {
         };
         out.push(Token { tok, start: pos(start), end: pos(i) });
     }
+    // More tokens than the parser takes: refused here, before the defaults (each a scan of the
+    // call) cost more than the tokens themselves.
+    if out.len() > gridcraft_formula::MAX_FORMULA_LEN {
+        return None;
+    }
     // Later calls first, so earlier indices stay put.
     for (func, full) in defaults.into_iter().rev() {
         add_default_true(&mut out, func, full);

@@ -104,6 +104,7 @@ pub(crate) fn read(p: &Elem, id: u32) -> Option<(String, PivotTable)> {
         name: p.attr(Ns::Table, "name").unwrap_or("DataPilot1").to_string(),
         source: src,
         layout: PivotLayout::Tabular,
+        subtotals_top: false,
         ..PivotTable::default()
     };
     let mut layout_seen = false;
@@ -159,7 +160,8 @@ pub(crate) fn read(p: &Elem, id: u32) -> Option<(String, PivotTable)> {
                 Some("compact-layout") => PivotLayout::Compact,
                 _ => PivotLayout::Tabular,
             };
-            pt.subtotals_top = l.attr(Ns::Table, "layout-mode") == Some("outline-subtotals-top");
+            // Compact shows subtotals on top, as its group's own row; tabular never does.
+            pt.subtotals_top = matches!(l.attr(Ns::Table, "layout-mode"), Some("outline-subtotals-top" | "compact-layout"));
         }
     }
     match p.attr(Ns::Table, "grand-total") {
@@ -171,12 +173,8 @@ pub(crate) fn read(p: &Elem, id: u32) -> Option<(String, PivotTable)> {
         Some("column") => pt.grand_totals_rows = false,
         _ => {}
     }
-    // Above the body: LibreOffice's Filter button row, the page fields, and a blank row.
     pt.filter_button = p.attr(Ns::Table, "show-filter-button") != Some("false");
-    let button = u32::from(pt.filter_button);
-    let pages = pt.filters.len() as u32;
-    let k = button + pages + u32::from(button + pages > 0);
-    pt.anchor = CellRef::new(target.start.row.saturating_add(k).min(target.end.row), target.start.col);
+    pt.anchor = CellRef::new(target.start.row.saturating_add(header_rows(&pt)).min(target.end.row), target.start.col);
     pt.last_range = Some(target);
     Some((sheet, pt))
 }
@@ -271,13 +269,27 @@ fn members(wb: &Workbook, sheet: &str, src: RangeRef, col: &str) -> Vec<String> 
     out
 }
 
+/// The rows of a report's target range above its body: LibreOffice's Filter button row, the
+/// page fields shown (one that is also a row or column field is not), and a blank row after
+/// them. The writer starts the target this far above the anchor, so the anchor reads back.
+fn header_rows(pt: &PivotTable) -> u32 {
+    let button = u32::from(pt.filter_button);
+    let on_axis = |name: &str| pt.rows.iter().chain(&pt.columns).any(|f| f.source_col.eq_ignore_ascii_case(name));
+    let pages = pt.filters.iter().filter(|f| !on_axis(&f.source_col)).count().min(u32::MAX as usize) as u32;
+    let above = button.saturating_add(pages);
+    above.saturating_add(u32::from(above > 0))
+}
+
 /// `table:data-pilot-tables` for every sheet's PivotTables (empty when there are none).
 pub(crate) fn write(wb: &Workbook) -> String {
     let mut o = String::new();
     for sh in &wb.sheets {
         for pt in &sh.pivots {
             let Some((src_sheet, src_range)) = source_range(wb, &sh.name, &pt.source) else { continue };
-            let target = pt.last_range.unwrap_or(RangeRef::cell(pt.anchor));
+            // The report as drawn, starting where the anchor reads back from.
+            let end = pt.last_range.map_or(pt.anchor, |r| r.end);
+            let start = CellRef::new(pt.anchor.row.saturating_sub(header_rows(pt)), pt.last_range.map_or(pt.anchor.col, |r| r.start.col));
+            let target = RangeRef::new(start, CellRef::new(end.row.max(start.row), end.col.max(start.col)));
             let grand = match (pt.grand_totals_rows, pt.grand_totals_cols) {
                 (true, true) => "both",
                 (true, false) => "row",
@@ -304,6 +316,7 @@ pub(crate) fn write(wb: &Workbook) -> String {
                 );
                 // Several items chosen: the others are listed as hidden members.
                 if let Some(chosen) = f.selected.as_deref().filter(|s| s.len() > 1) {
+                    let chosen: std::collections::HashSet<&String> = chosen.iter().collect();
                     o.push_str("<table:data-pilot-members>");
                     for m in members(wb, &src_sheet, src_range, &f.source_col) {
                         let shown = chosen.contains(&m);

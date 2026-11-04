@@ -5770,3 +5770,19 @@ fn paper_size_commands_agree() {
     s.execute("pageLayout.pageSetup", json!({"paper": "b6-jis"})).unwrap();
     assert_eq!(s.doc().unwrap().wb.sheets[0].print.paper, "B6");
 }
+
+/// A password set on an OpenDocument workbook is kept in the form ODF stores, so it survives
+/// saving the workbook as the ODS it is.
+#[test]
+fn ods_workbook_passwords_survive_saving() {
+    let mut s = s();
+    let ods = s.execute("file.saveBytes", json!({"format": "ods"})).unwrap();
+    s.execute("file.open", json!({"name": "book.ods", "base64": ods["base64"]})).unwrap();
+    s.execute("review.protectSheet", json!({"password": "pa55"})).unwrap();
+    let saved = s.execute("file.saveBytes", json!({"format": "ods"})).unwrap();
+    let mut t = super::tests::s();
+    t.execute("file.open", json!({"name": "book.ods", "base64": saved["base64"]})).unwrap();
+    assert!(t.execute("review.unprotectSheet", json!({})).is_err());
+    assert!(t.execute("review.unprotectSheet", json!({"password": "nope"})).is_err());
+    t.execute("review.unprotectSheet", json!({"password": "pa55"})).unwrap();
+}

@@ -664,11 +664,13 @@ fn ods_pivot_page_selections_and_filter_button_round_trip() {
         let (back, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
         let pt = back.sheets[0].pivots.first().cloned().unwrap();
         assert_eq!(pt.filter_button, filter_button);
+        // The anchor reads back where it was, however many rows sit above it.
+        assert_eq!(pt.anchor, CellRef::new(10, 4));
         assert_eq!(pt.filters.first().and_then(|f| f.selected.clone()), Some(vec!["East".to_string(), "North".to_string()]));
     }
     // The layout is stated on the row fields; with none stated, ODF's is tabular.
     use gridcraft_model::{PivotField, PivotLayout};
-    for (layout, top) in [(PivotLayout::Tabular, false), (PivotLayout::Outline, true), (PivotLayout::Outline, false), (PivotLayout::Compact, false)] {
+    for (layout, top) in [(PivotLayout::Tabular, false), (PivotLayout::Outline, true), (PivotLayout::Outline, false), (PivotLayout::Compact, true)] {
         let mut wb = wb.clone();
         std::sync::Arc::make_mut(&mut wb.sheets[0]).pivots = vec![PivotTable {
             source: "Sheet1!$A$1:$B$4".into(),
@@ -885,4 +887,31 @@ fn ods_autofilter_without_odf_criteria_writes_no_filter() {
     let bytes = write_ods(&wb).unwrap();
     let content = String::from_utf8(crate::package::Package::open(&bytes).unwrap().read("content.xml").unwrap().unwrap()).unwrap();
     assert!(content.contains("table:database-range ") && !content.contains("table:filter"), "{content}");
+}
+
+/// Round-five reader fixes: a column's third filter condition warns instead of vanishing,
+/// content past column XFD after an empty cell warns, too many namespace declarations in
+/// scope are refused, and pivots in separate lists get distinct ids.
+#[test]
+fn ods_reader_round_five() {
+    let filter = r#"<table:table table:name="S"><table:table-row><table:table-cell/></table:table-row></table:table><table:database-ranges><table:database-range table:target-range-address="S.A1:S.B2" table:display-filter-buttons="true"><table:filter><table:filter-and><table:filter-condition table:field-number="0" table:operator="&gt;" table:value="1"/><table:filter-condition table:field-number="0" table:operator="&lt;" table:value="9"/><table:filter-condition table:field-number="0" table:operator="!=" table:value="5"/></table:filter-and></table:filter></table:database-range></table:database-ranges>"#;
+    let (_, report) = read_ods(&styled_ods("", filter)).unwrap();
+    assert!(report.warnings.iter().any(|w| w.contains("combine conditions")), "{:?}", report.warnings);
+    let past = r#"<table:table table:name="S"><table:table-row><table:table-cell table:number-columns-repeated="16384"/><table:table-cell/><table:table-cell office:value-type="float" office:value="1"/></table:table-row></table:table>"#;
+    let (_, report) = read_ods(&styled_ods("", past)).unwrap();
+    assert!(report.warnings.iter().any(|w| w.contains("beyond column XFD")), "{:?}", report.warnings);
+    let decls: String = (0..200).map(|i| format!(r#" xmlns:p{i}="urn:x:{i}""#)).collect();
+    let nested = format!(
+        r#"<table:table table:name="S">{}<table:table-row><table:table-cell/></table:table-row>{}</table:table>"#,
+        format!("<table:table-row-group{decls}>").repeat(6),
+        "</table:table-row-group>".repeat(6)
+    );
+    assert!(matches!(read_ods(&styled_ods("", &nested)), Err(IoError::TooLarge(_))));
+    let pivot = r#"<table:data-pilot-tables><table:data-pilot-table table:name="P" table:target-range-address="S.D1:S.E3"><table:source-cell-range table:cell-range-address="S.A1:S.B3"/></table:data-pilot-table></table:data-pilot-tables>"#;
+    let two = format!(
+        r#"<table:table table:name="S"><table:table-row><table:table-cell office:value-type="string"><text:p>a</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>b</text:p></table:table-cell></table:table-row></table:table>{pivot}{pivot}"#
+    );
+    let (wb, _) = read_ods(&styled_ods("", &two)).unwrap();
+    let ids: Vec<u32> = wb.sheets[0].pivots.iter().map(|p| p.id).collect();
+    assert_eq!(ids, vec![1, 2]);
 }

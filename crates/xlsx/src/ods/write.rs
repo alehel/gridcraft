@@ -185,11 +185,12 @@ struct Writer<'a> {
     data_styles: HashMap<String, (String, String, bool)>,
     /// Format codes in the order their data styles were made.
     data_order: Vec<String>,
-    col_styles: Vec<(u32, String)>,
-    row_styles: Vec<(u32, bool, String)>,
+    /// Column and row styles by size (hundredths of a pixel), and for rows whether optimal.
+    col_styles: BTreeMap<u32, String>,
+    row_styles: BTreeMap<(u32, bool), String>,
     /// Named conditional-format styles (`ConditionalStyle_N`) and their properties.
     cf_styles: Vec<String>,
-    fonts: Vec<String>,
+    fonts: std::collections::BTreeSet<String>,
     pictures: Vec<(String, String, std::sync::Arc<Vec<u8>>)>,
     /// Embedded chart objects: folder (`Object 1`) and its document.
     objects: Vec<(String, super::chart::ChartDoc)>,
@@ -314,10 +315,10 @@ impl<'a> Writer<'a> {
             cell_styles: BTreeMap::new(),
             data_styles: HashMap::new(),
             data_order: Vec::new(),
-            col_styles: Vec::new(),
-            row_styles: Vec::new(),
+            col_styles: BTreeMap::new(),
+            row_styles: BTreeMap::new(),
             cf_styles: Vec::new(),
-            fonts: Vec::new(),
+            fonts: std::collections::BTreeSet::new(),
             pictures: Vec::new(),
             objects: Vec::new(),
             graphics: Vec::new(),
@@ -326,8 +327,8 @@ impl<'a> Writer<'a> {
     }
 
     fn font(&mut self, name: &str) {
-        if !self.fonts.iter().any(|f| f == name) {
-            self.fonts.push(name.to_string());
+        if !self.fonts.contains(name) {
+            self.fonts.insert(name.to_string());
         }
     }
 
@@ -382,22 +383,14 @@ impl<'a> Writer<'a> {
 
     fn col_style(&mut self, width: f32) -> String {
         let key = (width * 100.0).round() as u32;
-        if let Some((_, n)) = self.col_styles.iter().find(|(k, _)| *k == key) {
-            return n.clone();
-        }
-        let name = format!("co{}", self.col_styles.len() + 1);
-        self.col_styles.push((key, name.clone()));
-        name
+        let n = self.col_styles.len() + 1;
+        self.col_styles.entry(key).or_insert_with(|| format!("co{n}")).clone()
     }
 
     fn row_style(&mut self, height: f32, optimal: bool) -> String {
         let key = (height * 100.0).round() as u32;
-        if let Some((_, _, n)) = self.row_styles.iter().find(|(k, o, _)| *k == key && *o == optimal) {
-            return n.clone();
-        }
-        let name = format!("ro{}", self.row_styles.len() + 1);
-        self.row_styles.push((key, optimal, name.clone()));
-        name
+        let n = self.row_styles.len() + 1;
+        self.row_styles.entry((key, optimal)).or_insert_with(|| format!("ro{n}")).clone()
     }
 
     /// The content's automatic styles but its data styles (they are placed once all are known).
@@ -410,7 +403,7 @@ impl<'a> Writer<'a> {
                 px_to_in(*key as f32 / 100.0)
             );
         }
-        for (key, optimal, name) in &self.row_styles {
+        for ((key, optimal), name) in &self.row_styles {
             let _ = write!(
                 o,
                 r#"<style:style style:name="{name}" style:family="table-row"><style:table-row-properties style:row-height="{}" fo:break-before="auto" style:use-optimal-row-height="{optimal}"/></style:style>"#,
@@ -1168,7 +1161,9 @@ fn duration(days: f64) -> String {
 
 /// Text as `text:p` paragraphs with ODF's whitespace elements, optionally as one link.
 pub(crate) fn paragraphs(out: &mut String, text: &str, link: Option<&str>) {
-    for line in text.split('\n') {
+    // A line ends at a line feed, a carriage return, or both together.
+    let text: std::borrow::Cow<'_, str> = if text.contains('\r') { text.replace("\r\n", "\n").into() } else { text.into() };
+    for line in text.split(['\n', '\r']) {
         out.push_str("<text:p>");
         if let Some(l) = link {
             let _ = write!(out, "<text:a xlink:href=\"{}\" xlink:type=\"simple\">", esc_attr(l));
