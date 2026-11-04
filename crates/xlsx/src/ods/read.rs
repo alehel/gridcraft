@@ -24,6 +24,12 @@ const MAX_CELLS: u64 = 4_000_000;
 const MAX_STYLED_BLANKS: u64 = 2_000_000;
 const MAX_MERGES: u64 = 100_000;
 const MAX_TEXT: u64 = 256 * 1024 * 1024;
+/// The most pieces repeated cells are split into at column-style and merge edges, over the
+/// workbook: the work a row costs whether or not it stores anything.
+const MAX_SEGMENTS: u64 = 32_000_000;
+/// The most nodes of page layouts, master pages and database ranges kept until the sheets that
+/// use them are read: as many as one whole part may hold.
+const MAX_KEPT_NODES: usize = 2_000_000;
 const MAX_SHEETS: usize = 1024;
 /// The most row and column entries (sizes, visibility, outline, style) in a sheet, and in a
 /// workbook.
@@ -94,26 +100,10 @@ pub fn read_ods(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
         }
     }
     dom::parse(&content, &mut import)?;
-    if !import.spreadsheet_seen {
-        return Err(xml_error("incomplete ODS document"));
-    }
-    if import.wb.sheets.is_empty() {
-        return Err(IoError::Format("ODS contains no worksheets".into()));
-    }
-    import.finish_names();
     // Settings and properties are small: a damaged or oversized one is skipped, with a warning.
-    match package.read_limited("settings.xml", SMALL_PART).ok().flatten().map(|s| dom::parse_tree(&s)) {
-        Some(Ok(tree)) => settings::apply(&tree, &mut import.wb),
-        Some(Err(_)) => import.report.warn("The ODS view settings are damaged; default views were used."),
-        None => {}
-    }
-    match package.read_limited("meta.xml", SMALL_PART).ok().flatten().map(|m| dom::parse_tree(&m)) {
-        Some(Ok(tree)) => read_meta(&tree, &mut import.wb),
-        Some(Err(_)) => import.report.warn("The ODS document properties are damaged and were not imported."),
-        None => {}
-    }
-    import.load_pictures(Some(&mut package));
-    Ok((import.wb, import.report))
+    let settings = package.read_limited("settings.xml", SMALL_PART).ok().flatten().map(|s| dom::parse_tree(&s));
+    let meta = package.read_limited("meta.xml", SMALL_PART).ok().flatten().map(|m| dom::parse_tree(&m));
+    import.finish(settings, meta, Some(&mut package))
 }
 
 /// Whether `bytes` are a flat (single-XML) OpenDocument spreadsheet, `.fods`.
@@ -133,23 +123,11 @@ pub fn read_fods(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
     let mut import = Import::new();
     import.flat = true;
     dom::parse(bytes, &mut import)?;
-    if !import.spreadsheet_seen {
-        return Err(xml_error("incomplete ODS document"));
-    }
-    if import.wb.sheets.is_empty() {
-        return Err(IoError::Format("ODS contains no worksheets".into()));
-    }
-    import.finish_names();
-    if let Some(settings) = import.flat_settings.take() {
-        let root = Elem { ns: Ns::Office, name: "document-settings".into(), attrs: vec![], kids: vec![dom::Node::El(settings)] };
-        settings::apply(&root, &mut import.wb);
-    }
-    if let Some(meta) = import.flat_meta.take() {
-        let root = Elem { ns: Ns::Office, name: "document-meta".into(), attrs: vec![], kids: vec![dom::Node::El(meta)] };
-        read_meta(&root, &mut import.wb);
-    }
-    import.load_pictures(None);
-    Ok((import.wb, import.report))
+    // The settings and properties are inline, under the roots their own parts would have.
+    let root = |name: &str, el: Elem| Ok(Elem { ns: Ns::Office, name: name.into(), attrs: vec![], kids: vec![dom::Node::El(el)] });
+    let settings = import.flat_settings.take().map(|s| root("document-settings", s));
+    let meta = import.flat_meta.take().map(|m| root("document-meta", m));
+    import.finish(settings, meta, None)
 }
 
 fn read_meta(root: &Elem, wb: &mut Workbook) {
@@ -368,6 +346,8 @@ pub(crate) struct Import {
     blanks: u64,
     merges: u64,
     text: u64,
+    segments: u64,
+    kept_nodes: usize,
     images: Vec<(usize, Frame)>,
     cf_ranges: u64,
     /// Pictures, charts and shapes read, and row/column entries stored, over the workbook.
@@ -420,6 +400,8 @@ impl Import {
             blanks: 0,
             merges: 0,
             text: 0,
+            segments: 0,
+            kept_nodes: 0,
             images: Vec::new(),
             cf_ranges: 0,
             frames: 0,
@@ -446,7 +428,9 @@ impl Import {
                 continue;
             }
             if e.is(Ns::Style, "page-layout") {
-                if let Some(n) = e.attr(Ns::Style, "name") {
+                if let Some(n) = e.attr(Ns::Style, "name")
+                    && self.keep(e)
+                {
                     self.page_layouts.insert(n.to_string(), e.clone());
                 }
                 continue;
@@ -805,9 +789,23 @@ impl Import {
                 }
             };
             let extras = self.element_extras(c, RangeRef::new(CellRef::new(start_row, col), CellRef::new(last_row, cend - 1)));
+            // An empty cell with no style, span, note or link of its own shows what it falls
+            // back to wherever it lies: nothing to store, so nothing to split.
+            let plain = !covered
+                && own_style.is_none()
+                && implied.is_none()
+                && !value_cell.has_content()
+                && width == 1
+                && height == 1
+                && extras.comment.is_none()
+                && extras.link.is_none();
             // A repeat spanning columns with different default styles is split at their edges.
-            let mut seg = col;
+            let mut seg = if plain { cend } else { col };
             while seg < cend {
+                self.segments += 1;
+                if self.segments > MAX_SEGMENTS {
+                    return Err(IoError::TooLarge("ODS cells are split into more pieces than the import limit".into()));
+                }
                 // The column runs are in order: the one holding `seg` is the last starting at or
                 // before it, and the next one starts where `seg`'s run of no default ends.
                 let at = col_defaults.partition_point(|(a, _, _)| *a <= seg);
@@ -947,11 +945,16 @@ impl Import {
         if merged {
             self.merges = self.merges.saturating_add(count);
         }
-        // Each copy of a note or link is stored: they count as cells.
+        // Each copy of a note, link or matrix formula is stored: they count as cells, and their
+        // text as text.
         let Extras { comment, link } = extras;
         if comment.is_some() || link.is_some() {
             self.cells = self.cells.saturating_add(count);
         }
+        let copied = comment.as_ref().map_or(0, |c| c.text.len() + c.author.len())
+            + link.as_ref().map_or(0, |l| l.target.len() + l.tooltip.as_ref().map_or(0, String::len))
+            + cell.formula.as_ref().filter(|f| store && f.array.is_some()).map_or(0, |f| f.text.len());
+        self.text = self.text.saturating_add(count.saturating_mul(copied as u64));
         if self.cells > MAX_CELLS || self.merges > MAX_MERGES || self.text > MAX_TEXT {
             return Err(IoError::TooLarge("ODS expands beyond the import limit (4 million cells, 100000 merges or 256 MiB of text)".into()));
         }
@@ -1153,9 +1156,50 @@ impl Import {
         self.wb.sheets.push(Arc::new(st.sheet));
     }
 
+    /// The workbook, once its content is read: names resolved, then its view settings,
+    /// properties and pictures (from `package`, or inline). A part that failed to parse warns.
+    fn finish(
+        mut self,
+        settings: Option<Result<Elem, IoError>>,
+        meta: Option<Result<Elem, IoError>>,
+        package: Option<&mut Package<'_>>,
+    ) -> Result<(Workbook, ReadReport), IoError> {
+        if !self.spreadsheet_seen {
+            return Err(xml_error("incomplete ODS document"));
+        }
+        if self.wb.sheets.is_empty() {
+            return Err(IoError::Format("ODS contains no worksheets".into()));
+        }
+        self.finish_names();
+        match settings {
+            Some(Ok(tree)) => settings::apply(&tree, &mut self.wb),
+            Some(Err(_)) => self.report.warn("The ODS view settings are damaged; default views were used."),
+            None => {}
+        }
+        match meta {
+            Some(Ok(tree)) => read_meta(&tree, &mut self.wb),
+            Some(Err(_)) => self.report.warn("The ODS document properties are damaged and were not imported."),
+            None => {}
+        }
+        self.load_pictures(package);
+        Ok((self.wb, self.report))
+    }
+
+    /// Whether `e` may be kept for later, within [`MAX_KEPT_NODES`] over the document.
+    fn keep(&mut self, e: &Elem) -> bool {
+        self.kept_nodes = self.kept_nodes.saturating_add(e.size());
+        let keep = self.kept_nodes <= MAX_KEPT_NODES;
+        if !keep {
+            self.report.warn("Some ODS page styles or database ranges beyond the import limit were not imported.");
+        }
+        keep
+    }
+
     fn read_master_pages(&mut self, m: &Elem) {
         for p in m.children(Ns::Style, "master-page") {
-            if let Some(n) = p.attr(Ns::Style, "name") {
+            if let Some(n) = p.attr(Ns::Style, "name")
+                && self.keep(p)
+            {
                 self.master_pages.insert(n.to_string(), p.clone());
             }
         }
@@ -1695,38 +1739,11 @@ fn place_anchor((cols, rows): (&Lines, &Lines), f: &Frame) -> Anchor {
     }
 }
 
-fn col_width_pt(sheet: &Sheet, i: u32) -> f32 {
-    let info = sheet.cols.get(&i);
-    if info.is_some_and(|c| c.hidden) {
-        return 0.0;
-    }
-    info.and_then(|c| c.size).unwrap_or(sheet.default_col_width) * 0.75
-}
-fn row_height_pt(sheet: &Sheet, i: u32) -> f32 {
-    let info = sheet.rows.get(&i);
-    if info.is_some_and(|c| c.hidden) {
-        return 0.0;
-    }
-    info.and_then(|c| c.size).unwrap_or(sheet.default_row_height) * 0.75
-}
-/// Points from the sheet's left edge to column `col`'s; columns without an entry all have the
-/// default width.
-pub(crate) fn sheet_x(sheet: &Sheet, col: u32) -> f32 {
-    let custom: f32 = sheet.cols.range(..col).map(|(i, _)| col_width_pt(sheet, *i)).sum();
-    let n = sheet.cols.range(..col).count() as f32;
-    custom + (col as f32 - n) * sheet.default_col_width * 0.75
-}
-
-/// Points from the sheet's top edge to row `row`'s.
-pub(crate) fn sheet_y(sheet: &Sheet, row: u32) -> f32 {
-    let custom: f32 = sheet.rows.range(..row).map(|(i, _)| row_height_pt(sheet, *i)).sum();
-    let n = sheet.rows.range(..row).count() as f32;
-    custom + (row as f32 - n) * sheet.default_row_height * 0.75
-}
-
 /// Where an anchor's top-left corner is on the sheet, in points (anchors are in pixels).
 pub(crate) fn anchor_pt(sheet: &Sheet, a: &Anchor) -> (f32, f32) {
-    (sheet_x(sheet, a.cell.col) + a.dx * 0.75, sheet_y(sheet, a.cell.row) + a.dy * 0.75)
+    let cols = Lines::new(&sheet.cols, sheet.default_col_width, MAX_COLS);
+    let rows = Lines::new(&sheet.rows, sheet.default_row_height, MAX_ROWS);
+    (cols.offset(a.cell.col) + a.dx * 0.75, rows.offset(a.cell.row) + a.dy * 0.75)
 }
 
 fn read_frame(f: &Elem, cell: Option<CellRef>) -> Option<Frame> {
@@ -2250,7 +2267,13 @@ impl Sink for Import {
                 }
             }
             (Ns::Table, "named-expressions") => self.named_expressions(&el),
-            (Ns::Table, "database-ranges") => self.database_ranges.extend(el.children(Ns::Table, "database-range").cloned()),
+            (Ns::Table, "database-ranges") => {
+                for r in el.children(Ns::Table, "database-range") {
+                    if self.keep(r) {
+                        self.database_ranges.push(r.clone());
+                    }
+                }
+            }
             (Ns::Table, "content-validations") => self.content_validations(&el),
             (Ns::CalcExt, "conditional-formats") => self.conditional_formats(&el),
             (Ns::Table, "shapes") => self.frames_in(&el),

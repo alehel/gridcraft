@@ -112,6 +112,16 @@ impl Elem {
         }
         out
     }
+    /// How many nodes (elements and text) this element holds, itself included.
+    pub fn size(&self) -> usize {
+        let mut n = 0;
+        let mut stack = vec![self];
+        while let Some(e) = stack.pop() {
+            n += 1 + e.kids.iter().filter(|k| matches!(k, Node::Text(_))).count();
+            stack.extend(e.elems());
+        }
+        n
+    }
     /// The concatenated character data of this element and every descendant, as is.
     pub fn raw_text(&self) -> String {
         let mut out = String::new();
