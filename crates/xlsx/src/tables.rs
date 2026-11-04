@@ -72,7 +72,7 @@ const PAPERS: [(u32, &str); 23] = [
     (13, "B5"),
     (20, "Envelope #10"),
     (27, "Envelope DL"),
-    (34, "Envelope B5"),
+    (34, "B5 (ISO)"),
     (42, "B4 (ISO)"),
     (43, "Japanese Postcard"),
     (69, "Japanese Double Postcard"),

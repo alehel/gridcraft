@@ -463,26 +463,24 @@ impl<'a> Writer<'a> {
         body.push('>');
         let calc = &self.wb.calc;
         let d1904 = self.wb.date_system == DateSystem::D1904;
-        {
-            // Always stated: ODF's defaults (case-sensitive text, regular expressions in
-            // criteria, labels found automatically) are not how the workbook calculates.
+        // Always stated: ODF's defaults (case-sensitive text, regular expressions in
+        // criteria, labels found automatically) are not how the workbook calculates.
+        let _ = write!(
+            body,
+            "<table:calculation-settings table:case-sensitive=\"false\" table:precision-as-shown=\"{}\" table:automatic-find-labels=\"false\" table:use-regular-expressions=\"false\" table:use-wildcards=\"true\">",
+            calc.precision_as_displayed
+        );
+        if d1904 {
+            body.push_str("<table:null-date table:date-value=\"1904-01-01\"/>");
+        }
+        if calc.iterative {
             let _ = write!(
                 body,
-                "<table:calculation-settings table:case-sensitive=\"false\" table:precision-as-shown=\"{}\" table:automatic-find-labels=\"false\" table:use-regular-expressions=\"false\" table:use-wildcards=\"true\">",
-                calc.precision_as_displayed
+                "<table:iteration table:status=\"enable\" table:steps=\"{}\" table:maximum-difference=\"{}\"/>",
+                calc.max_iterations, calc.max_change
             );
-            if d1904 {
-                body.push_str("<table:null-date table:date-value=\"1904-01-01\"/>");
-            }
-            if calc.iterative {
-                let _ = write!(
-                    body,
-                    "<table:iteration table:status=\"enable\" table:steps=\"{}\" table:maximum-difference=\"{}\"/>",
-                    calc.max_iterations, calc.max_change
-                );
-            }
-            body.push_str("</table:calculation-settings>");
         }
+        body.push_str("</table:calculation-settings>");
         let mut tables = String::new();
         for i in 0..self.wb.sheets.len() {
             self.table(i, &mut tables);

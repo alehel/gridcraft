@@ -9,16 +9,10 @@ pub(super) const DENSE_BLOCK: u64 = 60_000;
 
 // ---------------------------------------------------------------- paper
 
-/// Paper size in points (portrait) for a paper name; unknown names fall back to Letter.
+/// Paper size in points, as named (see `gridcraft_model::paper`); unknown names fall back to
+/// Letter.
 pub fn paper_size(name: &str) -> (f32, f32) {
-    known_paper(name).unwrap_or((612.0, 792.0))
-}
-
-/// Paper sizes in points, portrait. `B4`/`B5`/`B6` are the **JIS** sizes Japanese Excel and its
-/// e-mail attachments use (257×364, 182×257 and 128×182 mm); the ISO B series stays reachable as
-/// `B4 (ISO)`/`B5 (ISO)`/`B6 (ISO)`. The Japanese postcards and envelopes are the JIS ones too.
-pub(super) fn known_paper(name: &str) -> Option<(f32, f32)> {
-    gridcraft_model::paper::size_pt(name)
+    gridcraft_model::paper::size_pt(name).unwrap_or((612.0, 792.0))
 }
 
 // ---------------------------------------------------------------- layout

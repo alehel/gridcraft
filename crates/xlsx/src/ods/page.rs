@@ -116,20 +116,19 @@ pub(crate) fn apply(sheet: &mut Sheet, name: &str, masters: &HashMap<String, Ele
     if let Some(props) = layout.and_then(|l| l.child(Ns::Style, "page-layout-properties")) {
         let w = props.attr(Ns::Fo, "page-width").and_then(length_pt);
         let h = props.attr(Ns::Fo, "page-height").and_then(length_pt);
-        // A landscape page is its paper turned: the paper is the page's size the other way.
-        let landscape = props.attr(Ns::Style, "print-orientation") == Some("landscape");
-        if let (Some(w), Some(h)) = (w, h)
-            && let Some(paper) =
-                if landscape { gridcraft_model::paper::for_size(h as f32, w as f32) } else { gridcraft_model::paper::for_size(w as f32, h as f32) }
-        {
-            p.paper = paper.into();
-        }
         p.orientation = match props.attr(Ns::Style, "print-orientation") {
             Some("landscape") => Orientation::Landscape,
             Some("portrait") => Orientation::Portrait,
             _ if w.zip(h).is_some_and(|(w, h)| w > h) => Orientation::Landscape,
             _ => Orientation::Portrait,
         };
+        // A landscape page is its paper turned: the paper is the page's size the other way.
+        if let (Some(w), Some(h)) = (w, h) {
+            let (pw, ph) = if p.orientation == Orientation::Landscape { (h, w) } else { (w, h) };
+            if let Some(paper) = gridcraft_model::paper::for_size(pw as f32, ph as f32) {
+                p.paper = paper.into();
+            }
+        }
         let m = |n: &str| inches(props, Ns::Fo, n).or_else(|| inches(props, Ns::Fo, "margin"));
         let extra = |hf: Option<&Elem>, side: &str| -> Option<f32> {
             let hf = hf?;
@@ -286,13 +285,13 @@ fn regions(code: &str) -> String {
                 }
                 continue;
             }
-            _ => {
-                // Font size digits and the like carry no text.
-                while chars.peek().is_some_and(char::is_ascii_digit) {
-                    chars.next();
-                }
+            // A font size (`&12`): its digits carry no text.
+            d if d.is_ascii_digit() => {
+                while chars.next_if(char::is_ascii_digit).is_some() {}
                 continue;
             }
+            // Bold, italic, underline and the other switches: what follows is text (`&B2024`).
+            _ => continue,
         };
         flush(&mut text, &mut parts, cur);
         if let Some(p) = parts.get_mut(cur) {
@@ -416,5 +415,13 @@ mod tests {
         for code in ["&KFF0000Red", "&K00FF00Red", "&K01+000Red", "&K05-050Red"] {
             assert_eq!(regions(code), regions("Red"), "{code}");
         }
+    }
+
+    #[test]
+    fn text_after_a_switch_code_is_kept() {
+        // Digits after `&` are a font size; after `&B` or `&U` they are text.
+        assert_eq!(regions("&C&B2024 Budget"), regions("&C2024 Budget"));
+        assert_eq!(regions("&U1st quarter"), regions("1st quarter"));
+        assert_eq!(regions("&12Big"), regions("Big"));
     }
 }

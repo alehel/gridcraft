@@ -2,9 +2,9 @@
 //! (XLSX paper ids, ODF page sizes) and print layout all read this one table.
 
 /// Paper names and sizes in points, width then height, as the paper is named: Ledger is
-/// Tabloid turned on its side. Where two names share a size, the first one is what a size reads
-/// as.
-pub const PAPERS: [(&str, f32, f32); 25] = [
+/// Tabloid turned on its side. Each size has one name, so a size reads back as the name it was
+/// saved under.
+pub const PAPERS: [(&str, f32, f32); 24] = [
     ("Letter", 612.0, 792.0),
     ("Legal", 612.0, 1008.0),
     ("A4", 595.28, 841.89),
@@ -19,7 +19,6 @@ pub const PAPERS: [(&str, f32, f32); 25] = [
     ("B5", 515.91, 728.50),
     ("B6", 362.83, 515.91),
     ("B4 (ISO)", 708.66, 1000.63),
-    ("Envelope B5", 498.90, 708.66),
     ("B5 (ISO)", 498.90, 708.66),
     ("B6 (ISO)", 354.33, 498.90),
     ("Envelope #10", 297.0, 684.0),
@@ -34,7 +33,9 @@ pub const PAPERS: [(&str, f32, f32); 25] = [
 ];
 
 /// Other spellings of the names above, in [`key`] form.
-const ALIASES: [(&str, &str); 12] = [
+const ALIASES: [(&str, &str); 13] = [
+    // The B5 envelope is ISO B5 itself (176×250 mm): one size, one name.
+    ("envelopeb5", "B5 (ISO)"),
     ("usletter", "Letter"),
     ("uslegal", "Legal"),
     ("11x17", "Tabloid"),
@@ -87,5 +88,13 @@ mod tests {
         assert_eq!(for_size(792.0, 1224.0), Some("Tabloid"));
         assert_eq!(for_size(842.0, 595.0), Some("A4"));
         assert_eq!(canonical("ledger"), Some("Ledger"));
+    }
+
+    #[test]
+    fn every_size_reads_back_as_its_name() {
+        for (name, w, h) in PAPERS {
+            assert_eq!(for_size(w, h), Some(name), "{name}");
+        }
+        assert_eq!(canonical("Envelope B5"), Some("B5 (ISO)"));
     }
 }
