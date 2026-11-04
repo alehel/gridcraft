@@ -118,15 +118,14 @@ pub(crate) fn write(wb: &Workbook) -> String {
         push_item(&mut o, "HorizontalSplitPosition", "int", &cols.to_string());
         push_item(&mut o, "VerticalSplitPosition", "int", &rows.to_string());
         push_item(&mut o, "ActiveSplitRange", "short", if rows > 0 || cols > 0 { "3" } else { "2" });
-        push_item(&mut o, "PositionLeft", "int", "0");
-        push_item(&mut o, "PositionRight", "int", &s.view_top_left.col.max(cols).to_string());
-        push_item(&mut o, "PositionTop", "int", "0");
-        push_item(&mut o, "PositionBottom", "int", &s.view_top_left.row.max(rows).to_string());
-        if rows == 0 && cols == 0 {
-            // Without panes the scroll position is the left/top one.
-            let n = o.len();
-            let _ = n;
-        }
+        // The scroll position is the right/bottom pane's when the sheet is frozen that way, else
+        // the left/top one's (as `read` takes it).
+        let (left, right) = if cols > 0 { (0, s.view_top_left.col.max(cols)) } else { (s.view_top_left.col, 0) };
+        let (top, bottom) = if rows > 0 { (0, s.view_top_left.row.max(rows)) } else { (s.view_top_left.row, 0) };
+        push_item(&mut o, "PositionLeft", "int", &left.to_string());
+        push_item(&mut o, "PositionRight", "int", &right.to_string());
+        push_item(&mut o, "PositionTop", "int", &top.to_string());
+        push_item(&mut o, "PositionBottom", "int", &bottom.to_string());
         push_item(&mut o, "ZoomType", "short", "0");
         push_item(&mut o, "ZoomValue", "int", &s.zoom.clamp(10, 400).to_string());
         push_item(&mut o, "ShowGrid", "boolean", if s.show_gridlines { "true" } else { "false" });
@@ -135,6 +134,7 @@ pub(crate) fn write(wb: &Workbook) -> String {
     o.push_str("</config:config-item-map-named>");
     let active = wb.sheets.get(wb.active_sheet()).map(|s| s.name.as_str()).unwrap_or_default();
     push_item(&mut o, "ActiveTable", "string", active);
+    // LibreOffice keeps these per document, not per sheet: the first sheet's stand for all.
     let first = wb.sheets.first();
     push_item(&mut o, "ShowZeroValues", "boolean", if first.is_none_or(|s| s.show_zeros) { "true" } else { "false" });
     push_item(&mut o, "ShowGrid", "boolean", if first.is_none_or(|s| s.show_gridlines) { "true" } else { "false" });

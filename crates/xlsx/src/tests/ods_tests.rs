@@ -290,8 +290,35 @@ fn ods_title_rows_past_the_content_write_well_formed_xml() {
     let bytes = write_ods(&wb).unwrap();
     let (back, _) = read_ods(&bytes).unwrap();
     assert_eq!(back.sheets[0].value(CellRef::new(0, 0)), Value::Number(1.0));
-    assert_eq!(back.sheets[0].print.title_rows, Some((0, 0)));
+    assert_eq!(back.sheets[0].print.title_rows, Some((0, 5)));
     assert_eq!(back.sheets[0].print.print_area, Some(RangeRef::new(CellRef::new(0, 0), CellRef::new(9, 3))));
+}
+
+/// Row groups and the header block nest, whatever their edges, and the empty rest of the sheet
+/// is in no group.
+#[test]
+fn ods_row_groups_and_title_rows_nest_and_the_tail_is_ungrouped() {
+    let mut wb = gridcraft_model::Workbook::new();
+    let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    for r in 0..4 {
+        sh.set_value(CellRef::new(r, 0), Value::Number(f64::from(r)));
+    }
+    // Row 0 is grouped, the title rows 1-2 straddle the group's end, and the last row is grouped.
+    for r in [0, 1, 3] {
+        sh.rows.entry(r).or_default().outline = 1;
+    }
+    sh.print.title_rows = Some((1, 2));
+    let bytes = write_ods(&wb).unwrap();
+    let (back, _) = read_ods(&bytes).unwrap();
+    let back = &back.sheets[0];
+    assert_eq!(back.print.title_rows, Some((1, 2)));
+    assert_eq!(back.rows.get(&0).map(|i| i.outline), Some(1));
+    assert_eq!(back.rows.get(&3).map(|i| i.outline), Some(1));
+    assert!(back.rows.get(&4).is_none_or(|i| i.outline == 0));
+    assert!(back.rows.get(&1_000_000).is_none_or(|i| i.outline == 0));
+    for r in 0..4 {
+        assert_eq!(back.value(CellRef::new(r, 0)), Value::Number(f64::from(r)));
+    }
 }
 
 /// A flat document (`.fods`) holds the whole workbook in one XML file and reads back the same.
@@ -440,4 +467,75 @@ fn ods_infinite_display_factor_does_not_hang() {
     .unwrap();
     let code = wb.styles.get(wb.sheets[0].style_id(CellRef::new(0, 1))).num_fmt.as_str().to_string();
     assert!(code.matches(',').count() <= 6, "{code}");
+}
+
+/// Autofilter criteria read back as they were: an OR of two conditions, blanks alone, values
+/// with blanks, and two ANDed conditions on one column.
+#[test]
+fn ods_autofilter_criteria_round_trip() {
+    use gridcraft_model::{AutoFilter, FilterCriterion as F};
+    let custom =
+        |a: (&str, &str), b: Option<(&str, &str)>, and: bool| F::Custom { a: (a.0.into(), a.1.into()), b: b.map(|(o, v)| (o.into(), v.into())), and };
+    let criteria = vec![
+        (0, custom(("<", "5"), Some((">", "10")), false)),
+        (1, F::Values { values: vec![], blanks: true }),
+        (2, F::Values { values: vec!["a".into(), "b".into()], blanks: true }),
+        (3, custom((">=", "1"), Some(("<=", "9")), true)),
+        (4, F::Values { values: vec!["x".into()], blanks: false }),
+    ];
+    let mut wb = gridcraft_model::Workbook::new();
+    let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    for c in 0..5 {
+        sh.set_value(CellRef::new(0, c), text("h"));
+        sh.set_value(CellRef::new(1, c), Value::Number(1.0));
+    }
+    sh.autofilter = Some(AutoFilter { range: RangeRef::new(CellRef::new(0, 0), CellRef::new(1, 4)), criteria: criteria.clone() });
+    let (back, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+    assert_eq!(back.sheets[0].autofilter.as_ref().map(|f| f.criteria.clone()), Some(criteria));
+}
+
+/// What the writer used to lose: a link into a sheet whose name needs quotes, a link on an
+/// error cell, a hidden name, and a picture that is neither PNG, JPEG nor GIF.
+#[test]
+fn ods_writer_keeps_quoted_links_error_links_hidden_names_and_picture_types() {
+    use gridcraft_model::{Anchor, DefinedName, Hyperlink, Image};
+    let mut wb = gridcraft_model::Workbook::new();
+    wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Q1 Sales")));
+    let link = |target: &str| Hyperlink { target: target.into(), tooltip: None, external: false };
+    let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    sh.set_value(CellRef::new(0, 0), text("go"));
+    sh.hyperlinks.insert(CellRef::new(0, 0), link("'Q1 Sales'!B2"));
+    sh.set_value(CellRef::new(0, 1), Value::Error(gridcraft_core::CellError::Div0));
+    sh.hyperlinks.insert(CellRef::new(0, 1), link("Sheet1!A1"));
+    sh.images.push(Image {
+        id: 1,
+        anchor: Anchor::default(),
+        data: std::sync::Arc::new(b"<svg/>".to_vec()),
+        mime: "image/svg+xml".into(),
+        alt: String::new(),
+    });
+    wb.names.push(DefinedName { name: "Secret".into(), scope: None, formula: "Sheet1!$A$1".into(), comment: String::new(), hidden: true });
+    let bytes = write_ods(&wb).unwrap();
+    let (back, _) = read_ods(&bytes).unwrap();
+    let target = |c| back.sheets[0].hyperlinks.get(&CellRef::new(0, c)).map(|h| h.target.clone());
+    assert_eq!(target(0).as_deref(), Some("'Q1 Sales'!B2"));
+    assert_eq!(target(1).as_deref(), Some("Sheet1!A1"));
+    assert!(back.names.iter().any(|n| n.name == "Secret"));
+    let zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    assert!(zip.file_names().any(|n| n.starts_with("Pictures/") && n.ends_with(".svg")), "{:?}", zip.file_names().collect::<Vec<_>>());
+}
+
+/// The scroll position survives with and without frozen panes.
+#[test]
+fn ods_scroll_position_round_trips() {
+    let mut wb = gridcraft_model::Workbook::new();
+    wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Frozen")));
+    std::sync::Arc::make_mut(&mut wb.sheets[0]).view_top_left = CellRef::new(40, 3);
+    let frozen = std::sync::Arc::make_mut(&mut wb.sheets[1]);
+    frozen.freeze = Some((2, 1));
+    frozen.view_top_left = CellRef::new(30, 5);
+    let (back, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+    assert_eq!(back.sheets[0].view_top_left, CellRef::new(40, 3));
+    assert_eq!(back.sheets[1].freeze, Some((2, 1)));
+    assert_eq!(back.sheets[1].view_top_left, CellRef::new(30, 5));
 }

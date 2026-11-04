@@ -9,8 +9,8 @@ use std::sync::Arc;
 use gridcraft_core::date::{days_in_month, serial_from_ymd};
 use gridcraft_core::{CellError, CellRef, DateSystem, MAX_COLS, MAX_ROWS, RangeRef, Value};
 use gridcraft_model::{
-    Anchor, AutoFilter, Cell, CfOperator, CfRule, CfValueKind, Color, Comment, CondFormat, DefinedName, ErrorStyle, Font, Formula, Hyperlink, Image,
-    LineInfo, NumFmt, Sheet, SheetProtection, Style, StyleId, StyleTable, Validation, ValidationKind, Visibility, Workbook,
+    Anchor, AutoFilter, Cell, CfOperator, CfRule, CfValueKind, Color, Comment, CondFormat, DefinedName, ErrorStyle, FilterCriterion, Font, Formula,
+    Hyperlink, Image, LineInfo, NumFmt, Sheet, SheetProtection, Style, StyleId, StyleTable, Validation, ValidationKind, Visibility, Workbook,
 };
 
 use super::dom::{self, Elem, Ns, Sink};
@@ -1212,37 +1212,36 @@ impl Import {
             return;
         }
         let Some(idx) = self.wb.sheets.iter().position(|s| s.name == sheet) else { return };
-        let mut criteria = Vec::new();
+        let mut criteria: Vec<(u32, FilterCriterion)> = Vec::new();
         if let Some(filter) = db.child(Ns::Table, "filter") {
-            for cond in filter.descendants(Ns::Table, "filter-condition") {
-                let Some(field) = cond.attr(Ns::Table, "field-number").and_then(|f| f.parse::<u32>().ok()) else { continue };
-                let op = cond.attr(Ns::Table, "operator").unwrap_or("=");
-                let value = cond.attr(Ns::Table, "value").unwrap_or_default().to_string();
-                let set: Vec<String> =
-                    cond.children(Ns::Table, "filter-set-item").filter_map(|i| i.attr(Ns::Table, "value").map(str::to_string)).collect();
-                let crit = match op {
-                    "=" if !set.is_empty() => gridcraft_model::FilterCriterion::Values { values: set, blanks: false },
-                    "=" => gridcraft_model::FilterCriterion::Values { values: vec![value], blanks: false },
-                    "empty" => gridcraft_model::FilterCriterion::Values { values: vec![], blanks: true },
-                    "top values" | "bottom values" | "top percent" | "bottom percent" => gridcraft_model::FilterCriterion::Top10 {
-                        bottom: op.starts_with("bottom"),
-                        percent: op.ends_with("percent"),
-                        count: value.parse::<f64>().ok().map_or(10, |v| v.clamp(1.0, 500.0) as u32),
-                    },
-                    o => {
-                        let (op, v) = match o {
-                            "begins" => ("=", format!("{value}*")),
-                            "ends" => ("=", format!("*{value}")),
-                            "contains" => ("=", format!("*{value}*")),
-                            "!contains" => ("<>", format!("*{value}*")),
-                            "!=" => ("<>", value),
-                            "<" | ">" | "<=" | ">=" => (o, value),
-                            _ => ("=", value),
-                        };
-                        gridcraft_model::FilterCriterion::Custom { a: (op.to_string(), v), b: None, and: true }
+            // A filter is an AND of conditions, each one alone or an OR of two on one column (as
+            // an autofilter column's custom filter is).
+            let groups = match filter.elems().next() {
+                Some(g) if g.is(Ns::Table, "filter-and") => g.elems().collect(),
+                Some(g) => vec![g],
+                None => Vec::new(),
+            };
+            for g in groups {
+                if g.is(Ns::Table, "filter-condition") {
+                    let Some((field, crit)) = filter_criterion(g) else { continue };
+                    // A second custom condition on a column is ANDed with the first.
+                    if let FilterCriterion::Custom { a, .. } = &crit
+                        && let Some((_, FilterCriterion::Custom { b: b @ None, .. })) = criteria.iter_mut().find(|(f, _)| *f == field)
+                    {
+                        *b = Some(a.clone());
+                        continue;
                     }
-                };
-                criteria.push((field, crit));
+                    criteria.push((field, crit));
+                } else if g.is(Ns::Table, "filter-or") {
+                    let conds: Vec<(u32, FilterCriterion)> = g.children(Ns::Table, "filter-condition").filter_map(filter_criterion).collect();
+                    match conds.as_slice() {
+                        [(f, FilterCriterion::Custom { a, .. }), (f2, FilterCriterion::Custom { a: b, .. })] if f == f2 => {
+                            criteria.push((*f, FilterCriterion::Custom { a: a.clone(), b: Some(b.clone()), and: false }));
+                        }
+                        [one] => criteria.push(one.clone()),
+                        _ => self.report.warn("Some ODS filters combine conditions in ways GridCraft doesn't read; they were left out."),
+                    }
+                }
             }
         }
         if let Some(sheet) = self.wb.sheets.get_mut(idx) {
@@ -1493,6 +1492,41 @@ impl Import {
 }
 
 /// The anchor of a picture: its cell and offset from the sheet origin or its anchor cell.
+/// One `table:filter-condition` as the column it filters and an autofilter criterion.
+fn filter_criterion(cond: &Elem) -> Option<(u32, FilterCriterion)> {
+    let field = cond.attr(Ns::Table, "field-number").and_then(|f| f.parse::<u32>().ok())?;
+    let op = cond.attr(Ns::Table, "operator").unwrap_or("=");
+    let value = cond.attr(Ns::Table, "value").unwrap_or_default().to_string();
+    let set: Vec<String> = cond.children(Ns::Table, "filter-set-item").filter_map(|i| i.attr(Ns::Table, "value").map(str::to_string)).collect();
+    let crit = match op {
+        // An empty item in a value list is the "(Blanks)" choice.
+        "=" if !set.is_empty() => {
+            let blanks = set.iter().any(String::is_empty);
+            FilterCriterion::Values { values: set.into_iter().filter(|v| !v.is_empty()).collect(), blanks }
+        }
+        "=" => FilterCriterion::Values { values: vec![value], blanks: false },
+        "empty" => FilterCriterion::Values { values: vec![], blanks: true },
+        "top values" | "bottom values" | "top percent" | "bottom percent" => FilterCriterion::Top10 {
+            bottom: op.starts_with("bottom"),
+            percent: op.ends_with("percent"),
+            count: value.parse::<f64>().ok().map_or(10, |v| v.clamp(1.0, 500.0) as u32),
+        },
+        o => {
+            let (op, v) = match o {
+                "begins" => ("=", format!("{value}*")),
+                "ends" => ("=", format!("*{value}")),
+                "contains" => ("=", format!("*{value}*")),
+                "!contains" => ("<>", format!("*{value}*")),
+                "!=" => ("<>", value),
+                "<" | ">" | "<=" | ">=" => (o, value),
+                _ => ("=", value),
+            };
+            FilterCriterion::Custom { a: (op.to_string(), v), b: None, and: true }
+        }
+    };
+    Some((field, crit))
+}
+
 fn place_anchor(sheet: &Sheet, f: &Frame) -> Anchor {
     let (x, y) = (f.x as f32, f.y as f32);
     let (cell, dx, dy) = match f.cell {

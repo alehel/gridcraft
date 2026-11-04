@@ -411,7 +411,9 @@ impl<'a> Writer<'a> {
         let mut o = String::new();
         let base_sheet = scope.and_then(|i| self.wb.sheets.get(i)).or_else(|| self.wb.sheets.first()).map(|s| s.name.clone()).unwrap_or_default();
         let base = format!("${}.$A$1", quote(&base_sheet));
-        for n in self.wb.names.iter().filter(|n| n.scope == scope && !n.name.starts_with("_xlnm") && !n.hidden) {
+        // ODF has no hidden names: a hidden name is written as a plain one rather than lost, so
+        // formulas that use it keep working.
+        for n in self.wb.names.iter().filter(|n| n.scope == scope && !n.name.starts_with("_xlnm")) {
             let Ok(e) = gridcraft_formula::parse(&n.formula) else { continue };
             if gridcraft_formula::parse_name(&n.name).is_err() {
                 continue;
@@ -495,7 +497,7 @@ impl<'a> Writer<'a> {
             max_row = max_row.max(m.end.row);
             max_col = max_col.max(m.end.col);
         }
-        for (c, _) in sh.comments.iter().chain(std::iter::empty()) {
+        for c in sh.comments.keys() {
             max_row = max_row.max(c.row);
             max_col = max_col.max(c.col);
         }
@@ -508,6 +510,10 @@ impl<'a> Writer<'a> {
         }
         if let Some((&c, _)) = sh.cols.iter().next_back() {
             max_col = max_col.max(c);
+        }
+        // Rows to repeat on each printed page are rows like any other: they're written out.
+        if let Some((a, b)) = sh.print.title_rows {
+            max_row = max_row.max(a.max(b).min(MAX_ROWS - 1));
         }
         self.columns(sh, max_col, out);
         // Validations: one per rule, named on the cells it covers.
@@ -594,8 +600,8 @@ impl<'a> Writer<'a> {
         }
         let covered_rows: std::collections::HashSet<u32> = covered.iter().map(|c| c.row).chain(spans.keys().map(|c| c.row)).collect();
         let note_rows: std::collections::HashSet<u32> = sh.comments.keys().chain(sh.hyperlinks.keys()).map(|c| c.row).collect();
-        // Title rows past the sheet's content end with it, so the header group always closes.
-        let header = sh.print.title_rows.map(|(a, b)| (a.min(b), b.max(a).min(max_row.max(a)))).filter(|(a, _)| *a <= max_row);
+        // The rows to repeat on each printed page (`table()` counts them in the extent).
+        let header = sh.print.title_rows.map(|(a, b)| (a.min(b), a.max(b).min(max_row)));
         let mut level = 0u8;
         let mut row = 0u32;
         let default_h = sh.default_row_height;
@@ -603,7 +609,11 @@ impl<'a> Writer<'a> {
         while row < MAX_ROWS {
             let info = *sh.rows.get(&row).unwrap_or(&default_row);
             if row > max_row {
-                // The rest of the sheet: empty rows of the default height.
+                // The rest of the sheet: empty rows of the default height, in no outline group.
+                while level > 0 {
+                    level -= 1;
+                    out.push_str("</table:table-row-group>");
+                }
                 let name = self.row_style(default_h, true);
                 let _ = write!(
                     out,
@@ -612,7 +622,10 @@ impl<'a> Writer<'a> {
                 );
                 break;
             }
-            let target = info.outline.min(7);
+            // A header block holds rows only, never a row group's edge: inside it the outline
+            // stays at its first row's level.
+            let in_header = header.is_some_and(|(a, b)| row > a && row <= b);
+            let target = if in_header { level } else { info.outline.min(7) };
             while level < target {
                 level += 1;
                 let _ = write!(out, "<table:table-row-group{}>", if info.hidden { " table:display=\"false\"" } else { "" });
@@ -784,9 +797,9 @@ impl<'a> Writer<'a> {
                 // Relative to the file's folder in the model, to the package in ODF.
                 if super::read::is_relative(&h.target) { format!("../{}", h.target) } else { h.target.clone() }
             } else {
-                // `Sheet2!A1` → `#Sheet2.A1`.
+                // `'Q1 Sales'!A1` → `#'Q1 Sales'.A1`.
                 match h.target.rsplit_once('!') {
-                    Some((s, a)) => format!("#{}.{}", s.trim_matches('\''), a.replace('$', "")),
+                    Some((s, a)) => format!("#{}.{}", quote(&gridcraft_core::unquote_sheet(s)), a.replace('$', "")),
                     None => format!("#{}", h.target),
                 }
             }
@@ -829,7 +842,7 @@ impl<'a> Writer<'a> {
             }
             Value::Error(e) => {
                 out.push_str(" office:value-type=\"string\" office:string-value=\"\" calcext:value-type=\"error\"");
-                paragraphs(inner, e.as_str(), None);
+                paragraphs(inner, e.as_str(), link.as_deref());
             }
             Value::Array(a) => {
                 let first = a.get(0, 0).cloned().unwrap_or(Value::Empty);
@@ -884,11 +897,7 @@ impl<'a> Writer<'a> {
             self.objects.push((dir, content));
         }
         for img in &sh.images {
-            let ext = match img.mime.as_str() {
-                "image/jpeg" => "jpg",
-                "image/gif" => "gif",
-                _ => "png",
-            };
+            let ext = picture_extension(&img.mime);
             let path = format!("Pictures/{}.{ext}", self.pictures.len() + 1);
             let x = geometry_x(sh, img.anchor.cell.col) + img.anchor.dx * 0.75;
             let y = geometry_y(sh, img.anchor.cell.row) + img.anchor.dy * 0.75;
@@ -1072,6 +1081,21 @@ fn protection_key(p: Option<&gridcraft_model::PasswordHash>) -> String {
             format!(" table:protection-key=\"{}\" table:protection-key-digest-algorithm=\"http://www.w3.org/2000/09/xmldsig#sha256\"", esc_attr(hash))
         }
         _ => String::new(),
+    }
+}
+
+/// The file extension for a picture of media type `mime`.
+fn picture_extension(mime: &str) -> &str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/svg+xml" => "svg",
+        "image/tiff" => "tif",
+        "image/x-emf" | "image/emf" => "emf",
+        "image/x-wmf" | "image/wmf" => "wmf",
+        _ => match mime.strip_prefix("image/") {
+            Some(sub) if !sub.is_empty() && sub.chars().all(|c| c.is_ascii_alphanumeric()) => sub,
+            _ => "png",
+        },
     }
 }
 
@@ -1290,23 +1314,32 @@ fn validation_xml(name: &str, v: &Validation, sheet: &str, base: CellRef, wb: &W
 fn filter_condition(o: &mut String, col: u32, crit: &gridcraft_model::FilterCriterion) {
     use gridcraft_model::FilterCriterion as F;
     match crit {
-        F::Values { values, blanks } => {
-            if values.len() == 1 && !blanks {
-                let _ =
-                    write!(o, r#"<table:filter-condition table:field-number="{col}" table:value="{}" table:operator="="/>"#, esc_attr(&values[0]));
-            } else {
-                let first = values.first().cloned().unwrap_or_default();
-                let _ = write!(o, r#"<table:filter-condition table:field-number="{col}" table:value="{}" table:operator="=">"#, esc_attr(&first));
+        F::Values { values, blanks: true } if values.is_empty() => {
+            let _ = write!(o, r#"<table:filter-condition table:field-number="{col}" table:value="" table:operator="empty"/>"#);
+        }
+        F::Values { values, blanks } => match values.as_slice() {
+            [only] if !blanks => {
+                let _ = write!(o, r#"<table:filter-condition table:field-number="{col}" table:value="{}" table:operator="="/>"#, esc_attr(only));
+            }
+            _ => {
+                let first = values.first().map(String::as_str).unwrap_or_default();
+                let _ = write!(o, r#"<table:filter-condition table:field-number="{col}" table:value="{}" table:operator="=">"#, esc_attr(first));
                 for v in values {
                     let _ = write!(o, r#"<table:filter-set-item table:value="{}"/>"#, esc_attr(v));
                 }
+                // The "(Blanks)" choice is an empty item.
                 if *blanks {
                     o.push_str(r#"<table:filter-set-item table:value=""/>"#);
                 }
                 o.push_str("</table:filter-condition>");
             }
-        }
-        F::Custom { a, b, .. } => {
+        },
+        F::Custom { a, b, and } => {
+            // The filter is an AND of its columns: a column's two conditions joined by OR nest.
+            let or = !and && b.is_some();
+            if or {
+                o.push_str("<table:filter-or>");
+            }
             for (op, v) in std::iter::once(a).chain(b.iter()) {
                 let (op, v) = match (op.as_str(), v.strip_prefix('*').and_then(|x| x.strip_suffix('*'))) {
                     ("=", Some(inner)) => ("contains", inner.to_string()),
@@ -1320,6 +1353,9 @@ fn filter_condition(o: &mut String, col: u32, crit: &gridcraft_model::FilterCrit
                     esc_attr(&v),
                     esc_attr(op)
                 );
+            }
+            if or {
+                o.push_str("</table:filter-or>");
             }
         }
         F::Top10 { bottom, percent, count } => {

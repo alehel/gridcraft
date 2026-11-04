@@ -9,7 +9,7 @@ use gridcraft_model::{Orientation, PageOrder, PrintSettings, Sheet};
 
 use super::dom::{Elem, Node, Ns};
 use super::style::length_pt;
-use crate::xml::{esc, esc_attr};
+use crate::xml::esc;
 
 /// Paper sizes by name, in millimetres (portrait).
 const PAPERS: &[(&str, f64, f64)] = &[
@@ -276,6 +276,15 @@ fn regions(code: &str) -> String {
             'T' | 't' => "<text:time>00:00:00</text:time>",
             'F' | 'f' => "<text:title>???</text:title>",
             'Z' | 'z' => "",
+            // A colour: six hex digits (`&KFF0000`) or a theme colour and tint (`&K01+000`).
+            'K' | 'k' => {
+                for _ in 0..6 {
+                    if chars.next_if(|x| x.is_ascii_hexdigit() || matches!(x, '+' | '-')).is_none() {
+                        break;
+                    }
+                }
+                continue;
+            }
             '"' => {
                 // A font name: skip to the closing quote.
                 for x in chars.by_ref() {
@@ -372,7 +381,6 @@ pub(crate) fn write(i: usize, p: &PrintSettings) -> (String, String) {
         master.push_str(&block("footer-first", &p.first_footer, true));
     }
     master.push_str("</style:master-page>");
-    let _ = esc_attr("");
     (layout, master)
 }
 
@@ -389,5 +397,13 @@ mod tests {
         );
         let Ok(tree) = parse_tree(xml.as_bytes()) else { return };
         assert_eq!(hf_code(&tree), "&LLeft && co&CPage &P of &N&R&A");
+    }
+
+    /// Colour codes carry no text: neither an RGB colour nor a theme colour leaks into the header.
+    #[test]
+    fn header_colour_codes_leave_no_text() {
+        for code in ["&KFF0000Red", "&K00FF00Red", "&K01+000Red", "&K05-050Red"] {
+            assert_eq!(regions(code), regions("Red"), "{code}");
+        }
     }
 }
