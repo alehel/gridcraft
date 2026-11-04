@@ -521,7 +521,8 @@ impl<'a> Writer<'a> {
             }
             match &e {
                 gridcraft_formula::Expr::Ref(r) => {
-                    let addr = formula::address(r);
+                    // A cell range address names cells: whole columns and rows by their cells.
+                    let addr = formula::address(&formula::cell_range(r));
                     let _ = write!(
                         o,
                         r#"<table:named-range table:name="{}" table:base-cell-address="{}" table:cell-range-address="{}"/>"#,

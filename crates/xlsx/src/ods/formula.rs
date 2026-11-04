@@ -459,6 +459,10 @@ pub(crate) fn parse_odf_ref(inner: &str) -> Option<Reference> {
         (Some(x), Some(y)) if x.row == 0 && y.row == gridcraft_core::MAX_ROWS - 1 && x.row_abs == y.row_abs => {
             RefKind::Cols(x.col, x.col_abs, y.col, y.col_abs)
         }
+        // So is a whole row (columns A to the last one).
+        (Some(x), Some(y)) if x.col == 0 && y.col == gridcraft_core::MAX_COLS - 1 && x.col_abs == y.col_abs => {
+            RefKind::Rows(x.row, x.row_abs, y.row, y.row_abs)
+        }
         (Some(x), Some(y)) => RefKind::Range(x, y),
         _ => match (first.col, first.row, second.col, second.row) {
             (Some((c0, a0)), None, Some((c1, a1)), None) => RefKind::Cols(c0, a0, c1, a1),
@@ -504,6 +508,41 @@ pub(crate) fn range_on_sheet(list: &str) -> Option<(String, RangeRef)> {
 }
 
 // ------------------------------------------------------------------------------------- writing
+
+/// An ODF range address list (space-separated, possibly bracketed) as A1 text: one reference,
+/// or several as a union in parentheses, each part as `part` prints it. A part that doesn't
+/// read is `#REF!`, or makes the whole list `None` when `strict`.
+pub(crate) fn range_list(list: &str, strict: bool, part: impl Fn(Reference) -> Option<String>) -> Option<String> {
+    let mut parts = Vec::new();
+    for p in split_addresses(list) {
+        match parse_odf_ref(p.trim_matches(|c| c == '[' || c == ']')).and_then(&part) {
+            Some(t) => parts.push(t),
+            None if strict => return None,
+            None => parts.push("#REF!".into()),
+        }
+    }
+    match parts.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        _ => Some(format!("({})", parts.join(","))),
+    }
+}
+
+/// A reference as a cell range address can hold it: whole columns or rows by their cells.
+pub(crate) fn cell_range(r: &Reference) -> Reference {
+    let last = |abs| Anchor { row: 0, col: 0, row_abs: true, col_abs: abs };
+    let kind = match r.kind.clone() {
+        RefKind::Cols(c0, a0, c1, a1) => {
+            RefKind::Range(Anchor { col: c0, ..last(a0) }, Anchor { col: c1, row: gridcraft_core::MAX_ROWS - 1, ..last(a1) })
+        }
+        RefKind::Rows(r0, a0, r1, a1) => RefKind::Range(
+            Anchor { row: r0, row_abs: a0, col: 0, col_abs: true },
+            Anchor { row: r1, row_abs: a1, col: gridcraft_core::MAX_COLS - 1, col_abs: true },
+        ),
+        other => other,
+    };
+    Reference { sheet: r.sheet.clone(), kind }
+}
 
 /// A sheet name as ODF writes it: quoted unless it is a plain word.
 pub(crate) fn quote_sheet(name: &str) -> String {
@@ -725,6 +764,8 @@ mod tests {
         assert_eq!(from_odf("of:=SUM([.A1:.B2]~[.C1])").as_deref(), Some("SUM((A1:B2,C1))"));
         assert_eq!(from_odf("of:=AREAS([.A1]~[.B1]~[.C1])").as_deref(), Some("AREAS((A1,B1,C1))"));
         assert_eq!(from_odf("of:=SUM([.A1]~[.B1];1)").as_deref(), Some("SUM((A1,B1),1)"));
+        assert_eq!(from_odf("of:=SUM([.A1]~[.B1]%)").as_deref(), Some("SUM((A1,B1)%)"));
+        assert_eq!(from_odf("of:=[.A1]~[.B1]%").as_deref(), Some("(A1,B1)%"));
         assert_eq!(from_odf("of:=[.A1]~[.B1]").as_deref(), Some("(A1,B1)"));
         assert_eq!(from_odf("of:=[.A1:.B2]![.B1:.C3]").as_deref(), Some("A1:B2 B1:C3"));
         assert_eq!(from_odf("of:=[.#REF!]+1").as_deref(), Some("#REF!+1"));

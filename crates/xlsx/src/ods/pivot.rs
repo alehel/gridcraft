@@ -212,6 +212,26 @@ fn field_xml(o: &mut String, f: &PivotField, orientation: &str) {
     );
 }
 
+/// A pivot's source (a range, a table or a defined name) as its sheet and range; `own` is the
+/// pivot's sheet, for a range that names none.
+fn source_range(wb: &Workbook, own: &str, source: &str) -> Option<(String, RangeRef)> {
+    match gridcraft_formula::parse(source.trim_start_matches('=')).ok()? {
+        gridcraft_formula::Expr::Ref(r) => Some((r.sheet_name().unwrap_or(own).to_string(), r.range())),
+        gridcraft_formula::Expr::Name(n) => {
+            let table =
+                wb.sheets.iter().find_map(|sh| sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(&n)).map(|t| (sh.name.clone(), t.range)));
+            table.or_else(|| {
+                let name = wb.names.iter().find(|d| d.name.eq_ignore_ascii_case(&n) && d.scope.is_none())?;
+                match gridcraft_formula::parse(name.formula.trim_start_matches('=')).ok()? {
+                    gridcraft_formula::Expr::Ref(r) => Some((r.sheet_name()?.to_string(), r.range())),
+                    _ => None,
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
 /// The most members listed for a page field.
 const MAX_MEMBERS: usize = 10_000;
 
@@ -238,8 +258,7 @@ pub(crate) fn write(wb: &Workbook) -> String {
     let mut o = String::new();
     for sh in &wb.sheets {
         for pt in &sh.pivots {
-            let Ok(gridcraft_formula::Expr::Ref(src)) = gridcraft_formula::parse(pt.source.trim_start_matches('=')) else { continue };
-            let src_sheet = src.sheet_name().unwrap_or(&sh.name).to_string();
+            let Some((src_sheet, src_range)) = source_range(wb, &sh.name, &pt.source) else { continue };
             let target = pt.last_range.unwrap_or(RangeRef::cell(pt.anchor));
             let grand = match (pt.grand_totals_rows, pt.grand_totals_cols) {
                 (true, true) => "both",
@@ -253,7 +272,7 @@ pub(crate) fn write(wb: &Workbook) -> String {
                 r#"<table:data-pilot-table table:name="{}" table:target-range-address="{}" table:grand-total="{grand}" table:show-filter-button="{button}"><table:source-cell-range table:cell-range-address="{}"/>"#,
                 esc_attr(&pt.name),
                 esc_attr(&formula::range_address(&sh.name, target)),
-                esc_attr(&formula::range_address(&src_sheet, src.range()))
+                esc_attr(&formula::range_address(&src_sheet, src_range))
             );
             for f in &pt.filters {
                 let selected = match f.selected.as_deref() {
@@ -268,7 +287,7 @@ pub(crate) fn write(wb: &Workbook) -> String {
                 // Several items chosen: the others are listed as hidden members.
                 if let Some(chosen) = f.selected.as_deref().filter(|s| s.len() > 1) {
                     o.push_str("<table:data-pilot-members>");
-                    for m in members(wb, &src_sheet, src.range(), &f.source_col) {
+                    for m in members(wb, &src_sheet, src_range, &f.source_col) {
                         let shown = chosen.contains(&m);
                         let _ = write!(
                             o,
@@ -280,18 +299,29 @@ pub(crate) fn write(wb: &Workbook) -> String {
                 }
                 o.push_str("</table:data-pilot-level></table:data-pilot-field>");
             }
-            for f in &pt.rows {
+            // Σ Values (with two or more values) sits among the row fields where the report puts
+            // it, or after the column fields.
+            let layout = |o: &mut String, orientation: &str| {
+                let _ = write!(
+                    o,
+                    r#"<table:data-pilot-field table:source-field-name="" table:is-data-layout-field="true" table:orientation="{orientation}" table:used-hierarchy="-1" table:function="auto"/>"#
+                );
+            };
+            let layout_at = (pt.values.len() > 1 && pt.values_on_rows).then(|| pt.values_position.unwrap_or(pt.rows.len()).min(pt.rows.len()));
+            for (i, f) in pt.rows.iter().enumerate() {
+                if layout_at == Some(i) {
+                    layout(&mut o, "row");
+                }
                 field_xml(&mut o, f, "row");
+            }
+            if layout_at == Some(pt.rows.len()) {
+                layout(&mut o, "row");
             }
             for f in &pt.columns {
                 field_xml(&mut o, f, "column");
             }
-            if pt.values.len() > 1 {
-                let _ = write!(
-                    o,
-                    r#"<table:data-pilot-field table:source-field-name="" table:is-data-layout-field="true" table:orientation="{}" table:used-hierarchy="-1" table:function="auto"/>"#,
-                    if pt.values_on_rows { "row" } else { "column" }
-                );
+            if pt.values.len() > 1 && !pt.values_on_rows {
+                layout(&mut o, "column");
             }
             for v in &pt.values {
                 let _ = write!(
@@ -309,8 +339,13 @@ pub(crate) fn write(wb: &Workbook) -> String {
                     // ODF has no rank: the value is written plain.
                     PivotShowAs::Rank => None,
                 };
+                // A running total runs along the first row field (else the first column field).
+                let base = match v.show_as {
+                    PivotShowAs::RunningTotal => pt.rows.first().or(pt.columns.first()).map_or(&v.source_col, |f| &f.source_col),
+                    _ => &v.source_col,
+                };
                 if let Some(t) = reference {
-                    let _ = write!(o, r#"<table:data-pilot-field-reference table:field-name="{}" table:type="{t}"/>"#, esc_attr(&v.source_col));
+                    let _ = write!(o, r#"<table:data-pilot-field-reference table:field-name="{}" table:type="{t}"/>"#, esc_attr(base));
                 }
                 o.push_str("</table:data-pilot-field>");
             }

@@ -65,17 +65,6 @@ pub(crate) fn has_mimetype(bytes: &[u8]) -> bool {
 
 use dom::xml_error;
 
-/// Whether `bytes` are an ODS package encrypted with a password to open (its manifest holds
-/// encryption data). Damaged or unreadable packages are not.
-pub fn is_encrypted_ods(bytes: &[u8]) -> bool {
-    if !has_mimetype(bytes) {
-        return false;
-    }
-    let Ok(mut package) = Package::open(bytes) else { return false };
-    let Ok(Some(manifest)) = package.read_limited("META-INF/manifest.xml", SMALL_PART) else { return false };
-    dom::parse_tree(&manifest).is_ok_and(|root| !root.descendants(Ns::Manifest, "encryption-data").is_empty())
-}
-
 fn check_manifest(bytes: &[u8]) -> Result<(), IoError> {
     let root = dom::parse_tree(bytes)?;
     if !root.is(Ns::Manifest, "manifest") {
@@ -1200,14 +1189,7 @@ impl Import {
         for NameDef { name, scope, text, range, base } in std::mem::take(&mut self.names) {
             let formula = if range {
                 // `$Sheet1.$A$1:.$B$2`, possibly several ranges separated by spaces.
-                let parts: Vec<String> = formula::split_addresses(&text)
-                    .into_iter()
-                    .map(|p| {
-                        formula::parse_odf_ref(p.trim_matches(|c| c == '[' || c == ']'))
-                            .map_or_else(|| "#REF!".into(), |r| gridcraft_formula::printer::reference_a1(&r))
-                    })
-                    .collect();
-                if parts.len() == 1 { parts.into_iter().next().unwrap_or_default() } else { format!("({})", parts.join(",")) }
+                formula::range_list(&text, false, |r| Some(gridcraft_formula::printer::reference_a1(&r))).unwrap_or_else(|| "#REF!".into())
             } else {
                 // An expression that no longer reads (`$#REF!.$C$17`, a deleted sheet) is kept
                 // as the error it calculates to, as LibreOffice keeps it.

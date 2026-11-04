@@ -383,8 +383,10 @@ impl SheetApp {
                 // `format` (a workbook extension: xlsx by default, or ods) picks the suggested name
                 // and what a name without an extension is saved as.
                 let chosen = params.get("format").and_then(Json::as_str).filter(|f| matches!(*f, "xlsx" | "ods"));
-                let format = chosen.unwrap_or("xlsx");
                 let title = self.session.active().map(|d| d.display_title()).unwrap_or_else(|| "Book1".into());
+                // Without a chosen type, an OpenDocument workbook stays one (a download too).
+                let own = std::path::Path::new(&title).extension().and_then(|e| e.to_str()).filter(|e| e.eq_ignore_ascii_case("ods")).map(|_| "ods");
+                let format = chosen.or(own).unwrap_or("xlsx");
                 // A format chosen (Backstage's file type) names the file; plain Save As suggests
                 // the workbook's own name.
                 let suggested = match chosen {

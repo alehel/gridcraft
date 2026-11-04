@@ -2519,8 +2519,8 @@ fn encrypted_ods_says_it_is_password_protected() {
         zip.write_all(data.as_bytes()).unwrap();
     }
     let bytes = zip.finish().unwrap().into_inner();
-    assert!(gridcraft_xlsx::is_encrypted_ods(&bytes));
-    assert!(!gridcraft_xlsx::is_encrypted_ods(&ods_fixture()));
+    assert!(matches!(gridcraft_xlsx::read_ods(&bytes), Err(gridcraft_xlsx::IoError::Encrypted)));
+    assert!(gridcraft_xlsx::read_ods(&ods_fixture()).is_ok());
     for name in ["Budget.ods", "Budget.xlsx"] {
         let err = crate::io::open_bytes(name, &bytes).unwrap_err().to_string();
         assert!(err.contains(&format!("'{name}' {}", crate::io::ENCRYPTED_ODS)), "{err}");

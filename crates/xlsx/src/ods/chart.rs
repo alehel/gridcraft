@@ -28,17 +28,11 @@ pub(crate) struct ChartDraft {
 /// An ODF range address list (`Data.A2:Data.B4`, or several separated by spaces) as absolute
 /// A1 text (`Data!$A$2:$B$4`, a union in parentheses for several).
 fn range_text(list: &str) -> Option<String> {
-    let parts: Vec<String> = formula::split_addresses(list).into_iter().map(one_range).collect::<Option<_>>()?;
-    match parts.as_slice() {
-        [] => None,
-        [one] => Some(one.clone()),
-        _ => Some(format!("({})", parts.join(","))),
-    }
+    formula::range_list(list, true, |r| one_range(&r))
 }
 
-/// One ODF range address as an absolute A1 reference.
-fn one_range(addr: &str) -> Option<String> {
-    let r = formula::parse_odf_ref(addr)?;
+/// One reference of a chart range as an absolute A1 reference.
+fn one_range(r: &gridcraft_formula::Reference) -> Option<String> {
     let gridcraft_formula::SheetSel::Named(sheet) = &r.sheet else { return None };
     // `Title.B1:Title.B1` names one cell.
     Some(gridcraft_formula::printer::reference_a1(&formula::absolute(sheet, r.range(), true)))
@@ -132,12 +126,21 @@ pub(crate) fn read(root: &Elem) -> Option<ChartDraft> {
         }
         let line_like = matches!(own_class.trim_start_matches("chart:"), "line" | "scatter" | "radar");
         let colour = if line_like { graphic_prop(&styles, s, Ns::Svg, "stroke-color") } else { graphic_prop(&styles, s, Ns::Draw, "fill-color") };
-        // A scatter series' x values are its first domain.
-        let domain = s.child(Ns::Chart, "domain").and_then(|d| d.attr(Ns::Table, "cell-range-address")).and_then(range_text);
+        // A scatter series' x values are its first domain. A bubble series' values are its
+        // bubbles' sizes, and its domains its y then its x values.
+        let domains: Vec<String> =
+            s.children(Ns::Chart, "domain").filter_map(|d| d.attr(Ns::Table, "cell-range-address")).filter_map(range_text).collect();
+        let bubble = own_class.trim_start_matches("chart:") == "bubble";
+        let (values, x, bubble_sizes) = match (bubble, domains.as_slice()) {
+            (true, [y, x, ..]) => (y.clone(), Some(x.clone()), Some(values)),
+            (_, [x, ..]) => (values, Some(x.clone()), None),
+            _ => (values, None, None),
+        };
         series.push(Series {
             name: s.attr(Ns::Chart, "label-cell-address").and_then(range_text),
-            categories: domain.or_else(|| categories.clone()),
+            categories: x.or_else(|| categories.clone()),
             values,
+            bubble_sizes,
             color: colour.and_then(color),
             secondary: s.attr(Ns::Chart, "attached-axis").is_some_and(|a| a.contains("secondary")),
             smooth,
@@ -182,12 +185,7 @@ fn odf_range(a1: &str) -> Option<String> {
     while let Some(x) = pending.pop() {
         match x {
             // A cell range address names cells: whole columns and rows by their cells.
-            gridcraft_formula::Expr::Ref(r) => refs.push(match (&r.sheet, &r.kind) {
-                (gridcraft_formula::SheetSel::Named(s), gridcraft_formula::RefKind::Cols(..) | gridcraft_formula::RefKind::Rows(..)) => {
-                    formula::address(&formula::absolute(s, r.range(), false))
-                }
-                _ => formula::address(r),
-            }),
+            gridcraft_formula::Expr::Ref(r) => refs.push(formula::address(&formula::cell_range(r))),
             gridcraft_formula::Expr::Paren(inner) => pending.push(inner),
             gridcraft_formula::Expr::Binary(gridcraft_formula::BinOp::Union, a, b) => {
                 pending.push(b);
@@ -298,7 +296,14 @@ pub(crate) fn write(c: &Chart, theme: &Theme) -> ChartDoc {
             styles,
             r#"<style:style style:name="chs{i}" style:family="chart"><style:chart-properties{label}/><style:graphic-properties{graphic}/></style:style>"#
         );
-        let _ = write!(series, r#"<chart:series chart:style-name="chs{i}" chart:values-cell-range-address="{}""#, esc_attr(&values));
+        // A bubble series' values are its sizes; its y values are a domain, before the x.
+        let bubble = c.kind == ChartKind::Bubble;
+        let sizes = s.bubble_sizes.as_deref().and_then(odf_range).filter(|_| bubble);
+        let _ = write!(
+            series,
+            r#"<chart:series chart:style-name="chs{i}" chart:values-cell-range-address="{}""#,
+            esc_attr(sizes.as_ref().unwrap_or(&values))
+        );
         if let Some(name) = s.name.as_deref().and_then(odf_range) {
             let _ = write!(series, " chart:label-cell-address=\"{}\"", esc_attr(&name));
         }
@@ -309,6 +314,9 @@ pub(crate) fn write(c: &Chart, theme: &Theme) -> ChartDoc {
             series.push_str(" chart:attached-axis=\"secondary-y\"");
         }
         series.push('>');
+        if sizes.is_some() {
+            let _ = write!(series, "<chart:domain table:cell-range-address=\"{}\"/>", esc_attr(&values));
+        }
         if matches!(c.kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble)
             && let Some(x) = s.categories.as_deref().and_then(odf_range)
         {
@@ -410,6 +418,40 @@ mod tests {
         assert_eq!(d.series[0].categories.as_deref(), Some("Data!$A$2:$A$4"));
         assert_eq!(d.series[0].name.as_deref(), Some("Data!$B$1"));
         assert_eq!(d.series[0].color, Some(gridcraft_model::Color::Rgb(0x004586)));
+    }
+
+    /// A bubble series keeps its sizes, y and x values.
+    #[test]
+    fn bubble_sizes_round_trip() {
+        let chart = Chart {
+            id: 1,
+            kind: ChartKind::Bubble,
+            anchor: gridcraft_model::Anchor::default(),
+            title: None,
+            series: vec![Series {
+                categories: Some("Data!$A$2:$A$4".into()),
+                values: "Data!$B$2:$B$4".into(),
+                bubble_sizes: Some("Data!$C$2:$C$4".into()),
+                ..Series::default()
+            }],
+            legend: LegendPos::Right,
+            data_labels: false,
+            data_table: None,
+            gridlines: false,
+            style: 0,
+            x_title: None,
+            y_title: None,
+            source: None,
+            by_rows: false,
+            pivot: None,
+        };
+        let xml = write(&chart, &Theme::default()).package();
+        let d = read(&parse_tree(xml.as_bytes()).unwrap()).unwrap();
+        let s = &d.series[0];
+        assert_eq!(
+            (s.values.as_str(), s.categories.as_deref(), s.bubble_sizes.as_deref()),
+            ("Data!$B$2:$B$4", Some("Data!$A$2:$A$4"), Some("Data!$C$2:$C$4"))
+        );
     }
 
     /// A series over several ranges reads as their union, and writes back as the list.

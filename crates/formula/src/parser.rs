@@ -92,7 +92,8 @@ fn parse_top(src: &str, locale: crate::FormulaLocale, allow_union: bool) -> Resu
 }
 
 /// A union (only `~` makes one where unions aren't allowed) in the parentheses A1 needs around
-/// it there.
+/// it there: applied whenever it becomes an operand (of a binary or postfix operator, a call)
+/// and when the expression ends.
 fn enclose_union(e: Expr, allow_union: bool) -> Expr {
     match e {
         Expr::Binary(BinOp::Union, ..) if !allow_union => Expr::Paren(Box::new(e)),
@@ -239,7 +240,7 @@ impl Parser {
                     return Err(self.err("formula is nested too deeply"));
                 }
                 self.next();
-                lhs = Expr::Unary(UnOp::Percent, Box::new(lhs));
+                lhs = Expr::Unary(UnOp::Percent, Box::new(enclose_union(lhs, allow_union)));
                 continue;
             }
             if *self.peek() == Tok::LParen && matches!(lhs, Expr::Call(..) | Expr::Invoke(..) | Expr::Paren(_) | Expr::Name(_)) {
@@ -253,7 +254,7 @@ impl Parser {
                 }
                 self.next();
                 let args = self.args()?;
-                lhs = Expr::Invoke(Box::new(lhs), args);
+                lhs = Expr::Invoke(Box::new(enclose_union(lhs, allow_union)), args);
                 continue;
             }
             if let Tok::Trim(mode) = *self.peek() {
@@ -264,7 +265,7 @@ impl Parser {
                 }
                 self.next();
                 let rhs = self.expr(bp + 1, allow_union)?;
-                lhs = Expr::Unary(UnOp::Trim(mode), Box::new(combine(BinOp::Range, lhs, rhs)));
+                lhs = Expr::Unary(UnOp::Trim(mode), Box::new(combine(BinOp::Range, enclose_union(lhs, allow_union), rhs)));
                 continue;
             }
             let Some(op) = self.binop(allow_union) else { break };

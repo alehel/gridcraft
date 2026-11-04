@@ -174,10 +174,9 @@ pub(crate) fn style_xml(name: &str, s: &Shape, theme: &Theme) -> String {
         (false, Some(c)) => {
             let _ = write!(g, " draw:stroke=\"solid\" svg:stroke-color=\"{c}\"");
         }
-        (false, None) if s.kind == ShapeKind::TextBox => g.push_str(" draw:stroke=\"none\""),
-        // ODF has no automatic stroke colour: an automatic outline is written as the black it
-        // draws as (and reads back as that black).
-        (false, None) => g.push_str(" draw:stroke=\"solid\" svg:stroke-color=\"#000000\""),
+        // ODF has no automatic stroke colour: an automatic outline is written as the grey
+        // GridCraft draws it in (a text box's too: its outline shows unless it has none).
+        (false, None) => g.push_str(" draw:stroke=\"solid\" svg:stroke-color=\"#606060\""),
     }
     if s.kind == ShapeKind::Arrow {
         g.push_str(" draw:marker-end=\"Arrow\" draw:marker-end-width=\"0.2cm\"");

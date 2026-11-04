@@ -73,7 +73,7 @@ fn open(s: &mut Session, p: &Json) -> Result<Json> {
     // change its format behind the user's back. XLS and XLSB are only ever imported.
     let named = FileKind::from_path(&name);
     let imported = matches!(read_as, FileKind::Xls | FileKind::Xlsb) || named.is_some_and(|n| n != read_as);
-    // A template (.ots) opens as a new, unsaved workbook of the same kind, as Excel opens an .xltx.
+    // An OpenDocument template (.ots) opens as a new, unsaved workbook of the same kind.
     let template = !imported && read_as == FileKind::Ods && gridcraft_xlsx::OdsKind::from_path(&name) == gridcraft_xlsx::OdsKind::Template;
     let title = if template {
         format!("{}.ods", std::path::Path::new(&name).file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or("Book"))
