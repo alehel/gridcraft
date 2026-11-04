@@ -194,18 +194,19 @@ fn cell_props(tc: &Elem, p: &mut Props) {
             *side = all;
         }
     }
-    for (i, side) in ["left", "right", "top", "bottom"].iter().enumerate() {
-        if let Some(b) = tc.attr(Ns::Fo, &format!("border-{side}"))
-            && let Some(slot) = p.borders.get_mut(i)
-        {
+    // The six lines, in `Props::borders` order.
+    let sides = [
+        (Ns::Fo, "border-left"),
+        (Ns::Fo, "border-right"),
+        (Ns::Fo, "border-top"),
+        (Ns::Fo, "border-bottom"),
+        (Ns::Style, "diagonal-tl-br"),
+        (Ns::Style, "diagonal-bl-tr"),
+    ];
+    for ((ns, name), slot) in sides.into_iter().zip(p.borders.iter_mut()) {
+        if let Some(b) = tc.attr(ns, name) {
             *slot = border(b);
         }
-    }
-    if let Some(b) = tc.attr(Ns::Style, "diagonal-tl-br") {
-        p.borders[4] = border(b);
-    }
-    if let Some(b) = tc.attr(Ns::Style, "diagonal-bl-tr") {
-        p.borders[5] = border(b);
     }
     if let Some(w) = tc.attr(Ns::Fo, "wrap-option") {
         p.wrap = Some(w == "wrap");
@@ -457,6 +458,10 @@ pub(crate) fn write_props(s: &Style, base: &Style, theme: &gridcraft_model::Them
         if a.rotation == 255 {
             tc.push_str(" style:direction=\"ttb\"");
         } else {
+            // Stacked text set back to an angle states its direction, or a parent's `ttb` shows.
+            if b.rotation == 255 {
+                tc.push_str(" style:direction=\"ltr\"");
+            }
             let deg = (a.rotation as i32).rem_euclid(360);
             let _ = write!(tc, " style:rotation-angle=\"{deg}\"");
         }

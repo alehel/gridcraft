@@ -50,7 +50,6 @@ enum Part {
         number: Number,
         exp_digits: usize,
         plus: bool,
-        interval: usize,
     },
     /// `# ?/8`: the whole part (if any), numerator digits and denominator.
     Fraction {
@@ -68,10 +67,10 @@ enum Part {
     Lit(String),
     /// The percent sign, which scales the value by 100.
     Percent,
-    /// `$`, or `[$€-407]` (symbol, and the locale it is for).
+    /// `$`, or `[$€-407]`: the symbol (ODF keeps a locale apart from it, as language and
+    /// country, which GridCraft doesn't map: `[$€-407]` reads back as `[$€]`).
     Currency {
         symbol: String,
-        locale: Option<String>,
     },
     /// `@`: the cell's text.
     Text,
@@ -302,7 +301,7 @@ fn parse_section(raws: &[Raw]) -> Section {
                     continue;
                 }
                 '$' | '€' | '£' | '¥' => {
-                    toks.push(Tok::Part(Part::Currency { symbol: c.to_string(), locale: None }));
+                    toks.push(Tok::Part(Part::Currency { symbol: c.to_string() }));
                     continue;
                 }
                 _ => {}
@@ -318,13 +317,10 @@ fn parse_section(raws: &[Raw]) -> Section {
 fn bracket(b: &str, section: &mut Section, toks: &mut Vec<Tok>) {
     let lower = b.to_ascii_lowercase();
     if let Some(cur) = b.strip_prefix('$') {
-        let (symbol, locale) = match cur.split_once('-') {
-            Some((s, l)) => (s, Some(l.to_string())),
-            None => (cur, None),
-        };
+        let symbol = cur.split_once('-').map_or(cur, |(s, _)| s);
         // `[$-409]` names only a locale: it shows nothing.
         if !symbol.is_empty() {
-            toks.push(Tok::Part(Part::Currency { symbol: symbol.to_string(), locale }));
+            toks.push(Tok::Part(Part::Currency { symbol: symbol.to_string() }));
         }
     } else if b.starts_with(['<', '>', '=']) {
         section.cond = Some(b.to_string());
@@ -353,14 +349,18 @@ fn int_mask(int: &str) -> IntMask {
 
 /// A run of number characters (`#,##0.00,,`) as a number.
 fn number(run: &str) -> Number {
-    let trimmed = run.trim_end_matches(',');
-    let (int, dec) = trimmed.split_once('.').unwrap_or((trimmed, ""));
-    let dec_digits: Vec<char> = dec.chars().filter(|c| matches!(c, '0' | '#' | '?')).collect();
+    // Commas after the last digit of the integer part (`0,.0`) or of the whole run (`0.0,,`)
+    // scale by a thousand each; commas among the integer digits group them.
+    let (int, dec) = run.split_once('.').unwrap_or((run, ""));
+    let int_digits = int.trim_end_matches(',');
+    let dec_digits_text = dec.trim_end_matches(',');
+    let thousands = (int.len() - int_digits.len()) + (dec.len() - dec_digits_text.len());
+    let dec_digits: Vec<char> = dec_digits_text.chars().filter(|c| matches!(c, '0' | '#' | '?')).collect();
     Number {
-        int: int_mask(int),
+        int: int_mask(int_digits),
         decimals: dec_digits.len(),
         min_decimals: dec_digits.iter().take_while(|c| **c == '0').count(),
-        thousands: run.len() - trimmed.len(),
+        thousands,
         embedded: Vec::new(),
     }
 }
@@ -406,7 +406,9 @@ fn parts(toks: &[Tok]) -> Vec<Part> {
                         let decimals = if let Some(Tok::SecFrac(d)) = toks.get(i + 1) { *d } else { 0 };
                         (Field::Seconds { decimals }, *n >= 2)
                     }
-                    _ => (Field::Era, *n >= 2),
+                    // `e` is the year (in the Gregorian calendar, the four-digit year); `g` the era.
+                    'e' => (Field::Year, true),
+                    _ => (Field::Era, *n >= 3),
                 };
                 out.push(Part::Date { field, long, elapsed: *elapsed });
             }
@@ -442,8 +444,7 @@ fn number_run(toks: &[Tok], i: usize, n: &str, out: &mut Vec<Part>) -> usize {
     }
     if let Some((mantissa, exp)) = n.split_once('E') {
         let number = number(mantissa);
-        let interval = if number.int.grouping { 1 } else { number.int.width.max(1) };
-        out.push(Part::Scientific { exp_digits: digit_count(exp).max(1), plus: exp.starts_with('+'), interval, number });
+        out.push(Part::Scientific { exp_digits: digit_count(exp).max(1), plus: exp.starts_with('+'), number });
         return i + 1;
     }
     // Integer digits broken up by short literals (`000-00-0000`): one number with embedded
@@ -453,7 +454,6 @@ fn number_run(toks: &[Tok], i: usize, n: &str, out: &mut Vec<Part>) -> usize {
     let mut j = i + 1;
     while !runs.last().is_some_and(|r| r.contains('.'))
         && let (Some(Tok::Part(Part::Lit(l))), Some(Tok::Num(m))) = (toks.get(j), toks.get(j + 1))
-        && l.chars().count() <= 3
     {
         texts.push(l);
         runs.push(m);
@@ -482,6 +482,11 @@ fn plain_literal(c: char, date: bool) -> bool {
 /// Literal text in Excel's spelling: bare when it can't be mistaken for format characters,
 /// else quoted (a quote itself is escaped, as quotes can't hold one).
 fn print_literal(out: &mut String, text: &str, date: bool) {
+    // An empty text (`""`) shows nothing, which only quotes can say.
+    if text.is_empty() {
+        out.push_str("\"\"");
+        return;
+    }
     if text.chars().all(|c| plain_literal(c, date)) {
         out.push_str(text);
         return;
@@ -541,11 +546,7 @@ fn print_part(out: &mut String, p: &Part, date: bool) {
         }
         Part::Fraction { int, numerator, denominator } => {
             if let Some(int) = int {
-                if int.min == 0 && !int.grouping {
-                    out.push('#');
-                } else {
-                    print_int(out, &IntMask { width: int.min, ..*int }, &[]);
-                }
+                print_int(out, &IntMask { width: int.min, ..*int }, &[]);
                 out.push(' ');
             }
             out.push_str(&"?".repeat(*numerator));
@@ -590,15 +591,10 @@ fn print_part(out: &mut String, p: &Part, date: bool) {
         Part::AmPm => out.push_str("AM/PM"),
         Part::Lit(t) => print_literal(out, t, date),
         Part::Percent => out.push('%'),
-        Part::Currency { symbol, locale } => match locale {
-            None if symbol == "$" => out.push('$'),
-            None => {
-                let _ = write!(out, "[${symbol}]");
-            }
-            Some(l) => {
-                let _ = write!(out, "[${symbol}-{l}]");
-            }
-        },
+        Part::Currency { symbol } if symbol == "$" => out.push('$'),
+        Part::Currency { symbol } => {
+            let _ = write!(out, "[${symbol}]");
+        }
         Part::Text => out.push('@'),
         Part::Fill(c) => {
             out.push('*');
@@ -687,7 +683,9 @@ fn part_xml(out: &mut String, p: &Part) {
                 out.push_str("</number:number>");
             }
         }
-        Part::Scientific { number: n, exp_digits, plus, interval } => {
+        Part::Scientific { number: n, exp_digits, plus } => {
+            // The exponent moves in steps of the integer digits drawn (`##0.0E+0`: engineering).
+            let interval = if n.int.grouping { 1 } else { n.int.width.max(1) };
             let _ =
                 write!(out, "<number:scientific-number number:decimal-places=\"{}\" number:min-decimal-places=\"{}\"", n.decimals, n.min_decimals);
             int_attrs(out, &IntMask { min: n.int.min.max(1), ..n.int });
@@ -720,6 +718,8 @@ fn part_xml(out: &mut String, p: &Part) {
             };
         }
         Part::AmPm => out.push_str("<number:am-pm/>"),
+        // An empty text is written too: a section of only `""` shows nothing, not General.
+        Part::Lit(t) if t.is_empty() => out.push_str("<number:text></number:text>"),
         Part::Lit(t) => text_el(out, t),
         Part::Percent => text_el(out, "%"),
         Part::Currency { symbol, .. } => {
@@ -977,8 +977,9 @@ fn read_style(style: &Elem) -> Option<Vec<Section>> {
         .and_then(|t| t.attr(Ns::Fo, "color"))
         .and_then(|rgb| COLORS.iter().find(|(_, c)| c.eq_ignore_ascii_case(rgb)).map(|(n, _)| *n));
     // In an elapsed-time style the first time part is the one that isn't cut at its unit.
-    let mut elapsed = kind == "time-style" && style.attr(Ns::Number, "truncate-on-overflow") == Some("false");
+    let mut elapsed = style.attr(Ns::Number, "truncate-on-overflow") == Some("false");
     let mut parts = Vec::new();
+    let mut percent_seen = false;
     for e in style.elems().filter(|e| e.ns == Ns::Number) {
         let long = e.attr(Ns::Number, "style") == Some("long");
         let mut date = |field: Field| {
@@ -991,12 +992,15 @@ fn read_style(style: &Elem) -> Option<Vec<Section>> {
         let part = match e.name.as_str() {
             "number" if is_standard(e) => Part::General,
             "number" => Part::Number(read_number(e, false)),
-            "scientific-number" => Part::Scientific {
-                number: read_number(e, true),
-                exp_digits: int_attr(e, "min-exponent-digits").unwrap_or(2).max(1),
-                plus: e.attr(Ns::Number, "forced-exponent-sign") != Some("false"),
-                interval: int_attr(e, "exponent-interval").unwrap_or(1).max(1),
-            },
+            "scientific-number" => {
+                let mut number = read_number(e, true);
+                number.int.width = number.int.width.max(int_attr(e, "exponent-interval").unwrap_or(1));
+                Part::Scientific {
+                    number,
+                    exp_digits: int_attr(e, "min-exponent-digits").unwrap_or(2).max(1),
+                    plus: e.attr(Ns::Number, "forced-exponent-sign") != Some("false"),
+                }
+            }
             "fraction" => Part::Fraction {
                 int: e.attr(Ns::Number, "min-integer-digits").map(|_| read_int(e, 0)),
                 numerator: int_attr(e, "min-numerator-digits").unwrap_or(1).max(1),
@@ -1016,14 +1020,15 @@ fn read_style(style: &Elem) -> Option<Vec<Section>> {
                 if symbol.is_empty() {
                     continue;
                 }
-                Part::Currency { symbol: symbol.replace(']', ""), locale: None }
+                Part::Currency { symbol: symbol.replace(']', "") }
             }
             "text" => {
                 let t = e.raw_text();
                 match e.attr(Ns::LoExt, "blank-width-char").and_then(|c| c.chars().next()) {
                     Some(c) if t == " " => Part::Blank(c),
-                    // In a percentage style the text's `%` is the percent sign.
-                    _ if kind == "percentage-style" && t.contains('%') => {
+                    // In a percentage style the first `%` is the percent sign; any other is text.
+                    _ if kind == "percentage-style" && !percent_seen && t.contains('%') => {
+                        percent_seen = true;
                         let (before, after) = t.split_once('%').unwrap_or((&t, ""));
                         if !before.is_empty() {
                             parts.push(Part::Lit(before.to_string()));
@@ -1142,6 +1147,17 @@ mod tests {
             ("[Blue][<=0]0;0", "[Blue][<=0]0;0"),
             ("# ?/1000000", "# ?/1000000"),
             ("[$€-407]#,##0.00", "[$€]#,##0.00"),
+            // Round two: engineering notation, a literal % next to the percent sign, the era
+            // year, long embedded text, a scaling comma before the point, an empty text, and
+            // elapsed time in a date.
+            ("##0.0E+0", "##0.0E+0"),
+            ("0% \"%\"", "0%\" %\""),
+            ("0%\"%\"", "0%\"%\""),
+            ("e-mm-dd", "yyyy-mm-dd"),
+            ("0\" to \"0", "0\" to \"0"),
+            ("0,.0", "0.0,"),
+            ("\"\"", "\"\""),
+            ("d [h]:mm", "d [h]:mm"),
         ] {
             assert_eq!(round_trip(code), back, "{code}");
         }
