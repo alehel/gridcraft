@@ -98,7 +98,14 @@ pub(crate) fn read(p: &Elem, id: u32) -> Option<(String, PivotTable)> {
     let (sheet, target) = formula::range_on_sheet(p.attr(Ns::Table, "target-range-address")?)?;
     let source = p.child(Ns::Table, "source-cell-range").and_then(|s| s.attr(Ns::Table, "cell-range-address")).and_then(formula::range_on_sheet)?;
     let src = gridcraft_formula::printer::reference_a1(&formula::absolute(&source.0, source.1, false));
-    let mut pt = PivotTable { id, name: p.attr(Ns::Table, "name").unwrap_or("DataPilot1").to_string(), source: src, ..PivotTable::default() };
+    // ODF's layout, where no field states one, is tabular.
+    let mut pt = PivotTable {
+        id,
+        name: p.attr(Ns::Table, "name").unwrap_or("DataPilot1").to_string(),
+        source: src,
+        layout: PivotLayout::Tabular,
+        ..PivotTable::default()
+    };
     let mut layout_seen = false;
     for f in p.children(Ns::Table, "data-pilot-field") {
         let orientation = f.attr(Ns::Table, "orientation").unwrap_or("hidden");
@@ -174,25 +181,14 @@ pub(crate) fn read(p: &Elem, id: u32) -> Option<(String, PivotTable)> {
     Some((sheet, pt))
 }
 
-fn field_xml(o: &mut String, f: &PivotField, orientation: &str) {
+/// A row or column field; a row field states the report's `layout` (and whether subtotals go on
+/// top), as each of ODF's row levels does.
+fn field_xml(o: &mut String, f: &PivotField, orientation: &str, layout: Option<(PivotLayout, bool)>) {
     let _ = write!(
         o,
         r#"<table:data-pilot-field table:source-field-name="{}" table:orientation="{orientation}" table:function="auto">"#,
         esc_attr(&f.source_col)
     );
-    if f.date_group != PivotDateGroup::None {
-        let by = match f.date_group {
-            PivotDateGroup::Years => "years",
-            PivotDateGroup::Quarters => "quarters",
-            PivotDateGroup::Months => "months",
-            _ => "days",
-        };
-        let _ = write!(
-            o,
-            r#"<table:data-pilot-groups table:source-field-name="{}" table:date-start="auto" table:date-end="auto" table:grouped-by="{by}"/>"#,
-            esc_attr(&f.source_col)
-        );
-    }
     o.push_str(r#"<table:data-pilot-level table:show-empty="false">"#);
     if !f.collapsed_items.is_empty() {
         o.push_str("<table:data-pilot-members>");
@@ -206,10 +202,32 @@ fn field_xml(o: &mut String, f: &PivotField, orientation: &str) {
         PivotSort::Desc => ("name", "descending"),
         PivotSort::None => ("none", "ascending"),
     };
-    let _ = write!(
-        o,
-        r#"<table:data-pilot-sort-info table:order="{order}" table:sort-mode="{mode}"/></table:data-pilot-level></table:data-pilot-field>"#
-    );
+    let _ = write!(o, r#"<table:data-pilot-sort-info table:order="{order}" table:sort-mode="{mode}"/>"#);
+    if let Some((layout, top)) = layout {
+        let mode = match layout {
+            PivotLayout::Tabular => "tabular-layout",
+            PivotLayout::Compact => "compact-layout",
+            PivotLayout::Outline if top => "outline-subtotals-top",
+            PivotLayout::Outline => "outline-subtotals-bottom",
+        };
+        let _ = write!(o, r#"<table:data-pilot-layout-info table:layout-mode="{mode}" table:add-empty-lines="false"/>"#);
+    }
+    o.push_str("</table:data-pilot-level>");
+    // Date grouping follows the level.
+    if f.date_group != PivotDateGroup::None {
+        let by = match f.date_group {
+            PivotDateGroup::Years => "years",
+            PivotDateGroup::Quarters => "quarters",
+            PivotDateGroup::Months => "months",
+            _ => "days",
+        };
+        let _ = write!(
+            o,
+            r#"<table:data-pilot-groups table:source-field-name="{}" table:date-start="auto" table:date-end="auto" table:grouped-by="{by}"/>"#,
+            esc_attr(&f.source_col)
+        );
+    }
+    o.push_str("</table:data-pilot-field>");
 }
 
 /// A pivot's source (a range, a table or a defined name) as its sheet and range; `own` is the
@@ -312,13 +330,13 @@ pub(crate) fn write(wb: &Workbook) -> String {
                 if layout_at == Some(i) {
                     layout(&mut o, "row");
                 }
-                field_xml(&mut o, f, "row");
+                field_xml(&mut o, f, "row", Some((pt.layout, pt.subtotals_top)));
             }
             if layout_at == Some(pt.rows.len()) {
                 layout(&mut o, "row");
             }
             for f in &pt.columns {
-                field_xml(&mut o, f, "column");
+                field_xml(&mut o, f, "column", None);
             }
             if pt.values.len() > 1 && !pt.values_on_rows {
                 layout(&mut o, "column");

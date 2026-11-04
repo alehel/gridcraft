@@ -130,12 +130,13 @@ pub struct Backstage {
     recent: RecentFiles,
 }
 
-/// Save As file types: (extension, label). The first two save the workbook itself (an `.ods`
+/// Save As file types: (extension, label). The first three save the workbook itself (an `.ods`
 /// becomes its file, as an `.xlsx` does); the others are exports that leave the workbook's own
 /// file and unsaved state alone.
-pub const SAVE_TYPES: [(&str, &str); 5] = [
+pub const SAVE_TYPES: [(&str, &str); 6] = [
     ("xlsx", "Excel Workbook (*.xlsx)"),
     ("ods", "OpenDocument Spreadsheet (*.ods)"),
+    ("fods", "Flat OpenDocument Spreadsheet (*.fods)"),
     ("csv", "CSV UTF-8 (Comma delimited) (*.csv)"),
     ("html", "Web Page (*.html)"),
     ("pdf", "PDF (*.pdf)"),
@@ -706,7 +707,7 @@ fn save_as(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcom
     let label = if web { format!("{} (.{fmt})", lang.tr("Download")) } else { lang.tr("Browse…").to_string() };
     if square_button(ui, Icon::OpenFolder, &label).clicked() && app.commit_edit(0, 0, false, false) {
         // A workbook format is the workbook saved as that file; the others are copies.
-        if matches!(fmt, "xlsx" | "ods") {
+        if matches!(fmt, "xlsx" | "ods" | "fods") {
             let before = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));
             app.open_dialog("saveAs", json!({"format": fmt}));
             let after = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));

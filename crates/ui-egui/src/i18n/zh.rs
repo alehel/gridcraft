@@ -397,6 +397,7 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "CSV UTF-8 (Comma delimited) (*.csv)" => "CSV UTF-8(逗号分隔) (*.csv)",
         "Web Page (*.html)" => "网页 (*.html)",
         "OpenDocument Spreadsheet (*.ods)" => "OpenDocument 电子表格 (*.ods)",
+        "Flat OpenDocument Spreadsheet (*.fods)" => "平面 OpenDocument 电子表格 (*.fods)",
         "PDF (*.pdf)" => "PDF 文件 (*.pdf)",
         "Download" => "下载",
         "A CSV file, web page or PDF is a copy: the workbook keeps its own file." => "CSV 文件、网页或 PDF 只是副本：工作簿仍保留其原文件。",

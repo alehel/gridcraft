@@ -190,9 +190,10 @@ fn services() -> Services {
             let path = std::path::Path::new(suggested);
             let stem = path.file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or("Book1").to_string();
             // The suggested name's type (an export asks for .pdf, .csv or .html) comes first.
-            const TYPES: [(&str, &str); 5] = [
+            const TYPES: [(&str, &str); 6] = [
                 ("Excel Workbook (.xlsx)", "xlsx"),
                 ("OpenDocument Spreadsheet (.ods)", "ods"),
+                ("Flat OpenDocument Spreadsheet (.fods)", "fods"),
                 ("CSV UTF-8 (.csv)", "csv"),
                 ("Web Page (.html)", "html"),
                 ("PDF (.pdf)", "pdf"),

@@ -111,14 +111,9 @@ pub(crate) fn read(e: &Elem, styles: &DrawStyles) -> Option<ShapeDraft> {
         }
     }
     // A shape with a rotation or skew carries its position in `draw:transform`'s translate.
-    if let Some(t) = e.attr(Ns::Draw, "transform")
-        && let Some(i) = t.find("translate(")
-    {
-        let args: Vec<f64> = t.get(i + 10..).unwrap_or("").split(')').next().unwrap_or("").split_whitespace().filter_map(length_pt).collect();
-        if let [tx, ty] = args.as_slice() {
-            x = *tx;
-            y = *ty;
-        }
+    if let Some((tx, ty)) = e.attr(Ns::Draw, "transform").and_then(translate) {
+        x = tx;
+        y = ty;
     }
     let fill = match (styles.graphic(e, "fill"), styles.graphic(e, "fill-color")) {
         (Some("none"), _) => Color::Auto,
@@ -248,8 +243,29 @@ pub(crate) fn shape_xml(s: &Shape, style: &str, x: f32, y: f32, z: usize) -> Opt
     })
 }
 
+/// The offset of a `draw:transform`'s `translate`, in points. SVG transform syntax: space
+/// before the bracket allowed, arguments split by spaces and/or a comma.
+fn translate(t: &str) -> Option<(f64, f64)> {
+    let rest = t.get(t.find("translate")? + "translate".len()..)?.trim_start().strip_prefix('(')?;
+    let args: Vec<f64> = rest.split(')').next()?.split([' ', ',', '\t', '\n']).filter(|a| !a.is_empty()).filter_map(length_pt).collect();
+    match args.as_slice() {
+        [x, y] => Some((*x, *y)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn transform_translate_spellings() {
+        let cm = 72.0 / 2.54;
+        for t in ["rotate (0.5) translate (2cm 3cm)", "translate(2cm,3cm)", "rotate(0.5) translate( 2cm , 3cm )"] {
+            let (x, y) = super::translate(t).unwrap();
+            assert!((x - 2.0 * cm).abs() < 1e-6 && (y - 3.0 * cm).abs() < 1e-6, "{t}");
+        }
+        assert_eq!(super::translate("rotate(0.5)"), None);
+    }
+
     use super::super::dom::parse_tree;
     use super::*;
 

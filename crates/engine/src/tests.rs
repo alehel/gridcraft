@@ -5760,3 +5760,13 @@ fn ods_keeps_a_dynamic_arrays_spill() {
     let f = sh.cell(CellRef::new(0, 0)).and_then(|c| c.formula.clone()).unwrap();
     assert_eq!(f.array.map(|a| a.height()), Some(5));
 }
+
+/// Both commands that set the paper store a known one under its table name.
+#[test]
+fn paper_size_commands_agree() {
+    let mut s = s();
+    s.execute("pageLayout.size", json!({"paper": "b5-jis"})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[0].print.paper, "B5");
+    s.execute("pageLayout.pageSetup", json!({"paper": "b6-jis"})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[0].print.paper, "B6");
+}

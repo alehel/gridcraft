@@ -666,6 +666,23 @@ fn ods_pivot_page_selections_and_filter_button_round_trip() {
         assert_eq!(pt.filter_button, filter_button);
         assert_eq!(pt.filters.first().and_then(|f| f.selected.clone()), Some(vec!["East".to_string(), "North".to_string()]));
     }
+    // The layout is stated on the row fields; with none stated, ODF's is tabular.
+    use gridcraft_model::{PivotField, PivotLayout};
+    for (layout, top) in [(PivotLayout::Tabular, false), (PivotLayout::Outline, true), (PivotLayout::Outline, false), (PivotLayout::Compact, false)] {
+        let mut wb = wb.clone();
+        std::sync::Arc::make_mut(&mut wb.sheets[0]).pivots = vec![PivotTable {
+            source: "Sheet1!$A$1:$B$4".into(),
+            anchor: CellRef::new(10, 4),
+            rows: vec![PivotField { source_col: "Region".into(), ..PivotField::default() }],
+            values: vec![PivotValue { source_col: "Sales".into(), name: "Sum - Sales".into(), ..PivotValue::default() }],
+            layout,
+            subtotals_top: top,
+            ..PivotTable::default()
+        }];
+        let (back, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+        let pt = back.sheets[0].pivots.first().cloned().unwrap();
+        assert_eq!((pt.layout, pt.subtotals_top), (layout, top));
+    }
 }
 
 /// Limits apply as each cell is read: a row of cells each expanding to a megabyte of spaces,
@@ -837,4 +854,35 @@ fn ods_kept_page_layouts_are_bounded() {
         read_ods(&styled_ods(&styles, r#"<table:table table:name="Data"><table:table-row><table:table-cell/></table:table-row></table:table>"#))
             .unwrap();
     assert!(report.warnings.iter().any(|w| w.contains("page styles")), "{:?}", report.warnings);
+}
+
+/// An autofilter holds one criterion per column of its range: many conditions on columns
+/// outside it are dropped at once, and a column's second custom condition joins its first.
+#[test]
+fn ods_filter_conditions_are_keyed_by_column() {
+    let conds: String =
+        (0..200_000).map(|n| format!(r#"<table:filter-condition table:field-number="{n}" table:operator="&gt;" table:value="1"/>"#)).collect();
+    let content = format!(
+        r#"<table:table table:name="S"><table:table-row><table:table-cell/></table:table-row></table:table><table:database-ranges><table:database-range table:target-range-address="S.A1:S.B2" table:display-filter-buttons="true"><table:filter><table:filter-and>{conds}<table:filter-condition table:field-number="0" table:operator="&lt;" table:value="9"/></table:filter-and></table:filter></table:database-range></table:database-ranges>"#
+    );
+    let (wb, report) = read_ods(&styled_ods("", &content)).unwrap();
+    let filter = wb.sheets[0].autofilter.as_ref().unwrap();
+    assert_eq!(filter.criteria.len(), 2);
+    assert!(matches!(&filter.criteria[0], (0, gridcraft_model::FilterCriterion::Custom { b: Some(_), .. })), "{:?}", filter.criteria[0]);
+    assert!(report.warnings.iter().any(|w| w.contains("outside their range")));
+}
+
+/// An autofilter whose criteria ODF can't hold (a fill colour) is written without a filter
+/// element, which may not be empty.
+#[test]
+fn ods_autofilter_without_odf_criteria_writes_no_filter() {
+    let mut wb = gridcraft_model::Workbook::new();
+    let sheet = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    sheet.autofilter = Some(gridcraft_model::AutoFilter {
+        range: RangeRef::new(CellRef::new(0, 0), CellRef::new(3, 1)),
+        criteria: vec![(0, gridcraft_model::FilterCriterion::FillColor(gridcraft_model::style::Color::Rgb(0xFFFF00)))],
+    });
+    let bytes = write_ods(&wb).unwrap();
+    let content = String::from_utf8(crate::package::Package::open(&bytes).unwrap().read("content.xml").unwrap().unwrap()).unwrap();
+    assert!(content.contains("table:database-range ") && !content.contains("table:filter"), "{content}");
 }

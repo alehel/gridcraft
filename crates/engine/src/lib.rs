@@ -376,11 +376,11 @@ impl DocState {
     }
 
     /// The workbook format this document is kept in, as an extension: `ods` or `fods` for an
-    /// OpenDocument one (by what its content was when opened, else by its name), else `xlsx`,
-    /// as Save keeps the document's own file. What Save As and a download keep when no other
-    /// type is chosen.
+    /// OpenDocument one (by its name, else by what its content was when opened), else `xlsx`,
+    /// in the order Save decides it. What Save As and a download keep when no other type is
+    /// chosen.
     pub fn workbook_format(&self) -> &'static str {
-        match self.content_kind.or_else(|| io::FileKind::from_path(&self.display_title())) {
+        match io::FileKind::from_path(&self.display_title()).or(self.content_kind) {
             Some(io::FileKind::Ods) => "ods",
             Some(io::FileKind::Fods) => "fods",
             _ => "xlsx",

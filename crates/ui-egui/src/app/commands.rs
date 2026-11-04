@@ -388,12 +388,11 @@ impl SheetApp {
                 // Without a chosen type, a workbook keeps its own (an OpenDocument one, a download
                 // too).
                 let format = chosen.unwrap_or_else(|| doc.map_or("xlsx", |d| d.workbook_format()));
-                // A format chosen (Backstage's file type) names the file; plain Save As suggests
-                // the workbook's own name.
-                let suggested = match chosen {
-                    Some(f) => std::path::Path::new(&title).with_extension(f).to_string_lossy().into_owned(),
-                    None => title,
-                };
+                // A format chosen (Backstage's file type) names the file. Plain Save As suggests
+                // the workbook's own name, with its type's extension where the name has none
+                // GridCraft knows (`data.dat` holding an ODS).
+                let renamed = chosen.is_some() || gridcraft_engine::io::FileKind::from_path(&title).is_none();
+                let suggested = if renamed { std::path::Path::new(&title).with_extension(format).to_string_lossy().into_owned() } else { title };
                 if let Some(pick) = &self.services.pick_save {
                     if let Some(path) = pick(&suggested) {
                         let path = if std::path::Path::new(&path).extension().is_none() { format!("{path}.{format}") } else { path };
@@ -446,7 +445,12 @@ impl SheetApp {
         }
         match &mut self.backstage {
             Some(b) => b.page = page,
-            None => self.backstage = Some(backstage::Backstage::new(page)),
+            None => {
+                // Save As starts from the workbook's own type.
+                let mut b = backstage::Backstage::new(page);
+                b.save_format = self.session.active().map_or("xlsx", |d| d.workbook_format());
+                self.backstage = Some(b);
+            }
         }
     }
 }

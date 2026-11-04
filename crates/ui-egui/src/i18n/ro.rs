@@ -387,6 +387,7 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "CSV UTF-8 (Comma delimited) (*.csv)" => "CSV UTF-8 (delimitat prin virgulă) (*.csv)",
         "Web Page (*.html)" => "Pagină web (*.html)",
         "OpenDocument Spreadsheet (*.ods)" => "Foaie de calcul OpenDocument (*.ods)",
+        "Flat OpenDocument Spreadsheet (*.fods)" => "Foaie de calcul OpenDocument plată (*.fods)",
         "PDF (*.pdf)" => "PDF (*.pdf)",
         "Download" => "Descărcare",
         "A CSV file, web page or PDF is a copy: the workbook keeps its own file." => {

@@ -403,6 +403,7 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "CSV UTF-8 (Comma delimited) (*.csv)" => "CSV UTF-8(쉼표로 분리) (*.csv)",
         "Web Page (*.html)" => "웹 페이지 (*.html)",
         "OpenDocument Spreadsheet (*.ods)" => "OpenDocument 스프레드시트 (*.ods)",
+        "Flat OpenDocument Spreadsheet (*.fods)" => "플랫 OpenDocument 스프레드시트 (*.fods)",
         "PDF (*.pdf)" => "PDF 파일 (*.pdf)",
         "Download" => "다운로드",
         "A CSV file, web page or PDF is a copy: the workbook keeps its own file." => {
