@@ -773,22 +773,25 @@ pub(crate) fn write_style(name: &str, code: &str) -> Option<String> {
     // stated ones, or Excel's implicit positive;negative;zero;text.
     let explicit = sections.iter().any(|s| s.cond.is_some());
     if sections.len() < MAX_SECTIONS && sections.last().is_some_and(|s| s.cond.is_some()) {
-        // Every section has its condition: other values show as General, the main style. Under a
-        // lone `>=0` they are the negatives, which read back as Excel's implicit second section
-        // (shown without their sign), so they keep it.
-        let negatives = matches!(sections.as_slice(), [s] if s.cond.as_deref().is_some_and(|c| c.replace(' ', "") == ">=0"));
-        let parts = if negatives { vec![Part::Lit("-".into()), Part::General] } else { vec![Part::General] };
-        sections.push(Section { parts, ..Section::default() });
+        // Every section has its condition: other values show as General, the main style.
+        sections.push(Section { parts: vec![Part::General], ..Section::default() });
+    }
+    // Stated conditions that read back as Excel's implicit ones keep their meaning, except a
+    // lone `>=0`: read implicitly, its negatives would take the first section without their
+    // sign. They are stated as the General they show (`[>=0]0;@`, `[>=0]0`).
+    if explicit && sections.len() == 2 && sections.first().is_some_and(|s| s.cond.as_deref().is_none_or(|c| c == ">=0")) {
+        sections.insert(1, Section { cond: Some("<0".into()), parts: vec![Part::Lit("-".into()), Part::General], ..Section::default() });
     }
     let n = sections.len();
     // A last text section (`0.00;@`) takes text only: the sections before it share the numbers
     // as if it weren't there, a lone one showing negatives with a minus.
     let text_last = !explicit && (2..4).contains(&n) && sections.last().is_some_and(|s| s.parts.contains(&Part::Text));
-    // (A date or time has no negative form: only its number of days turns it negative.)
+    // (A date or time has no negative form: only its number of days turns it negative; a text
+    // section shows a number as it is.)
     if text_last
         && n == 2
         && let Some(first) = sections.first().cloned()
-        && !matches!(kind(&first), "date-style" | "time-style")
+        && !matches!(kind(&first), "date-style" | "time-style" | "text-style")
     {
         let mut parts = vec![Part::Lit("-".into())];
         parts.extend(first.parts.iter().cloned());
@@ -1182,7 +1185,11 @@ mod tests {
             ("General;[Red]-General", "General;[Red]-General"),
             ("[>0]0", "[>0]0"),
             // Round four: a lone `>=0` keeps its negatives' sign.
-            ("[>=0]0", "0;-General"),
+            ("[>=0]0", "[>=0]0;[<0]-General"),
+            // Round five: the same with a text section, and text shown as text.
+            ("[>=0]0.00;@", "0.00;-General;@"),
+            ("[>=0]\"p\";@", "\"p\";-General;@"),
+            ("@;@", "@;@"),
             // Round three: a last conditional section keeps its condition; a time has no
             // made-up negative section.
             ("[>100]0;[<-100]-0", "[>100]0;[<-100]-0"),
