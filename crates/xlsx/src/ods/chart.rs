@@ -11,7 +11,7 @@ use super::dom::{Elem, Ns};
 use super::formula;
 use super::style::color;
 use super::style::hex;
-use crate::xml::{esc, esc_attr};
+use crate::xml::esc_attr;
 
 /// What a chart object says, before it is anchored on its sheet.
 pub(crate) struct ChartDraft {
@@ -108,19 +108,20 @@ pub(crate) fn read(root: &Elem) -> Option<ChartDraft> {
     let gridlines = axis("y").is_some_and(|a| a.children(Ns::Chart, "grid").any(|g| g.attr(Ns::Chart, "class") != Some("minor")));
     let mut data_labels = false;
     let mut series = Vec::new();
+    // Each series' class, and whether it shows markers and lines.
     let mut classes = Vec::new();
     let mut any_markers = false;
     let mut any_lines = false;
     for s in plot.children(Ns::Chart, "series") {
         let Some(values) = s.attr(Ns::Chart, "values-cell-range-address").and_then(range_text) else { continue };
         let own_class = s.attr(Ns::Chart, "class").unwrap_or(class);
-        classes.push(own_class.to_string());
         let symbol = chart_prop(&styles, s, "symbol-type").or_else(|| chart_prop(&styles, plot, "symbol-type"));
         let markers = symbol.is_some_and(|t| t != "none");
         let stroke = graphic_prop(&styles, s, Ns::Draw, "stroke");
         let lines = stroke != Some("none");
         any_markers |= markers;
         any_lines |= lines;
+        classes.push((own_class.to_string(), markers, lines));
         if chart_prop(&styles, s, "data-label-number").is_some_and(|v| v != "none") || chart_prop(&styles, s, "data-label-text") == Some("true") {
             data_labels = true;
         }
@@ -150,10 +151,10 @@ pub(crate) fn read(root: &Elem) -> Option<ChartDraft> {
     }
     let base = kind_of(class, vertical, stacked, percent, any_markers, any_lines);
     // Series of another class than the chart's make it a combination chart.
-    let combo = classes.iter().any(|c| c.as_str() != class);
+    let combo = classes.iter().any(|(c, ..)| c.as_str() != class);
     if combo {
-        for (s, c) in series.iter_mut().zip(&classes) {
-            s.kind = Some(kind_of(c, vertical, stacked, percent, any_markers, any_lines));
+        for (s, (c, markers, lines)) in series.iter_mut().zip(&classes) {
+            s.kind = Some(kind_of(c, vertical, stacked, percent, *markers, *lines));
         }
     }
     let legend = match chart.child(Ns::Chart, "legend").and_then(|l| l.attr(Ns::Chart, "legend-position")) {
@@ -228,9 +229,7 @@ fn class_of(kind: ChartKind) -> (&'static str, bool, bool, bool, bool) {
 fn title_xml(o: &mut String, tag: &str, text: &Option<String>) {
     if let Some(t) = text.as_deref().filter(|t| !t.is_empty()) {
         let _ = write!(o, "<chart:{tag}>");
-        for line in t.split('\n') {
-            let _ = write!(o, "<text:p>{}</text:p>", esc(line));
-        }
+        super::write::paragraphs(o, t, None);
         let _ = write!(o, "</chart:{tag}>");
     }
 }
@@ -279,7 +278,12 @@ pub(crate) fn write(c: &Chart, theme: &Theme) -> ChartDoc {
     for (i, s) in c.series.iter().enumerate() {
         let Some(values) = odf_range(&s.values) else { continue };
         cell_ranges.push(values.clone());
-        let own = s.kind.map(class_of).map(|k| k.0).unwrap_or(class);
+        // A series drawn as its own kind states its class and markers: every series of a combo
+        // chart (one without a kind is drawn as the combo's default for its place), and any
+        // other with a kind of its own.
+        let own_kind = c.kind == ChartKind::Combo || s.kind.is_some_and(|k| k != ChartKind::Combo);
+        let kind = if c.kind == ChartKind::Combo { c.series_kind(i) } else { s.kind.filter(|k| *k != ChartKind::Combo).unwrap_or(c.kind) };
+        let (own, .., own_markers) = class_of(kind);
         let line_like = matches!(own, "chart:line" | "chart:scatter" | "chart:radar");
         let mut graphic = String::new();
         if let Some(col) = s.color.and_then(|c| hex(c, theme)) {
@@ -289,13 +293,19 @@ pub(crate) fn write(c: &Chart, theme: &Theme) -> ChartDoc {
                 write!(graphic, " draw:fill-color=\"{col}\"")
             };
         }
-        if c.kind == ChartKind::Scatter {
+        if kind == ChartKind::Scatter {
             graphic.push_str(" draw:stroke=\"none\"");
         }
-        let label = if c.data_labels { " chart:data-label-number=\"value\"" } else { "" };
+        let mut props = String::new();
+        if c.data_labels {
+            props.push_str(" chart:data-label-number=\"value\"");
+        }
+        if own_kind {
+            let _ = write!(props, " chart:symbol-type=\"{}\"", if own_markers { "automatic" } else { "none" });
+        }
         let _ = write!(
             styles,
-            r#"<style:style style:name="chs{i}" style:family="chart"><style:chart-properties{label}/><style:graphic-properties{graphic}/></style:style>"#
+            r#"<style:style style:name="chs{i}" style:family="chart"><style:chart-properties{props}/><style:graphic-properties{graphic}/></style:style>"#
         );
         // A bubble series' values are its sizes; its y values are always a domain, before the
         // x. With no sizes stated, the y values size the bubbles too, as ODF has them nowhere else.
@@ -309,7 +319,7 @@ pub(crate) fn write(c: &Chart, theme: &Theme) -> ChartDoc {
         if let Some(name) = s.name.as_deref().and_then(odf_range) {
             let _ = write!(series, " chart:label-cell-address=\"{}\"", esc_attr(&name));
         }
-        if s.kind.is_some() {
+        if own_kind {
             let _ = write!(series, " chart:class=\"{own}\"");
         }
         if s.secondary {
@@ -423,6 +433,36 @@ mod tests {
     }
 
     /// A bubble series keeps its sizes, y and x values.
+    #[test]
+    fn combo_series_keep_their_kinds() {
+        let series = |kind| Series { values: "Data!$B$2:$B$4".into(), kind, ..Series::default() };
+        let mut chart = Chart {
+            id: 1,
+            kind: ChartKind::Combo,
+            anchor: gridcraft_model::Anchor::default(),
+            title: None,
+            series: vec![series(None), series(None)],
+            legend: LegendPos::Right,
+            data_labels: false,
+            data_table: None,
+            gridlines: false,
+            style: 0,
+            x_title: None,
+            y_title: None,
+            source: None,
+            by_rows: false,
+            pivot: None,
+        };
+        let kinds = |c: &Chart| {
+            let d = read(&parse_tree(write(c, &Theme::default()).package().as_bytes()).unwrap()).unwrap();
+            (d.kind, d.series.iter().map(|s| s.kind).collect::<Vec<_>>())
+        };
+        // The default combo: a column, then lines.
+        assert_eq!(kinds(&chart), (ChartKind::Combo, vec![Some(ChartKind::ColumnClustered), Some(ChartKind::Line)]));
+        chart.series = vec![series(Some(ChartKind::LineMarkers)), series(Some(ChartKind::Line)), series(Some(ChartKind::ColumnClustered))];
+        assert_eq!(kinds(&chart), (ChartKind::Combo, vec![Some(ChartKind::LineMarkers), Some(ChartKind::Line), Some(ChartKind::ColumnClustered)]));
+    }
+
     #[test]
     fn bubble_sizes_round_trip() {
         let chart = Chart {

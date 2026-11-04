@@ -203,14 +203,7 @@ fn series_name(wb: &Workbook, sheet: usize, name: &str) -> String {
 
 fn effective_kind(chart_kind: ChartKind, series_kind: Option<ChartKind>, i: usize) -> ChartKind {
     match (chart_kind, series_kind) {
-        (ChartKind::Combo, Some(k)) if k != ChartKind::Combo => k,
-        (ChartKind::Combo, _) => {
-            if i == 0 {
-                ChartKind::ColumnClustered
-            } else {
-                ChartKind::Line
-            }
-        }
+        (ChartKind::Combo, own) => gridcraft_model::combo_series_kind(own, i),
         (_, Some(k)) if k != ChartKind::Combo => k,
         (k, _) => k,
     }
@@ -218,7 +211,7 @@ fn effective_kind(chart_kind: ChartKind, series_kind: Option<ChartKind>, i: usiz
 
 /// The kind series `i` of `chart` is drawn as: its own kind in a combo chart, else the chart's.
 pub fn series_plot_kind(chart: &Chart, i: usize) -> ChartKind {
-    if chart.kind == ChartKind::Combo { effective_kind(chart.kind, chart.series.get(i).and_then(|s| s.kind), i) } else { chart.kind }
+    chart.series_kind(i)
 }
 
 /// Evaluates a chart's series formulas: names, values, categories (default "1", "2", …), X

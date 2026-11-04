@@ -580,7 +580,22 @@ pub struct Chart {
     pub pivot: Option<String>,
 }
 
+/// The kind a combo chart's series `i` with its own kind `own` is drawn as.
+pub fn combo_series_kind(own: Option<ChartKind>, i: usize) -> ChartKind {
+    match own {
+        Some(k) if k != ChartKind::Combo => k,
+        _ if i == 0 => ChartKind::ColumnClustered,
+        _ => ChartKind::Line,
+    }
+}
+
 impl Chart {
+    /// The kind series `i` is drawn as: in a combo chart its own kind, else column for the first
+    /// series and line for the rest; in any other chart the chart's kind.
+    pub fn series_kind(&self, i: usize) -> ChartKind {
+        if self.kind == ChartKind::Combo { combo_series_kind(self.series.get(i).and_then(|s| s.kind), i) } else { self.kind }
+    }
+
     /// Data tables belong to category-axis column, bar, line and area charts.
     pub fn supports_data_table(&self) -> bool {
         let eligible = |kind| {
