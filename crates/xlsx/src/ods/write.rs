@@ -13,7 +13,7 @@ use gridcraft_model::{
 
 use super::formula::{self, Tables};
 use super::read::{ODS_FONT, ODS_FONT_SIZE};
-use super::{numfmt, page, settings, style};
+use super::{OdsKind, numfmt, page, settings, style};
 use crate::IoError;
 use crate::package::ZipOut;
 use crate::xml::{esc, esc_attr};
@@ -29,20 +29,21 @@ fn baseline() -> Style {
 /// Encodes `wb` as an `.ods` package. Cells cache their values as plain text; see
 /// [`write_ods_with`] to cache the text as the cells show it.
 pub fn write_ods(wb: &Workbook) -> Result<Vec<u8>, IoError> {
-    write_ods_with(wb, None)
+    write_ods_with(wb, OdsKind::Spreadsheet, None)
 }
 
 /// [`write_ods`], with each value's cached text from `display` (the value as its number format
 /// shows it), as spreadsheet applications write it.
-pub fn write_ods_with(wb: &Workbook, display: Option<Display<'_>>) -> Result<Vec<u8>, IoError> {
+pub fn write_ods_with(wb: &Workbook, kind: OdsKind, display: Option<Display<'_>>) -> Result<Vec<u8>, IoError> {
     let mut w = Writer::new(wb, display);
     let content = w.content();
     let styles = w.styles();
     let mut zip = ZipOut::new();
     // ODF 1.3 part 2 §3.3: `mimetype` comes first and is stored uncompressed.
-    zip.add_stored("mimetype", b"application/vnd.oasis.opendocument.spreadsheet")?;
-    let mut manifest = String::from(
-        r#"<?xml version="1.0" encoding="UTF-8"?><manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3"><manifest:file-entry manifest:full-path="/" manifest:version="1.3" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="meta.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="settings.xml" manifest:media-type="text/xml"/>"#,
+    zip.add_stored("mimetype", kind.mimetype().as_bytes())?;
+    let mut manifest = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3"><manifest:file-entry manifest:full-path="/" manifest:version="1.3" manifest:media-type="{}"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="meta.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="settings.xml" manifest:media-type="text/xml"/>"#,
+        kind.mimetype()
     );
     for (path, mime, _) in &w.pictures {
         let _ = write!(manifest, r#"<manifest:file-entry manifest:full-path="{}" manifest:media-type="{}"/>"#, esc_attr(path), esc_attr(mime));

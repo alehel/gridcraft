@@ -16,12 +16,10 @@ use gridcraft_model::{
 use super::dom::{self, Elem, Ns, Sink};
 use super::numfmt::{self, DataStyle};
 use super::style::{self, CellStyleDef, Props, color, length_pt, pt_to_px};
-use super::{formula, settings};
+use super::{OdsKind, formula, settings};
 use crate::package::{MAX_ENTRIES, Package};
 use crate::{IoError, ReadReport};
 
-const MIME: &[u8] = b"application/vnd.oasis.opendocument.spreadsheet";
-const TEMPLATE_MIME: &[u8] = b"application/vnd.oasis.opendocument.spreadsheet-template";
 const MAX_CELLS: u64 = 4_000_000;
 const MAX_STYLED_BLANKS: u64 = 2_000_000;
 const MAX_MERGES: u64 = 100_000;
@@ -42,11 +40,12 @@ pub(crate) fn has_mimetype(bytes: &[u8]) -> bool {
         return false;
     }
     let Ok(mut file) = zip.by_name("mimetype") else { return false };
-    if file.size() != MIME.len() as u64 && file.size() != TEMPLATE_MIME.len() as u64 {
+    let kinds = [OdsKind::Spreadsheet.mimetype(), OdsKind::Template.mimetype()];
+    if !kinds.iter().any(|m| file.size() == m.len() as u64) {
         return false;
     }
     let mut value = Vec::new();
-    (&mut file).take(TEMPLATE_MIME.len() as u64 + 1).read_to_end(&mut value).is_ok() && (value == MIME || value == TEMPLATE_MIME)
+    (&mut file).take(OdsKind::Template.mimetype().len() as u64 + 1).read_to_end(&mut value).is_ok() && kinds.iter().any(|m| value == m.as_bytes())
 }
 
 fn xml_error(e: impl std::fmt::Display) -> IoError {

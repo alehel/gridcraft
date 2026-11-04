@@ -2573,7 +2573,38 @@ fn ods_saves_in_place_but_a_disguised_package_is_imported() {
     t.execute("file.save", json!({})).unwrap();
     assert!(t.take_ui_requests().iter().any(|r| matches!(r, crate::UiRequest::Dialog(name, _) if name == "saveAs")));
     assert_eq!(std::fs::read(&disguised).unwrap(), bytes);
+    // What was read decides, not the name: a zipped ODS named .fods, and a flat ODS named .csv,
+    // are imports too, so Save never rewrites them in the other format.
+    let flat = gridcraft_xlsx::write_fods(&gridcraft_xlsx::read_ods(&bytes).unwrap().0, None).unwrap();
+    for (name, content) in [("zipped.fods", &bytes), ("flat.csv", &flat)] {
+        let file = dir.join(name);
+        std::fs::write(&file, content).unwrap();
+        let mut t = s();
+        t.execute("file.open", json!({"path": file})).unwrap();
+        assert_eq!(t.doc().unwrap().path, None, "{name}");
+        assert!(t.doc().unwrap().display_title().ends_with("(imported).xlsx"), "{name}");
+    }
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// An .ots template opens as a new, unsaved .ods workbook, and saving as .ots writes a template.
+#[test]
+fn ods_templates_open_untitled_and_save_with_the_template_mimetype() {
+    let mut s = s();
+    s.execute("file.open", json!({"name": "Invoice.ots", "base64": crate::io::base64_encode(&ods_fixture())})).unwrap();
+    assert_eq!(s.doc().unwrap().display_title(), "Invoice.ods");
+    assert_eq!(s.doc().unwrap().path, None);
+    let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "Invoice.ots").unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut mime = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("mimetype").unwrap(), &mut mime).unwrap();
+    assert_eq!(mime, gridcraft_xlsx::OdsKind::Template.mimetype());
+    assert_eq!(gridcraft_xlsx::sniff(&bytes), gridcraft_xlsx::Format::Ods);
+    let plain = crate::io::save_bytes(&s.doc().unwrap().wb, "Invoice.ods").unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&plain)).unwrap();
+    let mut mime = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("mimetype").unwrap(), &mut mime).unwrap();
+    assert_eq!(mime, gridcraft_xlsx::OdsKind::Spreadsheet.mimetype());
 }
 
 /// Open a `;` CSV by path (a double-click), edit, Save: the file keeps its `;` separator.

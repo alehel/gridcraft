@@ -705,9 +705,10 @@ fn save_as(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcom
     let web = app.services.pick_save.is_none() && app.services.download.is_some();
     let label = if web { format!("{} (.{fmt})", lang.tr("Download")) } else { lang.tr("Browse…").to_string() };
     if square_button(ui, Icon::OpenFolder, &label).clicked() && app.commit_edit(0, 0, false, false) {
-        if fmt == "xlsx" {
+        // A workbook format is the workbook saved as that file; the others are copies.
+        if matches!(fmt, "xlsx" | "ods") {
             let before = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));
-            app.open_dialog("saveAs", json!({}));
+            app.open_dialog("saveAs", json!({"format": fmt}));
             let after = app.session.active().map(|d| (d.path.clone(), d.is_dirty()));
             if after != before || app.services.pick_save.is_none() {
                 out.close = true;
@@ -746,8 +747,6 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
         return false;
     }
     let id = match fmt {
-        // An OpenDocument file is the workbook saved in another format, not an export.
-        "ods" => "file.saveAs",
         "pdf" => "file.exportPdf",
         "csv" => "file.exportCsv",
         "html" => "file.exportHtml",

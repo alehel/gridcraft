@@ -73,10 +73,25 @@ pub fn open_bytes_with_password(name: &str, bytes: &[u8], password: Option<&str>
 /// the text it holds, with no number, date or boolean conversion (identifiers such as GTINs, SKUs
 /// and ZIP codes survive). It does not apply to other formats.
 pub fn open_bytes_with(name: &str, bytes: &[u8], password: Option<&str>, csv_as_text: bool) -> Result<(Workbook, Vec<String>)> {
+    open_file_bytes(name, bytes, password, csv_as_text).map(|o| (o.wb, o.warnings))
+}
+
+/// A workbook read from a file, with the format it was read as.
+pub struct Opened {
+    pub wb: Workbook,
+    pub warnings: Vec<String>,
+    /// What the content turned out to be: it decides over the name, which only decides when the
+    /// bytes don't say. Saving the workbook back under its name is safe only when the name asks
+    /// for this same format.
+    pub read_as: FileKind,
+}
+
+/// [`open_bytes_with`], also saying which format the file was read as.
+pub fn open_file_bytes(name: &str, bytes: &[u8], password: Option<&str>, csv_as_text: bool) -> Result<Opened> {
     if gridcraft_xlsx::sniff(bytes) != gridcraft_xlsx::Format::Encrypted {
-        let (mut wb, warnings) = open_plain(name, bytes, csv_as_text)?;
-        fit_imported_rows(&mut wb);
-        return Ok((wb, warnings));
+        let mut opened = open_plain(name, bytes, csv_as_text)?;
+        fit_imported_rows(&mut opened.wb);
+        return Ok(opened);
     }
     // A scheme no password opens is said straight away, rather than after asking for one.
     let decrypt_error = |e: gridcraft_xlsx::DecryptError| EngineError::Other(decrypt_message(name, e));
@@ -88,10 +103,10 @@ pub fn open_bytes_with(name: &str, bytes: &[u8], password: Option<&str>, csv_as_
     if gridcraft_xlsx::sniff(&plain) == gridcraft_xlsx::Format::Encrypted {
         return Err(EngineError::Other(format!("We can't open '{name}': the encrypted file is damaged (it holds another encrypted file).")));
     }
-    let (mut wb, mut warnings) = open_plain(name, &plain, csv_as_text)?;
-    fit_imported_rows(&mut wb);
-    warnings.insert(0, DECRYPTED_NOTICE.into());
-    Ok((wb, warnings))
+    let mut opened = open_plain(name, &plain, csv_as_text)?;
+    fit_imported_rows(&mut opened.wb);
+    opened.warnings.insert(0, DECRYPTED_NOTICE.into());
+    Ok(opened)
 }
 
 /// Excel auto-fits rows to their tallest font when opening a file: rows without a user-set
@@ -132,12 +147,12 @@ fn decrypt_message(name: &str, e: gridcraft_xlsx::DecryptError) -> String {
 /// Parses bytes that aren't encrypted, then takes the workbook's macros out of their hidden names
 /// and adopts the Python cells they hold (see [`adopt_python`]) within the limits of
 /// [`enforce_python_limits`].
-fn open_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, Vec<String>)> {
-    let (mut wb, mut warnings) = read_plain(name, bytes, csv_as_text)?;
+fn open_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<Opened> {
+    let (mut wb, mut warnings, read_as) = read_plain(name, bytes, csv_as_text)?;
     warnings.extend(crate::macros::load(&mut wb));
     warnings.extend(adopt_python(&mut wb));
     warnings.extend(enforce_python_limits(&mut wb));
-    Ok((wb, warnings))
+    Ok(Opened { wb, warnings, read_as })
 }
 
 /// The most result cells [`adopt_python`] rebuilds from a file's cached spills, over all its
@@ -264,13 +279,14 @@ fn sane_python_output(v: &gridcraft_core::Value) -> bool {
     }
 }
 
-/// Parses bytes that aren't encrypted, as they are.
-fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, Vec<String>)> {
+/// Parses bytes that aren't encrypted, as they are, and says which format they were read as:
+/// the content decides, and the name only when the bytes don't say.
+fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, Vec<String>, FileKind)> {
     let kind = FileKind::from_path(name);
     let sniffed = gridcraft_xlsx::sniff(bytes);
     if sniffed == gridcraft_xlsx::Format::Xls {
         let (wb, report) = gridcraft_xlsx::read_xls(bytes).map_err(|e| EngineError::Other(format!("We can't open '{name}': {e}")))?;
-        return Ok((wb, report.warnings));
+        return Ok((wb, report.warnings, FileKind::Xls));
     }
     if sniffed == gridcraft_xlsx::Format::LegacyBinary {
         return Err(EngineError::Other(format!(
@@ -292,10 +308,10 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
                 return Err(EngineError::Other(format!("'{name}' {ENCRYPTED_ODS}")));
             }
             let (wb, report) = gridcraft_xlsx::read_ods(bytes).map_err(|e| EngineError::Other(format!("We can't open '{name}': {e}")))?;
-            return Ok((wb, report.warnings));
+            return Ok((wb, report.warnings, FileKind::Ods));
         }
         let (wb, report) = gridcraft_xlsx::read_xlsb(bytes).map_err(|e| EngineError::Other(format!("We can't import '{name}': {e}")))?;
-        return Ok((wb, report.warnings));
+        return Ok((wb, report.warnings, FileKind::Xlsb));
     }
     // Text named `.xlsx` is read as text.
     if sniffed == gridcraft_xlsx::Format::Xlsx || (kind == Some(FileKind::Xlsx) && sniffed != gridcraft_xlsx::Format::Csv) {
@@ -306,15 +322,15 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
                 _ => format!("We can't open '{name}': {e}"),
             })
         })?;
-        return Ok((wb, report.warnings));
+        return Ok((wb, report.warnings, FileKind::Xlsx));
     }
     // A flat OpenDocument spreadsheet is XML text, whatever its name.
     if kind == Some(FileKind::Fods) || gridcraft_xlsx::is_flat_ods(bytes) {
         let (wb, report) = gridcraft_xlsx::read_fods(bytes).map_err(|e| EngineError::Other(format!("We can't open '{name}': {e}")))?;
-        return Ok((wb, report.warnings));
+        return Ok((wb, report.warnings, FileKind::Fods));
     }
     if let Some(read) = read_html_table(name, kind, bytes, csv_as_text) {
-        return read;
+        return read.map(|(wb, warnings)| (wb, warnings, FileKind::Html));
     }
     match kind {
         Some(FileKind::Json) => {
@@ -333,12 +349,12 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
             if dropped > 0 {
                 warnings.push(format!("{name}: {dropped} cells outside the 1,048,576 × 16,384 grid were dropped"));
             }
-            Ok((wb, warnings))
+            Ok((wb, warnings, FileKind::Json))
         }
         Some(FileKind::Sylk) => {
             let (mut wb, warnings) = sylk::read(name, bytes)?;
             rename_first_sheet(&mut wb, name);
-            Ok((wb, warnings))
+            Ok((wb, warnings, FileKind::Sylk))
         }
         Some(FileKind::Tsv) => {
             let opts = gridcraft_xlsx::CsvOptions { delimiter: b'\t', parse_values: !csv_as_text, ..Default::default() };
@@ -346,13 +362,13 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
             // Tab is what makes it a .tsv/.txt; saved as .csv it gets the CSV default.
             wb.csv_delimiter = None;
             rename_first_sheet(&mut wb, name);
-            Ok((wb, report.warnings))
+            Ok((wb, report.warnings, FileKind::Tsv))
         }
         _ => {
             let opts = gridcraft_xlsx::CsvOptions { delimiter: 0, parse_values: !csv_as_text, ..Default::default() };
             let (mut wb, report) = gridcraft_xlsx::read_csv_with_report(bytes, &opts).map_err(|e| EngineError::Other(e.to_string()))?;
             rename_first_sheet(&mut wb, name);
-            Ok((wb, report.warnings))
+            Ok((wb, report.warnings, FileKind::Csv))
         }
     }
 }
@@ -530,7 +546,7 @@ pub fn save_bytes_as(wb: &Workbook, path: &str, kind: FileKind) -> Result<Vec<u8
             let written = if kind == FileKind::Fods {
                 gridcraft_xlsx::write_fods(book, Some(&shown))
             } else {
-                gridcraft_xlsx::write_ods_with(book, Some(&shown))
+                gridcraft_xlsx::write_ods_with(book, gridcraft_xlsx::OdsKind::from_path(path), Some(&shown))
             };
             written.map_err(|e| EngineError::Other(e.to_string()))
         }

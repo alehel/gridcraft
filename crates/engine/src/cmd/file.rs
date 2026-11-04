@@ -4,6 +4,7 @@ use serde_json::{Value as Json, json};
 
 use super::{CommandSpec, Result, Session, always, bad, bool_param, cmd, edit, has_doc, ok, str_param, target_sheet, u32_param};
 use crate::DocState;
+use crate::io::FileKind;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -58,7 +59,8 @@ fn open(s: &mut Session, p: &Json) -> Result<Json> {
         return ok();
     };
     let encrypted = gridcraft_xlsx::sniff(&bytes) == gridcraft_xlsx::Format::Encrypted;
-    let (mut wb, warnings) = crate::io::open_bytes_with(&name, &bytes, str_param(p, "password"), bool_param(p, "csvAsText").unwrap_or(false))?;
+    let crate::io::Opened { mut wb, warnings, read_as } =
+        crate::io::open_file_bytes(&name, &bytes, str_param(p, "password"), bool_param(p, "csvAsText").unwrap_or(false))?;
     wb.source_dir = str_param(p, "path").and_then(crate::io::source_dir);
     // What `CELL("filename")` reports (#1489). A workbook opened from bytes knows its name but
     // never a folder, so it reports `[name]Sheet` with none; an import reports the file it came
@@ -67,14 +69,12 @@ fn open(s: &mut Session, p: &Json) -> Result<Json> {
         Some(path) => crate::io::source_path(path),
         None => Some(std::path::PathBuf::from(&name)),
     };
-    // An ODS package named as something else is imported: saving it under its name would
-    // change the file's format behind the user's back.
-    let ods_named = matches!(crate::io::FileKind::from_path(&name), Some(crate::io::FileKind::Ods | crate::io::FileKind::Fods));
-    let imported = matches!(crate::io::FileKind::from_path(&name), Some(crate::io::FileKind::Xlsb | crate::io::FileKind::Xls))
-        || matches!(gridcraft_xlsx::sniff(&bytes), gridcraft_xlsx::Format::Xlsb | gridcraft_xlsx::Format::Xls)
-        || (gridcraft_xlsx::sniff(&bytes) == gridcraft_xlsx::Format::Ods && !ods_named);
+    // A file whose content isn't what its name says is imported: saving it under its name would
+    // change its format behind the user's back. XLS and XLSB are only ever imported.
+    let named = FileKind::from_path(&name);
+    let imported = matches!(read_as, FileKind::Xls | FileKind::Xlsb) || named.is_some_and(|n| n != read_as);
     // A template (.ots) opens as a new, unsaved workbook of the same kind, as Excel opens an .xltx.
-    let template = std::path::Path::new(&name).extension().is_some_and(|e| e.eq_ignore_ascii_case("ots"));
+    let template = !imported && read_as == FileKind::Ods && gridcraft_xlsx::OdsKind::from_path(&name) == gridcraft_xlsx::OdsKind::Template;
     let title = if template {
         format!("{}.ods", std::path::Path::new(&name).file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or("Book"))
     } else if imported {
@@ -94,8 +94,10 @@ fn open(s: &mut Session, p: &Json) -> Result<Json> {
     }
     // Someone else may have made the file: its active content asks before it runs.
     let mut doc = DocState::new(wb, path, title, crate::Trust::FromFile);
-    if crate::io::FileKind::from_path(&name).is_none() && gridcraft_xlsx::sniff(&bytes) == gridcraft_xlsx::Format::Xlsx {
-        doc.content_kind = Some(crate::io::FileKind::Xlsx);
+    // A workbook package under an unknown extension saves back as what it is; text (a CSV
+    // guess) never does.
+    if named.is_none() && matches!(read_as, FileKind::Xlsx | FileKind::Ods | FileKind::Fods) {
+        doc.content_kind = Some(read_as);
     }
     let i = s.add_document(doc);
     // The decrypted-workbook notice is for the info bar, not a message box.
@@ -129,7 +131,7 @@ fn save(s: &mut Session, p: &Json) -> Result<Json> {
     let d = s.doc_mut()?;
     // The document's own file keeps the format its content had when opened; any other path
     // goes by its extension. Relative paths to linked workbooks are rewritten for the new folder.
-    let kind = crate::io::FileKind::from_path(&path).or(d.content_kind.filter(|_| d.path.as_deref() == Some(path.as_str())));
+    let kind = FileKind::from_path(&path).or(d.content_kind.filter(|_| d.path.as_deref() == Some(path.as_str())));
     let rebased = crate::io::source_dir(&path).and_then(|f| gridcraft_xlsx::rebase_links(&d.wb, &f));
     let wb = rebased.as_ref().unwrap_or(&d.wb);
     let bytes = match kind {
@@ -138,7 +140,7 @@ fn save(s: &mut Session, p: &Json) -> Result<Json> {
     };
     crate::io::write_file(&path, &bytes)?;
     // Only a full-fidelity format clears the dirty flag and becomes the document's file.
-    if matches!(kind, Some(crate::io::FileKind::Xlsx | crate::io::FileKind::Ods | crate::io::FileKind::Fods | crate::io::FileKind::Json)) {
+    if matches!(kind, Some(FileKind::Xlsx | FileKind::Ods | FileKind::Fods | FileKind::Json)) {
         // The new file is the workbook's own now, so `CELL("filename")` reports it (#1489). Set
         // before the `saved` snapshot, or the workbook would read as dirty the moment it was
         // saved; and only when it changes, so an ordinary Save does not clone the workbook.

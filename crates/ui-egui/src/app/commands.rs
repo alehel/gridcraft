@@ -380,14 +380,19 @@ impl SheetApp {
                 }
             }
             "saveAs" => {
-                let suggested = self.session.active().map(|d| d.display_title()).unwrap_or_else(|| "Book1".into());
+                // `format` (a workbook extension: xlsx by default, or ods) picks the suggested name
+                // and what a name without an extension is saved as.
+                let format = params.get("format").and_then(Json::as_str).filter(|f| matches!(*f, "xlsx" | "ods")).unwrap_or("xlsx");
+                let title = self.session.active().map(|d| d.display_title()).unwrap_or_else(|| "Book1".into());
+                let suggested =
+                    if format == "xlsx" { title } else { std::path::Path::new(&title).with_extension(format).to_string_lossy().into_owned() };
                 if let Some(pick) = &self.services.pick_save {
                     if let Some(path) = pick(&suggested) {
-                        let path = if std::path::Path::new(&path).extension().is_none() { format!("{path}.xlsx") } else { path };
+                        let path = if std::path::Path::new(&path).extension().is_none() { format!("{path}.{format}") } else { path };
                         self.run_or_alert("file.save", json!({"path": path}));
                     }
                 } else if self.services.download.is_some()
-                    && let Ok(r) = self.run("file.saveBytes", json!({"format": "xlsx"}))
+                    && let Ok(r) = self.run("file.saveBytes", json!({"format": format}))
                     && let Some(dl) = &self.services.download
                     && let Some(b) = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode)
                 {
