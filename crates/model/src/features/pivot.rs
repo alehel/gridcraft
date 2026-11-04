@@ -137,6 +137,9 @@ pub struct PivotTable {
     /// Position of Σ Values among the row fields (`None` = after the last). Only used with
     /// `values_on_rows`: in Columns Σ Values always comes after the last column field.
     pub values_position: Option<usize>,
+    /// LibreOffice's Filter button row above the page fields (an OpenDocument report's; Excel
+    /// has none).
+    pub filter_button: bool,
 }
 
 /// A calculated field: a formula over other fields (`=Sales*0.1`, `='Unit Price'*Units`). As in
@@ -172,6 +175,7 @@ impl Default for PivotTable {
             calculated_fields: vec![],
             values_on_rows: false,
             values_position: None,
+            filter_button: false,
         }
     }
 }

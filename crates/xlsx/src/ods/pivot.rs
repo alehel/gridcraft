@@ -144,7 +144,7 @@ pub(crate) fn read(p: &Elem, id: u32) -> Option<(String, PivotTable)> {
                     Some("column-percentage") => PivotShowAs::PercentOfColumnTotal,
                     Some("row-percentage") => PivotShowAs::PercentOfRowTotal,
                     Some("running-total") => PivotShowAs::RunningTotal,
-                    Some("index") => PivotShowAs::Rank,
+                    // `index` is Excel's Index calculation, not a rank: there is no model for it.
                     _ => PivotShowAs::Normal,
                 };
                 let name = caption(fun, &col);
@@ -172,7 +172,8 @@ pub(crate) fn read(p: &Elem, id: u32) -> Option<(String, PivotTable)> {
         _ => {}
     }
     // Above the body: LibreOffice's Filter button row, the page fields, and a blank row.
-    let button = u32::from(p.attr(Ns::Table, "show-filter-button") != Some("false"));
+    pt.filter_button = p.attr(Ns::Table, "show-filter-button") != Some("false");
+    let button = u32::from(pt.filter_button);
     let pages = pt.filters.len() as u32;
     let k = button + pages + u32::from(button + pages > 0);
     pt.anchor = CellRef::new(target.start.row.saturating_add(k).min(target.end.row), target.start.col);
@@ -218,6 +219,27 @@ fn field_xml(o: &mut String, f: &PivotField, orientation: &str) {
     );
 }
 
+/// The most members listed for a page field.
+const MAX_MEMBERS: usize = 10_000;
+
+/// The distinct values of the source column headed `col`, as the report names its items.
+fn members(wb: &Workbook, sheet: &str, src: RangeRef, col: &str) -> Vec<String> {
+    let Some(sh) = wb.sheets.iter().find(|s| s.name == sheet) else { return Vec::new() };
+    let Some(c) = (src.start.col..=src.end.col).find(|c| sh.value(CellRef::new(src.start.row, *c)).display() == col) else { return Vec::new() };
+    let mut out: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (_, cell) in sh.cells.iter().filter(|(p, _)| p.col == c && p.row > src.start.row && p.row <= src.end.row) {
+        let v = cell.value.display();
+        if seen.insert(v.clone()) {
+            out.push(v);
+            if out.len() >= MAX_MEMBERS {
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// `table:data-pilot-tables` for every sheet's PivotTables (empty when there are none).
 pub(crate) fn write(wb: &Workbook) -> String {
     let mut o = String::new();
@@ -232,10 +254,7 @@ pub(crate) fn write(wb: &Workbook) -> String {
                 (false, true) => "column",
                 (false, false) => "none",
             };
-            // A report read with LibreOffice's Filter button row keeps it: the body then starts
-            // two rows below the page fields' end rather than one.
-            let pages = pt.filters.len() as u32;
-            let button = pt.anchor.row.saturating_sub(target.start.row) == pages + 2;
+            let button = pt.filter_button;
             let _ = write!(
                 o,
                 r#"<table:data-pilot-table table:name="{}" table:target-range-address="{}" table:grand-total="{grand}" table:show-filter-button="{button}"><table:source-cell-range table:cell-range-address="{}"/>"#,
@@ -250,9 +269,23 @@ pub(crate) fn write(wb: &Workbook) -> String {
                 };
                 let _ = write!(
                     o,
-                    r#"<table:data-pilot-field table:source-field-name="{}" table:orientation="page" table:function="auto"{selected}><table:data-pilot-level table:show-empty="false"/></table:data-pilot-field>"#,
+                    r#"<table:data-pilot-field table:source-field-name="{}" table:orientation="page" table:function="auto"{selected}><table:data-pilot-level table:show-empty="false">"#,
                     esc_attr(&f.source_col)
                 );
+                // Several items chosen: the others are listed as hidden members.
+                if let Some(chosen) = f.selected.as_deref().filter(|s| s.len() > 1) {
+                    o.push_str("<table:data-pilot-members>");
+                    for m in members(wb, &src_sheet, src.range(), &f.source_col) {
+                        let shown = chosen.contains(&m);
+                        let _ = write!(
+                            o,
+                            r#"<table:data-pilot-member table:name="{}" table:display="{shown}" table:show-details="true"/>"#,
+                            esc_attr(&m)
+                        );
+                    }
+                    o.push_str("</table:data-pilot-members>");
+                }
+                o.push_str("</table:data-pilot-level></table:data-pilot-field>");
             }
             for f in &pt.rows {
                 field_xml(&mut o, f, "row");
@@ -280,7 +313,8 @@ pub(crate) fn write(wb: &Workbook) -> String {
                     PivotShowAs::PercentOfColumnTotal => Some("column-percentage"),
                     PivotShowAs::PercentOfRowTotal => Some("row-percentage"),
                     PivotShowAs::RunningTotal => Some("running-total"),
-                    PivotShowAs::Rank => Some("index"),
+                    // ODF has no rank: the value is written plain.
+                    PivotShowAs::Rank => None,
                 };
                 if let Some(t) = reference {
                     let _ = write!(o, r#"<table:data-pilot-field-reference table:field-name="{}" table:type="{t}"/>"#, esc_attr(&v.source_col));

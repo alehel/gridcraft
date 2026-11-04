@@ -625,3 +625,34 @@ fn ods_writer_writes_large_merges_and_validations_as_runs() {
     assert_eq!(back.validations.first().map(|v| v.ranges.clone()), Some(vec![whole_rows]));
     assert_eq!(back.hyperlinks.get(&CellRef::new(300_000, 3)).map(|h| h.target.as_str()), Some("https://example.com"));
 }
+
+/// A page field with several items chosen, and LibreOffice's Filter button row, survive.
+#[test]
+fn ods_pivot_page_selections_and_filter_button_round_trip() {
+    use gridcraft_model::{PivotFilter, PivotTable, PivotValue};
+    let mut wb = gridcraft_model::Workbook::new();
+    let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    for (r, (region, sales)) in [("Region", 0.0), ("East", 1.0), ("West", 2.0), ("North", 3.0)].iter().enumerate() {
+        sh.set_value(CellRef::new(r as u32, 0), text(region));
+        if r > 0 {
+            sh.set_value(CellRef::new(r as u32, 1), Value::Number(*sales));
+        }
+    }
+    sh.set_value(CellRef::new(0, 1), text("Sales"));
+    for filter_button in [true, false] {
+        let mut wb = wb.clone();
+        std::sync::Arc::make_mut(&mut wb.sheets[0]).pivots = vec![PivotTable {
+            source: "Sheet1!$A$1:$B$4".into(),
+            anchor: CellRef::new(10, 4),
+            last_range: Some(RangeRef::new(CellRef::new(6, 4), CellRef::new(12, 5))),
+            filters: vec![PivotFilter { source_col: "Region".into(), selected: Some(vec!["East".into(), "North".into()]) }],
+            values: vec![PivotValue { source_col: "Sales".into(), name: "Sum - Sales".into(), ..PivotValue::default() }],
+            filter_button,
+            ..PivotTable::default()
+        }];
+        let (back, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+        let pt = back.sheets[0].pivots.first().cloned().unwrap();
+        assert_eq!(pt.filter_button, filter_button);
+        assert_eq!(pt.filters.first().and_then(|f| f.selected.clone()), Some(vec!["East".to_string(), "North".to_string()]));
+    }
+}
