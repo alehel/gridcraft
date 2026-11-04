@@ -157,8 +157,8 @@ fn tokens(body: &str) -> Option<Vec<Token>> {
                 i += 1;
                 Tok::RBrace
             }
-            // Arguments and an inline array's columns.
-            ';' => {
+            // Arguments and an inline array's columns (some writers separate them with `,`).
+            ';' | ',' => {
                 i += 1;
                 Tok::Comma
             }
@@ -709,6 +709,9 @@ mod tests {
         assert_eq!(from_odf("of:=SUM([.A1:$Sheet2.B2])").as_deref(), Some("SUM(#REF!)"));
         // Cumulative defaults to TRUE in OpenFormula; Excel requires it.
         assert_eq!(from_odf("of:=CHISQDIST(1;2)").as_deref(), Some("CHISQ.DIST(1,2,TRUE())"));
+        // Some writers separate arguments with `,`; a bare word that spells a cell reads as that
+        // cell, as LibreOffice reads it.
+        assert_eq!(from_odf("OFFSET(cat1,0,2,,)").as_deref(), Some("OFFSET(CAT1,0,2,,)"));
         assert_eq!(from_odf("foo:=1"), None);
         assert_eq!(from_odf("of:#N/A").as_deref(), Some("#N/A"));
         assert_eq!(split_addresses("'My sheet'.A1:'My sheet'.B2  Data.C3"), vec!["'My sheet'.A1:'My sheet'.B2", "Data.C3"]);
