@@ -772,17 +772,19 @@ pub(crate) fn write_style(name: &str, code: &str) -> Option<String> {
     // The last section is the main style; the others are mapped from it by their conditions:
     // stated ones, or Excel's implicit positive;negative;zero;text.
     let explicit = sections.iter().any(|s| s.cond.is_some());
-    if sections.len() == 1 && explicit {
-        // One conditional section: other values show as General.
+    if sections.len() < MAX_SECTIONS && sections.last().is_some_and(|s| s.cond.is_some()) {
+        // Every section has its condition: other values show as General, the main style.
         sections.push(Section { parts: vec![Part::General], ..Section::default() });
     }
     let n = sections.len();
     // A last text section (`0.00;@`) takes text only: the sections before it share the numbers
     // as if it weren't there, a lone one showing negatives with a minus.
     let text_last = !explicit && (2..4).contains(&n) && sections.last().is_some_and(|s| s.parts.contains(&Part::Text));
+    // (A date or time has no negative form: only its number of days turns it negative.)
     if text_last
         && n == 2
         && let Some(first) = sections.first().cloned()
+        && !matches!(kind(&first), "date-style" | "time-style")
     {
         let mut parts = vec![Part::Lit("-".into())];
         parts.extend(first.parts.iter().cloned());
@@ -891,7 +893,11 @@ pub(crate) fn code(styles: &HashMap<String, DataStyle>, name: &str) -> Option<St
         _ => false,
     };
     let mut sections: Vec<Section> = mapped.into_iter().map(|(cond, s)| Section { cond: if implicit { None } else { cond }, ..s }).collect();
-    sections.push(own.clone());
+    // A bare General main under explicit conditions is the "other values" the writer adds.
+    let general = Section { parts: vec![Part::General], ..Section::default() };
+    if implicit || !sections.iter().all(|s| s.cond.is_some()) || *own != general {
+        sections.push(own.clone());
+    }
     Some(print_code(&sections))
 }
 
@@ -1169,7 +1175,13 @@ mod tests {
             ("0;-0;0;\"text\"", "0;-0;0;\"text\""),
             ("[Red]General", "[Red]General"),
             ("General;[Red]-General", "General;[Red]-General"),
-            ("[>0]0", "[>0]0;General"),
+            ("[>0]0", "[>0]0"),
+            // Round three: a last conditional section keeps its condition; a time has no
+            // made-up negative section.
+            ("[>100]0;[<-100]-0", "[>100]0;[<-100]-0"),
+            ("[Red][>0]0;[Blue][<0]0", "[Red]0;[Blue]0;General"),
+            ("h:mm;@", "h:mm;@"),
+            ("[h]:mm;@", "[h]:mm;@"),
             ("[Blue][<=0]0;0", "[Blue][<=0]0;0"),
             ("# ?/1000000", "# ?/1000000"),
             ("[$€-407]#,##0.00", "[$€]#,##0.00"),
