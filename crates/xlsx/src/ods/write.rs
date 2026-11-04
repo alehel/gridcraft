@@ -529,13 +529,11 @@ impl<'a> Writer<'a> {
             attrs.push_str(&protection_key(p.password.as_ref()));
         }
         let _ = write!(out, "<table:table{attrs}>");
-        if sh.protection.is_some() {
-            let p = sh.protection.as_ref();
+        if let Some(p) = &sh.protection {
             let _ = write!(
                 out,
                 "<loext:table-protection loext:select-protected-cells=\"{}\" loext:select-unprotected-cells=\"{}\"/>",
-                p.is_none_or(|p| p.select_locked),
-                p.is_none_or(|p| p.select_unlocked)
+                p.select_locked, p.select_unlocked
             );
         }
         self.shapes(sh, out);

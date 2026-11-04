@@ -25,8 +25,19 @@ pub(crate) struct ChartDraft {
     pub y_title: Option<String>,
 }
 
-/// `Data.A2:Data.B4` (one ODF range address) as an absolute A1 reference `Data!$A$2:$B$4`.
-fn range_text(addr: &str) -> Option<String> {
+/// An ODF range address list (`Data.A2:Data.B4`, or several separated by spaces) as absolute
+/// A1 text (`Data!$A$2:$B$4`, a union in parentheses for several).
+fn range_text(list: &str) -> Option<String> {
+    let parts: Vec<String> = formula::split_addresses(list).into_iter().map(one_range).collect::<Option<_>>()?;
+    match parts.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        _ => Some(format!("({})", parts.join(","))),
+    }
+}
+
+/// One ODF range address as an absolute A1 reference.
+fn one_range(addr: &str) -> Option<String> {
     let mut r = formula::parse_odf_ref(addr)?;
     // `Title.B1:Title.B1` names one cell.
     if let gridcraft_formula::RefKind::Range(a, b) = r.kind
@@ -179,11 +190,24 @@ pub(crate) fn read(root: &Elem) -> Option<ChartDraft> {
 
 // ------------------------------------------------------------------------------------- writing
 
-/// An A1 reference (`Sheet1!$B$2:$B$5`) as an ODF range address (`Sheet1.B2:Sheet1.B5`).
+/// An A1 reference (`Sheet1!$B$2:$B$5`), or a union of them in parentheses, as an ODF range
+/// address list (`$Sheet1.$B$2:.$B$5`, space-separated).
 fn odf_range(a1: &str) -> Option<String> {
     let e = gridcraft_formula::parse(a1.trim_start_matches('=')).ok()?;
-    let gridcraft_formula::Expr::Ref(r) = e else { return None };
-    Some(formula::address(&r))
+    let mut refs = Vec::new();
+    let mut pending = vec![&e];
+    while let Some(x) = pending.pop() {
+        match x {
+            gridcraft_formula::Expr::Ref(r) => refs.push(formula::address(r)),
+            gridcraft_formula::Expr::Paren(inner) => pending.push(inner),
+            gridcraft_formula::Expr::Binary(gridcraft_formula::BinOp::Union, a, b) => {
+                pending.push(b);
+                pending.push(a);
+            }
+            _ => return None,
+        }
+    }
+    (!refs.is_empty()).then(|| refs.join(" "))
 }
 
 /// The class and chart properties of a kind: (class, vertical, stacked, percent, markers).
@@ -397,5 +421,14 @@ mod tests {
         assert_eq!(d.series[0].categories.as_deref(), Some("Data!$A$2:$A$4"));
         assert_eq!(d.series[0].name.as_deref(), Some("Data!$B$1"));
         assert_eq!(d.series[0].color, Some(gridcraft_model::Color::Rgb(0x004586)));
+    }
+
+    /// A series over several ranges reads as their union, and writes back as the list.
+    #[test]
+    fn range_lists_are_unions() {
+        assert_eq!(range_text("Data.A1:Data.A3 Data.C1:Data.C3").as_deref(), Some("(Data!$A$1:$A$3,Data!$C$1:$C$3)"));
+        assert_eq!(range_text("Data.B2").as_deref(), Some("Data!$B$2"));
+        assert_eq!(odf_range("(Data!$A$1:$A$3,Data!$C$1:$C$3)").as_deref(), Some("$Data.$A$1:.$A$3 $Data.$C$1:.$C$3"));
+        assert_eq!(range_text(&odf_range("(Data!$A$1:$A$3,Data!$C$1:$C$3)").unwrap_or_default()).as_deref(), Some("(Data!$A$1:$A$3,Data!$C$1:$C$3)"));
     }
 }

@@ -24,11 +24,15 @@ pub(crate) struct ShapeDraft {
     pub format: ShapeFormat,
 }
 
-/// Graphic, paragraph and text styles by name, for shapes.
+/// Graphic, paragraph and text styles by name, for shapes, and the default graphic style.
 #[derive(Default)]
 pub(crate) struct DrawStyles {
     pub styles: HashMap<String, Elem>,
+    default: Option<Elem>,
 }
+
+/// The most parents a graphic style's chain is followed through.
+const MAX_STYLE_DEPTH: usize = 16;
 
 impl DrawStyles {
     pub fn add(&mut self, list: &Elem) {
@@ -39,11 +43,23 @@ impl DrawStyles {
                 self.styles.insert(n.to_string(), s.clone());
             }
         }
+        if let Some(d) = list.children(Ns::Style, "default-style").find(|d| d.attr(Ns::Style, "family") == Some("graphic")) {
+            self.default = Some(d.clone());
+        }
     }
+
+    /// A graphic property of a shape's style: its own, its parents', or the default style's.
     fn graphic<'a>(&'a self, e: &Elem, name: &str) -> Option<&'a str> {
-        let s = self.styles.get(e.attr(Ns::Draw, "style-name")?)?;
-        let g = s.child(Ns::Style, "graphic-properties")?;
-        g.attr(Ns::Draw, name).or_else(|| g.attr(Ns::Svg, name))
+        let prop = |s: &'a Elem| s.child(Ns::Style, "graphic-properties").and_then(|g| g.attr(Ns::Draw, name).or_else(|| g.attr(Ns::Svg, name)));
+        let mut style = e.attr(Ns::Draw, "style-name").and_then(|n| self.styles.get(n));
+        for _ in 0..MAX_STYLE_DEPTH {
+            let Some(s) = style else { break };
+            if let Some(v) = prop(s) {
+                return Some(v);
+            }
+            style = s.attr(Ns::Style, "parent-style-name").and_then(|n| self.styles.get(n));
+        }
+        self.default.as_ref().and_then(prop)
     }
     fn text_props<'a>(&'a self, name: Option<&str>) -> Option<&'a Elem> {
         self.styles.get(name?)?.child(Ns::Style, "text-properties")
@@ -107,7 +123,7 @@ pub(crate) fn read(e: &Elem, styles: &DrawStyles) -> Option<ShapeDraft> {
     let fill = match (styles.graphic(e, "fill"), styles.graphic(e, "fill-color")) {
         (Some("none"), _) => Color::Auto,
         (_, Some(c)) => color(c).unwrap_or(Color::Auto),
-        // LibreOffice's default shape fill.
+        // LibreOffice's default shape fill, when the file states no default.
         _ if kind != ShapeKind::TextBox && kind != ShapeKind::Line && kind != ShapeKind::Arrow => Color::Rgb(0x729fcf),
         _ => Color::Auto,
     };
@@ -115,6 +131,7 @@ pub(crate) fn read(e: &Elem, styles: &DrawStyles) -> Option<ShapeDraft> {
     let line = match styles.graphic(e, "stroke-color").and_then(color) {
         Some(c) => c,
         None if kind == ShapeKind::TextBox => Color::Auto,
+        // LibreOffice's default outline, when the file states no default.
         None => Color::Rgb(0x3465a4),
     };
     let (text, p_style, span_style) = text_of(e);
@@ -158,6 +175,8 @@ pub(crate) fn style_xml(name: &str, s: &Shape, theme: &Theme) -> String {
             let _ = write!(g, " draw:stroke=\"solid\" svg:stroke-color=\"{c}\"");
         }
         (false, None) if s.kind == ShapeKind::TextBox => g.push_str(" draw:stroke=\"none\""),
+        // ODF has no automatic stroke colour: an automatic outline is written as the black it
+        // draws as (and reads back as that black).
         (false, None) => g.push_str(" draw:stroke=\"solid\" svg:stroke-color=\"#000000\""),
     }
     if s.kind == ShapeKind::Arrow {
@@ -277,5 +296,18 @@ mod tests {
             assert!(d.format.bold);
             assert_eq!(d.format.font_size, Some(14.0));
         }
+    }
+
+    /// Fill and outline come from the shape's style, its parents, or the default graphic style.
+    #[test]
+    fn graphic_properties_are_inherited() {
+        let doc = r##"<r xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"><office:styles><style:default-style style:family="graphic"><style:graphic-properties svg:stroke-color="#00ff00"/></style:default-style><style:style style:name="Shapes" style:family="graphic"><style:graphic-properties draw:fill-color="#ff0000"/></style:style><style:style style:name="gr1" style:family="graphic" style:parent-style-name="Shapes"><style:graphic-properties draw:textarea-vertical-align="top"/></style:style></office:styles><draw:rect draw:style-name="gr1" svg:width="10pt" svg:height="10pt"/></r>"##;
+        let tree = parse_tree(doc.as_bytes()).unwrap();
+        let mut styles = DrawStyles::default();
+        styles.add(tree.child(Ns::Office, "styles").unwrap());
+        let d = read(tree.child(Ns::Draw, "rect").unwrap(), &styles).unwrap();
+        assert_eq!(d.fill, Color::Rgb(0xff0000));
+        assert_eq!(d.line, Color::Rgb(0x00ff00));
+        assert_eq!(d.format.anchor, Some(ShapeTextAnchor::Top));
     }
 }
