@@ -324,6 +324,7 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Excel Workbook (*.xlsx)" => "Excel-Arbeitsmappe (*.xlsx)",
         "CSV UTF-8 (Comma delimited) (*.csv)" => "CSV UTF-8 (durch Trennzeichen getrennt) (*.csv)",
         "Web Page (*.html)" => "Webseite (*.html)",
+        "OpenDocument Spreadsheet (*.ods)" => "OpenDocument-Tabelle (*.ods)",
         "PDF (*.pdf)" => "PDF-Datei (*.pdf)",
         "Download" => "Herunterladen",
         "A CSV file, web page or PDF is a copy: the workbook keeps its own file." => {

@@ -101,7 +101,7 @@ performance 8, stability 8, localization 4, hardware 2, platforms 2, ecosystem 2
 | Dimension | Weight | Ready | Hours | Evidence |
 |---|---|---|---|---|
 | Features | 45 | ~59% | 300–485 | Table above |
-| File formats | 15 | ~50% | 80–120 | XLSX read/write is broad but unproven on a real corpus and in Excel; XLSB and ODS are values-only import; no XLS, XML Spreadsheet 2003, SYLK, DIF, PRN; VBA dropped; 100 MB XLSX fails (#175). [file-format-parity.md](file-format-parity.md) |
+| File formats | 15 | ~50% | 80–120 | XLSX read/write is broad but unproven on a real corpus and in Excel; XLSB is values-only import; ODS reads and writes in full but charts (99.4% agreement with LibreOffice on its ODS corpus); no XLS, XML Spreadsheet 2003, SYLK, DIF, PRN; VBA dropped; 100 MB XLSX fails (#175). [file-format-parity.md](file-format-parity.md) |
 | UI/UX fidelity | 12 | ~55% | 50–80 | Excel-style ribbon, galleries, dialogs, formula bar, status bar; 59 commands with shortcuts vs Excel's 200+; key tips on part of the Home tab only; short context menu; a native window per workbook window on the desktop (one on the web). [ui-parity.md](ui-parity.md) |
 | Performance | 8 | ~35% | 35–55 | [Performance](#performance) |
 | Stability | 8 | ~60% | 15–25 | Never-crash rules enforced by lint, every command fuzzed with hostile params, random command sequences fuzzed against undo/redo, XLSX round-trip and full-recalc invariants, last-resort guard in `Session::execute`. Field reports: Windows Intel GPU crash (#120), error on close (#117), freeze opening from Finder (#166), screen flashing (#76) |

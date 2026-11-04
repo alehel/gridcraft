@@ -205,6 +205,14 @@ impl ZipOut {
         self.zip.write_all(data).map_err(|e| IoError::Zip(e.to_string()))?;
         Ok(())
     }
+    /// Adds an entry without compression (ODF's `mimetype`, which readers find by its bytes).
+    pub fn add_stored(&mut self, name: &str, data: &[u8]) -> Result<(), IoError> {
+        let opts =
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).last_modified_time(zip::DateTime::default());
+        self.zip.start_file(name, opts).map_err(|e| IoError::Zip(e.to_string()))?;
+        self.zip.write_all(data).map_err(|e| IoError::Zip(e.to_string()))?;
+        Ok(())
+    }
     pub fn finish(self) -> Result<Vec<u8>, IoError> {
         self.zip.finish().map(|c| c.into_inner()).map_err(|e| IoError::Zip(e.to_string()))
     }

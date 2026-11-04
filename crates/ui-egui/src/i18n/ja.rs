@@ -391,6 +391,7 @@ pub(super) const CORE: &[(&str, &str)] = &[
     ("Excel Workbook (*.xlsx)", "Excel ブック (*.xlsx)"),
     ("CSV UTF-8 (Comma delimited) (*.csv)", "CSV UTF-8 (コンマ区切り) (*.csv)"),
     ("Web Page (*.html)", "Web ページ (*.html)"),
+    ("OpenDocument Spreadsheet (*.ods)", "OpenDocument スプレッドシート (*.ods)"),
     ("PDF (*.pdf)", "PDF ファイル (*.pdf)"),
     ("Download", "ダウンロード"),
     (

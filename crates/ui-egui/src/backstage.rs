@@ -130,10 +130,16 @@ pub struct Backstage {
     recent: RecentFiles,
 }
 
-/// Save As file types: (extension, label). The first is the workbook itself; the others are
-/// exports that leave the workbook's own file and unsaved state alone.
-pub const SAVE_TYPES: [(&str, &str); 4] =
-    [("xlsx", "Excel Workbook (*.xlsx)"), ("csv", "CSV UTF-8 (Comma delimited) (*.csv)"), ("html", "Web Page (*.html)"), ("pdf", "PDF (*.pdf)")];
+/// Save As file types: (extension, label). The first two save the workbook itself (an `.ods`
+/// becomes its file, as an `.xlsx` does); the others are exports that leave the workbook's own
+/// file and unsaved state alone.
+pub const SAVE_TYPES: [(&str, &str); 5] = [
+    ("xlsx", "Excel Workbook (*.xlsx)"),
+    ("ods", "OpenDocument Spreadsheet (*.ods)"),
+    ("csv", "CSV UTF-8 (Comma delimited) (*.csv)"),
+    ("html", "Web Page (*.html)"),
+    ("pdf", "PDF (*.pdf)"),
+];
 
 impl Backstage {
     pub fn new(page: Page) -> Backstage {
@@ -740,6 +746,8 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
         return false;
     }
     let id = match fmt {
+        // An OpenDocument file is the workbook saved in another format, not an export.
+        "ods" => "file.saveAs",
         "pdf" => "file.exportPdf",
         "csv" => "file.exportCsv",
         "html" => "file.exportHtml",

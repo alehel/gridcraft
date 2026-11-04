@@ -3,7 +3,7 @@
 use gridcraft_core::{CellRef, RangeRef, Value};
 
 use super::make_zip;
-use crate::{Format, IoError, read_ods, read_xlsx, sniff, write_xlsx};
+use crate::{Format, IoError, read_ods, read_xlsx, sniff, write_ods, write_xlsx};
 
 const MIME: &[u8] = b"application/vnd.oasis.opendocument.spreadsheet";
 const MANIFEST: &[u8] = br#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/></manifest:manifest>"#;
@@ -40,42 +40,43 @@ fn ods_namespace_declaration_bomb_is_rejected() {
 }
 
 #[test]
-fn ods_typed_values_and_formula_caches_are_constants_and_survive_xlsx() {
+fn ods_typed_values_and_formulas_survive_xlsx() {
     let bytes = row(r#"
         <table:table-cell office:value-type="float" office:value="42.5"/>
         <table:table-cell office:value-type="boolean" office:boolean-value="true"/>
         <table:table-cell office:value-type="percentage" office:value="0.25"/>
         <table:table-cell office:value-type="currency" office:currency="USD" office:value="19.99"/>
         <table:table-cell office:value-type="string" office:string-value="literal =1+1"/>
-        <table:table-cell table:formula="of:=A1*2" office:value-type="float" office:value="85"><text:p>85</text:p></table:table-cell>
+        <table:table-cell table:formula="of:=[.A1]*2" office:value-type="float" office:value="85"><text:p>85</text:p></table:table-cell>
         <table:table-cell table:formula="of:=1/0" office:value-type="string"><text:p>#DIV/0!</text:p></table:table-cell>
         <table:table-cell table:formula="of:=UNKNOWN()"/>
         <table:table-cell office:value-type="float" office:value="NaN"><text:p>unavailable</text:p></table:table-cell>
         <table:table-cell office:value-type="boolean" office:boolean-value="0"/>
     "#);
     let (wb, report) = read_ods(&bytes).unwrap();
-    assert!(report.warnings.iter().any(|w| w.contains("data-only") && w.contains("will not recalculate")));
-    assert!(report.warnings.iter().any(|w| w.contains("unsupported or missing")));
+    assert!(report.warnings.iter().any(|w| w.contains("unsupported or malformed")));
     let expected = [
-        Value::Number(42.5),
-        Value::Bool(true),
-        Value::Number(0.25),
-        Value::Number(19.99),
-        text("literal =1+1"),
-        Value::Number(85.0),
-        text("#DIV/0!"),
-        text("[Unavailable ODS formula result]"),
-        text("unavailable"),
-        Value::Bool(false),
+        (Value::Number(42.5), None),
+        (Value::Bool(true), None),
+        (Value::Number(0.25), None),
+        (Value::Number(19.99), None),
+        (text("literal =1+1"), None),
+        (Value::Number(85.0), Some("A1*2")),
+        (Value::Error(gridcraft_core::CellError::Div0), Some("1/0")),
+        (Value::Empty, Some("UNKNOWN()")),
+        (text("unavailable"), None),
+        (Value::Bool(false), None),
     ];
-    for (c, value) in expected.iter().enumerate() {
-        assert_eq!(&wb.sheets[0].value(CellRef::new(0, c as u32)), value);
-        assert!(wb.sheets[0].cell(CellRef::new(0, c as u32)).unwrap().formula.is_none());
-    }
-    let (reopened, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
-    for (c, value) in expected.iter().enumerate() {
-        assert_eq!(&reopened.sheets[0].value(CellRef::new(0, c as u32)), value);
-    }
+    let check = |wb: &gridcraft_model::Workbook| {
+        for (c, (value, formula)) in expected.iter().enumerate() {
+            let at = CellRef::new(0, c as u32);
+            assert_eq!(&wb.sheets[0].value(at), value, "column {c}");
+            assert_eq!(wb.sheets[0].cell(at).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), *formula, "column {c}");
+        }
+    };
+    check(&wb);
+    check(&read_xlsx(&write_xlsx(&wb).unwrap()).unwrap().0);
+    check(&read_ods(&write_ods(&wb).unwrap()).unwrap().0);
 }
 
 #[test]
@@ -133,8 +134,9 @@ fn ods_dates_and_durations_use_formats_and_unsupported_values_stay_text() {
         assert_eq!(s.value(CellRef::new(0, c)), text(value));
     }
     assert_eq!(wb.styles.get(s.cell(CellRef::new(0, 0)).unwrap().style).num_fmt.0.as_ref(), "yyyy-mm-dd");
-    assert_eq!(wb.styles.get(s.cell(CellRef::new(0, 2)).unwrap().style).num_fmt.0.as_ref(), "[h]:mm:ss.000");
-    assert_eq!(report.warnings.len(), 2);
+    assert_eq!(wb.styles.get(s.cell(CellRef::new(0, 1)).unwrap().style).num_fmt.0.as_ref(), "yyyy-mm-dd hh:mm:ss");
+    assert_eq!(wb.styles.get(s.cell(CellRef::new(0, 2)).unwrap().style).num_fmt.0.as_ref(), "[h]:mm:ss");
+    assert!(!report.warnings.is_empty());
 }
 
 #[test]
@@ -182,36 +184,40 @@ fn ods_rejects_bad_packages_encryption_and_truncated_xml() {
 fn ods_expansion_bounds_stop_small_repeat_bombs() {
     for cells in [
         r#"<table:table-cell table:number-columns-repeated="4294967296"/>"#,
-        r#"<table:table-cell table:number-columns-repeated="4294967295" office:value-type="float" office:value="1"/>"#,
         r#"<table:table-cell table:number-columns-repeated="0"/>"#,
-        r#"<table:table-cell table:number-columns-repeated="16384"/><table:table-cell office:value-type="float" office:value="1"/>"#,
-        r#"<table:table-cell table:number-columns-repeated="16384"/><table:table-cell table:number-columns-spanned="2"/>"#,
         r#"<table:table-cell table:number-columns-repeated="16384" table:number-columns-spanned="2" office:value-type="float" office:value="1"/>"#,
-        r#"<table:table-cell office:value-type="string"><text:p><text:s text:c="4294967295"/></text:p></table:table-cell>"#,
     ] {
         assert!(read_ods(&row(cells)).is_err(), "{cells}");
     }
+    // Cells past the sheet's edge are clipped, as LibreOffice clips them, with a warning.
+    for cells in [
+        r#"<table:table-cell table:number-columns-repeated="4294967295" office:value-type="float" office:value="1"/>"#,
+        r#"<table:table-cell table:number-columns-repeated="16384"/><table:table-cell office:value-type="float" office:value="1"/>"#,
+    ] {
+        let (wb, report) = read_ods(&row(cells)).unwrap();
+        assert!(wb.sheets[0].cells.len() <= 16_384, "{cells}");
+        assert!(report.warnings.iter().any(|w| w.contains("beyond column XFD")), "{cells}");
+    }
+    // Explicit spaces are capped with the cell's text.
+    let (wb, _) =
+        read_ods(&row(r#"<table:table-cell office:value-type="string"><text:p><text:s text:c="4294967295"/></text:p></table:table-cell>"#)).unwrap();
+    assert!(matches!(wb.sheets[0].value(CellRef::new(0, 0)), Value::Text(t) if t.len() <= 1024 * 1024));
+    // More than four million cells, or 256 MiB of text, are refused before they are stored.
     let cells = ods(
-        r#"<table:table table:name="Data"><table:table-row table:number-rows-repeated="1048576"><table:table-cell office:value-type="float" office:value="1"/></table:table-row></table:table>"#,
+        r#"<table:table table:name="Data"><table:table-row table:number-rows-repeated="1048576"><table:table-cell table:number-columns-repeated="5" office:value-type="float" office:value="1"/></table:table-row></table:table>"#,
     );
     assert!(matches!(read_ods(&cells), Err(IoError::TooLarge(_))));
     let text = format!(
-        r#"<table:table table:name="Data"><table:table-row table:number-rows-repeated="100000"><table:table-cell office:value-type="string" office:string-value="{}"/></table:table-row></table:table>"#,
+        r#"<table:table table:name="Data"><table:table-row table:number-rows-repeated="300000"><table:table-cell office:value-type="string" office:string-value="{}"/></table:table-row></table:table>"#,
         "x".repeat(1024)
     );
     assert!(matches!(read_ods(&ods(&text)), Err(IoError::TooLarge(_))));
-    // One row of cells each just under the 1 MiB cell limit, past 64 MiB in all: refused while
-    // the row is read, before it holds them all. The row's end is never reached.
-    let long = format!(r#"<table:table-cell office:value-type="string" office:string-value="{}"/>"#, "x".repeat(1024 * 1024 - 1));
-    let cells = ods(&format!(r#"<table:table table:name="Data"><table:table-row>{}"#, long.repeat(65)));
-    assert!(matches!(read_ods(&cells), Err(IoError::TooLarge(_))));
-    // A row repeated once more than its cells' text allows is refused too, and one that fits reads.
     let cell = format!(r#"<table:table-cell office:value-type="string" office:string-value="{}"/>"#, "y".repeat(1024));
     let rows = |n: u32| {
         ods(&format!(r#"<table:table table:name="Data"><table:table-row table:number-rows-repeated="{n}">{cell}</table:table-row></table:table>"#))
     };
-    assert!(read_ods(&rows(65_536)).is_ok());
-    assert!(matches!(read_ods(&rows(65_537)), Err(IoError::TooLarge(_))));
+    assert!(read_ods(&rows(1000)).is_ok());
+    assert!(matches!(read_ods(&rows(262_145)), Err(IoError::TooLarge(_))));
 }
 
 #[test]
@@ -242,9 +248,15 @@ fn ods_extension_error_cache_never_imports_its_placeholder_zero() {
     let bytes = row(
         r#"<table:table-cell xmlns:calcext="urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0" calcext:value-type="error" office:value-type="float" office:value="0" table:formula="of:=1/0"><text:p>#DIV/0!</text:p></table:table-cell>"#,
     );
-    let (wb, report) = read_ods(&bytes).unwrap();
-    assert_eq!(wb.sheets[0].value(CellRef::new(0, 0)), text("#DIV/0!"));
-    assert!(report.warnings.iter().any(|w| w.contains("unsupported or missing")));
+    let (wb, _) = read_ods(&bytes).unwrap();
+    assert_eq!(wb.sheets[0].value(CellRef::new(0, 0)), Value::Error(gridcraft_core::CellError::Div0));
+    // LibreOffice's numbered errors read as the Excel error it saves them as.
+    let bytes = row(
+        r#"<table:table-cell xmlns:calcext="urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0" calcext:value-type="error" office:value-type="string" table:formula="of:=[.B1]/0"><text:p>Err:532</text:p></table:table-cell><table:table-cell table:formula="of:=(1" office:value-type="string"><text:p>Err:508</text:p></table:table-cell>"#,
+    );
+    let (wb, _) = read_ods(&bytes).unwrap();
+    assert_eq!(wb.sheets[0].value(CellRef::new(0, 0)), Value::Error(gridcraft_core::CellError::Div0));
+    assert_eq!(wb.sheets[0].value(CellRef::new(0, 1)), Value::Error(gridcraft_core::CellError::Value));
 }
 
 #[test]
@@ -258,9 +270,11 @@ fn ods_blank_repeats_past_the_sheet_edge_are_clipped() {
     let (wb, _) = read_ods(&bytes).unwrap();
     assert_eq!(wb.sheets[0].cells.len(), 1);
     assert_eq!(wb.sheets[0].value(CellRef::new(0, 0)), Value::Number(1.0));
-    // Data after the clipped edge is still an error, never silently dropped.
+    // Data after the edge is dropped as LibreOffice drops it, never silently: a warning says so.
     let late = ods(
         r#"<table:table table:name="Data"><table:table-row table:number-rows-repeated="1048576"><table:table-cell/></table:table-row><table:table-row><table:table-cell office:value-type="float" office:value="1"/></table:table-row></table:table>"#,
     );
-    assert!(matches!(read_ods(&late), Err(IoError::TooLarge(_))));
+    let (wb, report) = read_ods(&late).unwrap();
+    assert!(wb.sheets[0].cells.is_empty());
+    assert!(report.warnings.iter().any(|w| w.contains("beyond row 1,048,576")));
 }

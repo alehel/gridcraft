@@ -290,6 +290,7 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Excel Workbook (*.xlsx)" => "Βιβλίο εργασίας Excel (*.xlsx)",
         "CSV UTF-8 (Comma delimited) (*.csv)" => "CSV UTF-8 (οριοθέτηση με κόμματα) (*.csv)",
         "Web Page (*.html)" => "Ιστοσελίδα (*.html)",
+        "OpenDocument Spreadsheet (*.ods)" => "Υπολογιστικό φύλλο OpenDocument (*.ods)",
         "PDF (*.pdf)" => "PDF (*.pdf)",
         "Download" => "Λήψη",
         "Save the workbook under another name or in another folder." => "Αποθηκεύστε το βιβλίο εργασίας με άλλο όνομα ή σε άλλον φάκελο.",

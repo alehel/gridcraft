@@ -2477,51 +2477,58 @@ fn ods_fixture() -> Vec<u8> {
 }
 
 #[test]
-fn ods_import_keeps_cached_values_and_reports_limits() {
+fn ods_opens_with_formulas_and_saves_back_as_ods() {
     let bytes = ods_fixture();
     assert_eq!(gridcraft_xlsx::sniff(&bytes), gridcraft_xlsx::Format::Ods);
-    for name in ["source.ods", "source.xlsx"] {
-        let mut s = s();
-        let r = s.execute("file.open", json!({"name": name, "base64": crate::io::base64_encode(&bytes)})).unwrap();
-        assert!(!r["warnings"].as_array().unwrap().is_empty());
-        assert!(s.take_ui_requests().iter().any(|r| matches!(r, crate::UiRequest::Message(_))));
-        assert!(s.doc().unwrap().path.is_none());
-        assert!(s.doc().unwrap().display_title().ends_with(".xlsx"));
-        assert_eq!(v(&s, "A1"), Value::Number(42.0));
-        assert_eq!(v(&s, "B1"), Value::from("Original data"));
-        assert!(s.doc().unwrap().wb.active().unwrap().cell(CellRef::parse("A1").unwrap()).unwrap().formula.is_none());
-        let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
-        s.execute("file.open", json!({"name": "imported.xlsx", "base64": saved["base64"]})).unwrap();
-        assert_eq!(v(&s, "A1"), Value::Number(42.0));
-    }
+    let mut s = s();
+    s.execute("file.open", json!({"name": "source.ods", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    assert_eq!(s.doc().unwrap().display_title(), "source.ods");
+    // The formula is live: it recalculates over the text in B1 instead of keeping the file's 42.
+    assert_eq!(v(&s, "A1"), Value::Number(0.0));
+    assert_eq!(v(&s, "B1"), Value::from("Original data"));
+    let f = s.doc().unwrap().wb.active().unwrap().cell(CellRef::parse("A1").unwrap()).unwrap().formula.clone().unwrap();
+    assert_eq!(f.text, "SUM(B1:B2)");
+    // Saved as ODS and read back, the formula and values stay.
+    let saved = s.execute("file.saveBytes", json!({"format": "ods"})).unwrap();
+    let ods = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
+    assert_eq!(gridcraft_xlsx::sniff(&ods), gridcraft_xlsx::Format::Ods);
+    s.execute("file.open", json!({"name": "again.ods", "base64": saved["base64"]})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::from("Original data"));
+    assert_eq!(
+        s.doc().unwrap().wb.active().unwrap().cell(CellRef::parse("A1").unwrap()).unwrap().formula.as_ref().map(|f| f.text.clone()),
+        Some("SUM(B1:B2)".into())
+    );
 }
 
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
-fn ods_import_never_reuses_source_as_save_target() {
+fn ods_saves_in_place_but_a_disguised_package_is_imported() {
     let nonce = unique_nonce();
     let dir = std::env::temp_dir().join(format!("gridcraft-ods-{}-{nonce}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();
     let bytes = ods_fixture();
-    for name in ["source.ods", "disguised.xlsx"] {
-        let path = dir.join(name);
-        std::fs::write(&path, &bytes).unwrap();
-        let mut s = s();
-        s.execute("file.open", json!({"path": path})).unwrap();
-        s.take_ui_requests();
-        s.execute("cell.set", json!({"cell": "A1", "input": "43"})).unwrap();
-        s.execute("file.save", json!({})).unwrap();
-        assert!(s.take_ui_requests().iter().any(|r| matches!(r, crate::UiRequest::Dialog(name, _) if name == "saveAs")));
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        assert!(s.execute("file.saveAs", json!({"path": dir.join("source.ods")})).is_err());
-        assert!(s.execute("file.saveBytes", json!({"format": "ods"})).is_err());
-        let output = dir.join("converted.xlsx");
-        s.execute("file.saveAs", json!({"path": output})).unwrap();
-        assert!(!s.doc().unwrap().is_dirty());
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-        s.execute("file.open", json!({"name": "converted.xlsx", "base64": crate::io::base64_encode(&std::fs::read(output).unwrap())})).unwrap();
-        assert_eq!(v(&s, "A1"), Value::Number(43.0));
-    }
+    // An .ods file is the document's own file: Save writes ODS back to it.
+    let path = dir.join("source.ods");
+    std::fs::write(&path, &bytes).unwrap();
+    let mut first = s();
+    first.execute("file.open", json!({"path": path})).unwrap();
+    first.execute("cell.set", json!({"cell": "B2", "input": "1"})).unwrap();
+    first.execute("file.save", json!({})).unwrap();
+    assert!(!first.doc().unwrap().is_dirty());
+    let written = std::fs::read(&path).unwrap();
+    assert_eq!(gridcraft_xlsx::sniff(&written), gridcraft_xlsx::Format::Ods);
+    let (wb, _) = gridcraft_xlsx::read_ods(&written).unwrap();
+    assert_eq!(wb.sheets[0].value(CellRef::parse("B2").unwrap()), Value::Number(1.0));
+    // ODS content under another name never becomes the save target.
+    let disguised = dir.join("disguised.xlsx");
+    std::fs::write(&disguised, &bytes).unwrap();
+    let mut t = s();
+    t.execute("file.open", json!({"path": disguised})).unwrap();
+    t.take_ui_requests();
+    t.execute("cell.set", json!({"cell": "A1", "input": "43"})).unwrap();
+    t.execute("file.save", json!({})).unwrap();
+    assert!(t.take_ui_requests().iter().any(|r| matches!(r, crate::UiRequest::Dialog(name, _) if name == "saveAs")));
+    assert_eq!(std::fs::read(&disguised).unwrap(), bytes);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

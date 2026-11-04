@@ -156,8 +156,9 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - AccessKit on, but no accessible grid/ribbon tree, no high contrast, no checker. **Estimate:** 12–18 h.
   [ui-parity.md](ui-parity.md#accessibility)
 
-### 19. XLSB/ODS beyond values; minor formats (FF)
-- XLSB and ODS import values only, no write; no `.prn`, `.dif`, XML Spreadsheet 2003 (`.slk` imports values, formulas, number formats and widths); CSV
+### 19. XLSB beyond values; ODS charts; minor formats (FF)
+- XLSB imports values only, no write; ODS opens and saves in full except charts, rich-text runs and
+  external references; no `.prn`, `.dif`, XML Spreadsheet 2003 (`.slk` imports values, formulas, number formats and widths); CSV
   writes raw instead of displayed values; templates saved with the workbook content type.
   **Estimate:** 15–23 h.
 

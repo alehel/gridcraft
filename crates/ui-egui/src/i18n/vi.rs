@@ -392,6 +392,7 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Excel Workbook (*.xlsx)" => "Sổ làm việc Excel (*.xlsx)",
         "CSV UTF-8 (Comma delimited) (*.csv)" => "CSV UTF-8 (phân cách bằng dấu phẩy) (*.csv)",
         "Web Page (*.html)" => "Trang web (*.html)",
+        "OpenDocument Spreadsheet (*.ods)" => "Bảng tính OpenDocument (*.ods)",
         "PDF (*.pdf)" => "PDF (*.pdf)",
         "Download" => "Tải xuống",
         "A CSV file, web page or PDF is a copy: the workbook keeps its own file." => {

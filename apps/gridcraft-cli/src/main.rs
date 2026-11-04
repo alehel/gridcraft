@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 
 const USAGE: &str = "usage:
   gridcraft-cli info <file> [--json]                      sheets, used ranges, tables, charts, names
-  gridcraft-cli convert <in> <out> [--sheet NAME]         xlsx/csv/tsv/json/html/pdf by extension
+  gridcraft-cli convert <in> <out> [--sheet NAME]         xlsx/ods/csv/tsv/json/html/pdf by extension
   gridcraft-cli eval <formula> [--in FILE] [--sheet S] [--cell A1] [--json]
   gridcraft-cli cat <file> [--range A1:D20] [--sheet S] [--formulas] [--csv]
   gridcraft-cli check <file-or-dir>... [--json] [--tolerance 1e-9] [--max-report N]
