@@ -26,9 +26,7 @@ pub(crate) struct ChartDraft {
 
 /// `Data.A2:Data.B4` (one ODF range address) as an absolute A1 reference `Data!$A$2:$B$4`.
 fn range_text(addr: &str) -> Option<String> {
-    let a1 = formula::reference(addr.trim());
-    let e = gridcraft_formula::parse(&a1).ok()?;
-    let gridcraft_formula::Expr::Ref(mut r) = e else { return None };
+    let mut r = formula::parse_odf_ref(addr)?;
     // `Title.B1:Title.B1` names one cell.
     if let gridcraft_formula::RefKind::Range(a, b) = r.kind
         && a.row == b.row
@@ -184,9 +182,7 @@ pub(crate) fn read(root: &Elem) -> Option<ChartDraft> {
 fn odf_range(a1: &str) -> Option<String> {
     let e = gridcraft_formula::parse(a1.trim_start_matches('=')).ok()?;
     let gridcraft_formula::Expr::Ref(r) = e else { return None };
-    let mut t = String::new();
-    formula::write_ref(&mut t, &r);
-    Some(t.trim_start_matches('[').trim_end_matches(']').to_string())
+    Some(formula::address(&r))
 }
 
 /// The class and chart properties of a kind: (class, vertical, stacked, percent, markers).

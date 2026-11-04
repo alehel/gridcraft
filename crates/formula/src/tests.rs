@@ -567,3 +567,33 @@ fn column_starting_with_at_round_trips() {
         assert_eq!(parse(&text).ok(), Some(Expr::Struct(s)), "printed as {text}");
     }
 }
+
+/// Another syntax's tokens parse with this grammar: a pre-read reference, `~` as a union
+/// anywhere, and a space as the intersection.
+#[test]
+fn parse_tokens_reads_another_syntaxs_tokens() {
+    use crate::lexer::{Tok, Token};
+    let r = |col| Tok::Ref(Reference { sheet: SheetSel::Current, kind: RefKind::Cell(Anchor { row: 0, col, row_abs: false, col_abs: false }) });
+    let toks = |ts: Vec<Tok>| ts.into_iter().map(|tok| Token { tok, start: 0, end: 0 }).collect::<Vec<_>>();
+    let e = crate::parse_tokens(toks(vec![Tok::Func("SUM".into()), r(0), Tok::Op("~"), r(1), Tok::RParen])).unwrap();
+    assert!(matches!(&e, Expr::Call(_, args) if matches!(args.as_slice(), [Expr::Binary(BinOp::Union, ..)])));
+    let e = crate::parse_tokens(toks(vec![r(0), Tok::Space, r(1)])).unwrap();
+    assert!(matches!(e, Expr::Binary(BinOp::Intersect, ..)));
+}
+
+/// A dialect changes only what it states; the rest prints as A1.
+#[test]
+fn print_with_a_dialect() {
+    struct Semis;
+    impl crate::Dialect for Semis {
+        fn separators(&self) -> (char, char, char) {
+            (';', ';', '|')
+        }
+        fn boolean(&self, b: bool) -> &'static str {
+            if b { "TRUE()" } else { "FALSE()" }
+        }
+    }
+    let e = crate::parse("IF(A1,{1,2;3,4},TRUE)").unwrap();
+    assert_eq!(crate::print_with(&e, &Semis), "IF(A1;{1;2|3;4};TRUE())");
+    assert_eq!(crate::print(&e), "IF(A1,{1,2;3,4},TRUE)");
+}

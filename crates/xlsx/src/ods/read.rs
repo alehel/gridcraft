@@ -1085,9 +1085,7 @@ impl Import {
         }
         if let Some(pr) = &st.print_ranges {
             let first = formula::split_addresses(pr).first().copied().unwrap_or_default();
-            if let Ok(e) = gridcraft_formula::parse(&formula::reference(first))
-                && let gridcraft_formula::Expr::Ref(r) = e
-            {
+            if let Some(r) = formula::parse_odf_ref(first) {
                 st.sheet.print.print_area = Some(r.range());
             }
         }
@@ -1139,19 +1137,23 @@ impl Import {
         for NameDef { name, scope, text, range, base } in std::mem::take(&mut self.names) {
             let formula = if range {
                 // `$Sheet1.$A$1:.$B$2`, possibly several ranges separated by spaces.
-                let parts: Vec<String> =
-                    formula::split_addresses(&text).into_iter().map(|p| formula::reference(p.trim_matches(|c| c == '[' || c == ']'))).collect();
+                let parts: Vec<String> = formula::split_addresses(&text)
+                    .into_iter()
+                    .map(|p| {
+                        formula::parse_odf_ref(p.trim_matches(|c| c == '[' || c == ']'))
+                            .map_or_else(|| "#REF!".into(), |r| gridcraft_formula::printer::reference_a1(&r))
+                    })
+                    .collect();
                 if parts.len() == 1 { parts.into_iter().next().unwrap_or_default() } else { format!("({})", parts.join(",")) }
             } else {
-                match formula::from_odf(&text) {
-                    Some(t) => t,
-                    None => continue,
-                }
+                // An expression that no longer reads (`$#REF!.$C$17`, a deleted sheet) is kept
+                // as the error it calculates to, as LibreOffice keeps it.
+                formula::from_odf(&text).unwrap_or_else(|| "#REF!".into())
             };
             // A reference that no longer reads (a deleted sheet) is an error, as it calculates.
             let formula = if gridcraft_formula::parse(&formula).is_ok() { formula } else { "#REF!".to_string() };
             // Relative references are relative to the base cell in ODF, to A1 in the model.
-            let formula = match base.as_deref().and_then(range_on_sheet).map(|(_, r)| r.start) {
+            let formula = match base.as_deref().and_then(formula::parse_odf_ref).map(|r| r.range().start) {
                 Some(b) if b != CellRef::new(0, 0) => rebase_relative(&formula, b),
                 _ => formula,
             };
@@ -1173,7 +1175,7 @@ impl Import {
 
     fn database_range(&mut self, db: &Elem) {
         let Some(addr) = db.attr(Ns::Table, "target-range-address") else { return };
-        let (sheet, range) = match range_on_sheet(addr) {
+        let (sheet, range) = match formula::range_on_sheet(addr) {
             Some(v) => v,
             None => return,
         };
@@ -1273,7 +1275,7 @@ impl Import {
         let mut priority = 1u32;
         for cf in e.children(Ns::CalcExt, "conditional-format") {
             let Some(addr) = cf.attr(Ns::CalcExt, "target-range-address") else { continue };
-            let ranges: Vec<RangeRef> = formula::split_addresses(addr).into_iter().filter_map(range_on_sheet).map(|(_, r)| r).collect();
+            let ranges: Vec<RangeRef> = formula::split_addresses(addr).into_iter().filter_map(formula::parse_odf_ref).map(|r| r.range()).collect();
             if ranges.is_empty() {
                 continue;
             }
@@ -1643,8 +1645,8 @@ fn read_annotation(a: &Elem) -> Comment {
 fn hyperlink(href: &str, title: Option<&str>) -> Hyperlink {
     let tooltip = title.map(str::to_string);
     if let Some(local) = href.strip_prefix('#') {
-        let target = match super::formula::from_odf(&format!("of:=[{local}]")) {
-            Some(t) if !t.starts_with('#') => t.replace('$', ""),
+        let target = match formula::parse_odf_ref(local) {
+            Some(r) => gridcraft_formula::printer::reference_a1(&r).replace('$', ""),
             // A sheet alone (`#Sheet2`) is its first cell.
             _ if !local.contains('.') => format!("{}!A1", gridcraft_formula::quote_sheet(local.trim_matches('\''))),
             _ => local.to_string(),
@@ -1663,19 +1665,6 @@ pub(crate) fn is_relative(href: &str) -> bool {
         .split_once(':')
         .is_some_and(|(s, _)| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) && s.len() > 1);
     !scheme && !href.starts_with('/') && !href.starts_with('\\') && !href.starts_with('#')
-}
-
-/// `$Sheet1.$A$1:.$C$9` → (sheet, range).
-fn range_on_sheet(addr: &str) -> Option<(String, RangeRef)> {
-    let a1 = formula::reference(addr);
-    let e = gridcraft_formula::parse(&a1).ok()?;
-    let gridcraft_formula::Expr::Ref(r) = e else { return None };
-    let sheet = match &r.sheet {
-        gridcraft_formula::SheetSel::Named(n) => n.clone(),
-        gridcraft_formula::SheetSel::Span(a, _) => a.clone(),
-        gridcraft_formula::SheetSel::Current => String::new(),
-    };
-    Some((sheet, r.range()))
 }
 
 /// `text` with its relative references moved from `base` to A1 (wrapping around the sheet edge,

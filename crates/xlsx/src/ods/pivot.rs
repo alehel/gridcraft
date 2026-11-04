@@ -11,17 +11,6 @@ use super::dom::{Elem, Ns};
 use super::formula;
 use crate::xml::esc_attr;
 
-/// `Sheet.A1:Sheet.E10` → (sheet, range).
-fn address(addr: &str) -> Option<(String, RangeRef)> {
-    let a1 = formula::reference(formula::split_addresses(addr).first().copied()?);
-    let gridcraft_formula::Expr::Ref(r) = gridcraft_formula::parse(&a1).ok()? else { return None };
-    let sheet = match &r.sheet {
-        gridcraft_formula::SheetSel::Named(n) => n.clone(),
-        _ => return None,
-    };
-    Some((sheet, r.range()))
-}
-
 fn func(s: &str) -> PivotFunc {
     match s {
         "count" => PivotFunc::Count,
@@ -106,8 +95,8 @@ fn field(f: &Elem) -> PivotField {
 
 /// A data-pilot table as a PivotTable, with the name of the sheet its report is on.
 pub(crate) fn read(p: &Elem, id: u32) -> Option<(String, PivotTable)> {
-    let (sheet, target) = address(p.attr(Ns::Table, "target-range-address")?)?;
-    let source = p.child(Ns::Table, "source-cell-range").and_then(|s| s.attr(Ns::Table, "cell-range-address")).and_then(address)?;
+    let (sheet, target) = formula::range_on_sheet(p.attr(Ns::Table, "target-range-address")?)?;
+    let source = p.child(Ns::Table, "source-cell-range").and_then(|s| s.attr(Ns::Table, "cell-range-address")).and_then(formula::range_on_sheet)?;
     let src = {
         let a = gridcraft_formula::Anchor { row: source.1.start.row, col: source.1.start.col, row_abs: true, col_abs: true };
         let b = gridcraft_formula::Anchor { row: source.1.end.row, col: source.1.end.col, row_abs: true, col_abs: true };
@@ -191,22 +180,6 @@ pub(crate) fn read(p: &Elem, id: u32) -> Option<(String, PivotTable)> {
     Some((sheet, pt))
 }
 
-fn quote(sheet: &str) -> String {
-    let plain = sheet.chars().all(|c| c.is_alphanumeric() || c == '_') && !sheet.chars().next().is_some_and(|c| c.is_ascii_digit());
-    if plain { sheet.to_string() } else { format!("'{}'", sheet.replace('\'', "''")) }
-}
-
-fn range_address(sheet: &str, r: RangeRef) -> String {
-    let q = quote(sheet);
-    format!(
-        "{q}.{}{}:{q}.{}{}",
-        gridcraft_core::col_to_letters(r.start.col),
-        r.start.row + 1,
-        gridcraft_core::col_to_letters(r.end.col),
-        r.end.row + 1
-    )
-}
-
 fn field_xml(o: &mut String, f: &PivotField, orientation: &str) {
     let _ = write!(
         o,
@@ -267,8 +240,8 @@ pub(crate) fn write(wb: &Workbook) -> String {
                 o,
                 r#"<table:data-pilot-table table:name="{}" table:target-range-address="{}" table:grand-total="{grand}" table:show-filter-button="{button}"><table:source-cell-range table:cell-range-address="{}"/>"#,
                 esc_attr(&pt.name),
-                esc_attr(&range_address(&sh.name, target)),
-                esc_attr(&range_address(&src_sheet, src.range()))
+                esc_attr(&formula::range_address(&sh.name, target)),
+                esc_attr(&formula::range_address(&src_sheet, src.range()))
             );
             for f in &pt.filters {
                 let selected = match f.selected.as_deref() {

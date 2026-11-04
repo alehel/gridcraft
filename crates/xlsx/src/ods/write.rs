@@ -404,7 +404,7 @@ impl<'a> Writer<'a> {
     fn names(&self, scope: Option<usize>) -> String {
         let mut o = String::new();
         let base_sheet = scope.and_then(|i| self.wb.sheets.get(i)).or_else(|| self.wb.sheets.first()).map(|s| s.name.clone()).unwrap_or_default();
-        let base = format!("${}.$A$1", quote(&base_sheet));
+        let base = format!("${}.$A$1", formula::quote_sheet(&base_sheet));
         // ODF has no hidden names: a hidden name is written as a plain one rather than lost, so
         // formulas that use it keep working.
         for n in self.wb.names.iter().filter(|n| n.scope == scope && !n.name.starts_with("_xlnm")) {
@@ -414,9 +414,7 @@ impl<'a> Writer<'a> {
             }
             match &e {
                 gridcraft_formula::Expr::Ref(r) => {
-                    let mut t = String::new();
-                    formula::write_ref(&mut t, r);
-                    let addr = t.trim_start_matches('[').trim_end_matches(']').to_string();
+                    let addr = formula::address(r);
                     let _ = write!(
                         o,
                         r#"<table:named-range table:name="{}" table:base-cell-address="{}" table:cell-range-address="{}"/>"#,
@@ -426,7 +424,12 @@ impl<'a> Writer<'a> {
                     );
                 }
                 _ => {
-                    let text = formula::to_odf(&e, CellRef::new(0, 0), &WbTables(self.wb));
+                    let text = formula::to_odf(
+                        &e,
+                        CellRef::new(0, 0),
+                        scope.and_then(|i| self.wb.sheets.get(i)).map(|s| s.name.as_str()),
+                        &WbTables(self.wb),
+                    );
                     let _ = write!(
                         o,
                         r#"<table:named-expression table:name="{}" table:base-cell-address="{}" table:expression="{}"/>"#,
@@ -447,7 +450,7 @@ impl<'a> Writer<'a> {
             let _ = write!(
                 o,
                 r#"<table:database-range table:name="__Anonymous_Sheet_DB__{i}" table:target-range-address="{}" table:display-filter-buttons="true">"#,
-                esc_attr(&range_address(&sh.name, f.range))
+                esc_attr(&formula::range_address(&sh.name, f.range))
             );
             if !f.criteria.is_empty() {
                 o.push_str("<table:filter><table:filter-and>");
@@ -466,7 +469,7 @@ impl<'a> Writer<'a> {
         let sh: &Sheet = sh;
         let mut attrs = format!(" table:name=\"{}\" table:style-name=\"ta{i}\"", esc_attr(&sh.name));
         if let Some(area) = sh.print.print_area {
-            let _ = write!(attrs, " table:print-ranges=\"{}\"", esc_attr(&range_address(&sh.name, area)));
+            let _ = write!(attrs, " table:print-ranges=\"{}\"", esc_attr(&formula::range_address(&sh.name, area)));
         }
         if let Some(p) = &sh.protection {
             attrs.push_str(" table:protected=\"true\"");
@@ -771,7 +774,7 @@ impl<'a> Writer<'a> {
         if let Some(f) = &c.formula
             && let Some(e) = f.expr()
         {
-            let text = formula::to_odf(&e, pos, &WbTables(self.wb));
+            let text = formula::to_odf(&e, pos, Some(&sh.name), &WbTables(self.wb));
             let _ = write!(out, " table:formula=\"{}\"", esc_attr(&text));
             if let Some(a) = f.array {
                 let _ = write!(out, " table:number-matrix-columns-spanned=\"{}\" table:number-matrix-rows-spanned=\"{}\"", a.width(), a.height());
@@ -793,7 +796,7 @@ impl<'a> Writer<'a> {
             } else {
                 // `'Q1 Sales'!A1` → `#'Q1 Sales'.A1`.
                 match h.target.rsplit_once('!') {
-                    Some((s, a)) => format!("#{}.{}", quote(&gridcraft_core::unquote_sheet(s)), a.replace('$', "")),
+                    Some((s, a)) => format!("#{}.{}", formula::quote_sheet(&gridcraft_core::unquote_sheet(s)), a.replace('$', "")),
                     None => format!("#{}", h.target),
                 }
             }
@@ -939,11 +942,11 @@ impl<'a> Writer<'a> {
         for cf in formats {
             let Some(first) = cf.ranges.first() else { continue };
             let base = first.start;
-            let target: Vec<String> = cf.ranges.iter().map(|r| range_address(&sh.name, *r)).collect();
-            let base_addr = format!("{}.{}{}", quote(&sh.name), col_to_letters(base.col), base.row + 1);
+            let target: Vec<String> = cf.ranges.iter().map(|r| formula::range_address(&sh.name, *r)).collect();
+            let base_addr = format!("{}.{}{}", formula::quote_sheet(&sh.name), col_to_letters(base.col), base.row + 1);
             let expr = |t: &str| -> String {
                 match gridcraft_formula::parse(t.trim_start_matches('=')) {
-                    Ok(e) => formula::to_odf(&e, base, &tables).trim_start_matches("of:=").to_string(),
+                    Ok(e) => formula::to_odf(&e, base, Some(&sh.name), &tables).trim_start_matches("of:=").to_string(),
                     Err(_) => t.to_string(),
                 }
             };
@@ -1093,23 +1096,6 @@ fn picture_extension(mime: &str) -> &str {
     }
 }
 
-fn quote(sheet: &str) -> String {
-    let plain = sheet.chars().all(|c| c.is_alphanumeric() || c == '_') && !sheet.chars().next().is_some_and(|c| c.is_ascii_digit());
-    if plain { sheet.to_string() } else { format!("'{}'", sheet.replace('\'', "''")) }
-}
-
-/// `Sheet1.A1:Sheet1.D10`.
-fn range_address(sheet: &str, r: RangeRef) -> String {
-    let q = quote(sheet);
-    format!(
-        "{q}.{}{}:{q}.{}{}",
-        col_to_letters(r.start.col),
-        r.start.row + 1,
-        col_to_letters(r.end.col.min(MAX_COLS - 1)),
-        r.end.row.min(MAX_ROWS - 1) + 1
-    )
-}
-
 /// An ISO 8601 duration (`PT12H30M00S`) for a day fraction.
 fn duration(days: f64) -> String {
     let total_ms = (days * 86_400_000.0).round() as i64;
@@ -1244,7 +1230,7 @@ fn validation_xml(name: &str, v: &Validation, sheet: &str, base: CellRef, wb: &W
     let tables = WbTables(wb);
     let expr = |t: &str| -> String {
         match gridcraft_formula::parse(t.trim_start_matches('=')) {
-            Ok(e) => formula::to_odf(&e, base, &tables).trim_start_matches("of:=").to_string(),
+            Ok(e) => formula::to_odf(&e, base, Some(sheet), &tables).trim_start_matches("of:=").to_string(),
             Err(_) => t.to_string(),
         }
     };
@@ -1286,7 +1272,7 @@ fn validation_xml(name: &str, v: &Validation, sheet: &str, base: CellRef, wb: &W
         r#" table:allow-empty-cell="{}" table:display-list="{}" table:base-cell-address="{}.{}{}">"#,
         v.allow_blank,
         if v.kind == ValidationKind::List && !v.in_cell_dropdown { "none" } else { "unsorted" },
-        esc_attr(&quote(sheet)),
+        esc_attr(&formula::quote_sheet(sheet)),
         col_to_letters(base.col),
         base.row + 1
     );
