@@ -282,7 +282,7 @@ pub(crate) fn write(c: &Chart, theme: &Theme) -> ChartDoc {
         // chart (one without a kind is drawn as the combo's default for its place), and any
         // other with a kind of its own.
         let own_kind = c.kind == ChartKind::Combo || s.kind.is_some_and(|k| k != ChartKind::Combo);
-        let kind = if c.kind == ChartKind::Combo { c.series_kind(i) } else { s.kind.filter(|k| *k != ChartKind::Combo).unwrap_or(c.kind) };
+        let kind = c.series_kind(i);
         let (own, .., own_markers) = class_of(kind);
         let line_like = matches!(own, "chart:line" | "chart:scatter" | "chart:radar");
         let mut graphic = String::new();

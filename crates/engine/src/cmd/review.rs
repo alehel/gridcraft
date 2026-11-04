@@ -161,7 +161,7 @@ fn protect_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     };
     let d = s.doc()?;
     let what = d.wb.sheet(sheet).map(|sh| sh.name.clone()).unwrap_or_default();
-    let prot = SheetProtection { password: str_param(p, "password").filter(|x| !x.is_empty()).map(|pw| new_password_hash(d, &what, pw)), ..prot };
+    let prot = SheetProtection { password: str_param(p, "password").filter(|x| !x.is_empty()).map(|pw| new_protection_hash(d, &what, pw)), ..prot };
     edit(s, |cx| {
         cx.sheet_mut(sheet)?.protection = Some(prot.clone());
         Ok(Json::Null)
@@ -187,13 +187,16 @@ fn unprotect_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     })
 }
 
-/// A new hash of `pw` in the form the document's format keeps: OpenDocument's SHA-256 key for an
-/// ODS workbook, else Excel's (SHA-512, salted). The salt mixes `what` is protected with the
-/// document, a counter and the clock, so equal passwords get different hashes.
+/// A new hash of a sheet's or the workbook's protection password, in the form the document's
+/// format keeps: OpenDocument's SHA-256 key for an ODS workbook, else Excel's.
+fn new_protection_hash(d: &DocState, what: &str, pw: &str) -> PasswordHash {
+    if matches!(d.workbook_format(), "ods" | "fods") { PasswordHash::new_sha256_digest(pw) } else { new_password_hash(d, what, pw) }
+}
+
+/// A new Excel-compatible (SHA-512, salted) hash of `pw` (edit ranges keep only this form). The
+/// salt mixes `what` is protected with the document, a counter and the clock, so equal
+/// passwords get different hashes.
 fn new_password_hash(d: &DocState, what: &str, pw: &str) -> PasswordHash {
-    if matches!(d.workbook_format(), "ods" | "fods") {
-        return PasswordHash::new_sha256_digest(pw);
-    }
     static SALT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SALT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let seed = format!("{what}\u{0}{n}\u{0}{}\u{0}{}", d.uid, gridcraft_calc::now_serial().to_bits());
@@ -316,7 +319,7 @@ fn protect_workbook(s: &mut Session, p: &Json) -> Result<Json> {
         return Ok(json!({"on": on}));
     }
     let password = if on {
-        str_param(p, "password").filter(|pw| !pw.is_empty()).map(|pw| new_password_hash(d, "workbook", pw))
+        str_param(p, "password").filter(|pw| !pw.is_empty()).map(|pw| new_protection_hash(d, "workbook", pw))
     } else {
         if let Some(h) = &d.wb.structure_password
             && !h.verify(str_param(p, "password").unwrap_or("")).map_err(EngineError::Other)?

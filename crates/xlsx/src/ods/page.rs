@@ -223,7 +223,11 @@ fn regions(code: &str) -> String {
     };
     while let Some(c) = chars.next() {
         if c != '&' {
-            if c == '\n' {
+            // A line ends at a line feed, a carriage return, or both together.
+            if c == '\r' && chars.peek() == Some(&'\n') {
+                continue;
+            }
+            if c == '\n' || c == '\r' {
                 flush(&mut text, &mut parts, cur);
                 if let Some(p) = parts.get_mut(cur) {
                     p.push_str("</text:p><text:p>");
@@ -415,6 +419,12 @@ mod tests {
         for code in ["&KFF0000Red", "&K00FF00Red", "&K01+000Red", "&K05-050Red"] {
             assert_eq!(regions(code), regions("Red"), "{code}");
         }
+    }
+
+    #[test]
+    fn a_carriage_return_is_a_line_break() {
+        assert_eq!(regions("&Ca\rb"), regions("&Ca\nb"));
+        assert_eq!(regions("&Ca\r\nb"), regions("&Ca\nb"));
     }
 
     #[test]

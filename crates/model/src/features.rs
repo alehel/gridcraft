@@ -581,7 +581,7 @@ pub struct Chart {
 }
 
 /// The kind a combo chart's series `i` with its own kind `own` is drawn as.
-pub fn combo_series_kind(own: Option<ChartKind>, i: usize) -> ChartKind {
+fn combo_series_kind(own: Option<ChartKind>, i: usize) -> ChartKind {
     match own {
         Some(k) if k != ChartKind::Combo => k,
         _ if i == 0 => ChartKind::ColumnClustered,
@@ -590,10 +590,15 @@ pub fn combo_series_kind(own: Option<ChartKind>, i: usize) -> ChartKind {
 }
 
 impl Chart {
-    /// The kind series `i` is drawn as: in a combo chart its own kind, else column for the first
-    /// series and line for the rest; in any other chart the chart's kind.
+    /// The kind series `i` is drawn as: its own kind; else in a combo chart column for the first
+    /// series and line for the rest, and in any other chart the chart's kind.
     pub fn series_kind(&self, i: usize) -> ChartKind {
-        if self.kind == ChartKind::Combo { combo_series_kind(self.series.get(i).and_then(|s| s.kind), i) } else { self.kind }
+        let own = self.series.get(i).and_then(|s| s.kind).filter(|k| *k != ChartKind::Combo);
+        match (self.kind, own) {
+            (ChartKind::Combo, own) => combo_series_kind(own, i),
+            (_, Some(k)) => k,
+            (k, None) => k,
+        }
     }
 
     /// Data tables belong to category-axis column, bar, line and area charts.

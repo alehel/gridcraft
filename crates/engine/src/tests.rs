@@ -5754,11 +5754,15 @@ fn ods_keeps_a_dynamic_arrays_spill() {
     let bytes = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
     let (wb, _) = gridcraft_xlsx::read_ods(&bytes).unwrap();
     let sh = &wb.sheets[0];
-    for r in 0..5 {
-        assert_eq!(sh.value(CellRef::new(r, 0)), Value::Number(f64::from(r + 1)), "row {r}");
-    }
+    // The file reads as the formula over its range; the results below it are the formula's.
     let f = sh.cell(CellRef::new(0, 0)).and_then(|c| c.formula.clone()).unwrap();
     assert_eq!(f.array.map(|a| a.height()), Some(5));
+    assert!((1..5).all(|r| sh.value(CellRef::new(r, 0)) == Value::Empty));
+    let mut t = super::tests::s();
+    t.execute("file.open", json!({"name": "book.ods", "base64": saved["base64"]})).unwrap();
+    for r in 1..=5 {
+        assert_eq!(v(&t, &format!("A{r}")), Value::Number(f64::from(r)), "row {r}");
+    }
 }
 
 /// Both commands that set the paper store a known one under its table name.
@@ -5785,4 +5789,15 @@ fn ods_workbook_passwords_survive_saving() {
     assert!(t.execute("review.unprotectSheet", json!({})).is_err());
     assert!(t.execute("review.unprotectSheet", json!({"password": "nope"})).is_err());
     t.execute("review.unprotectSheet", json!({"password": "pa55"})).unwrap();
+}
+
+/// A spilled formula reopens from ODS spilling again, not blocked by its own cached results.
+#[test]
+fn ods_spill_reopens_spilling() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A1", "input": "=SEQUENCE(3)"})).unwrap();
+    let ods = s.execute("file.saveBytes", json!({"format": "ods"})).unwrap();
+    let mut t = super::tests::s();
+    t.execute("file.open", json!({"name": "book.ods", "base64": ods["base64"]})).unwrap();
+    assert_eq!((v(&t, "A1"), v(&t, "A2"), v(&t, "A3")), (Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)));
 }

@@ -915,3 +915,74 @@ fn ods_reader_round_five() {
     let ids: Vec<u32> = wb.sheets[0].pivots.iter().map(|p| p.id).collect();
     assert_eq!(ids, vec![1, 2]);
 }
+
+/// A matrix formula's other cells hold its cached results: they are the formula's to fill, so
+/// they come back empty, not as constants blocking it.
+#[test]
+fn ods_matrix_results_are_not_constants() {
+    let content = r#"<table:table table:name="S"><table:table-row><table:table-cell table:formula="of:=SEQUENCE(3)" table:number-matrix-columns-spanned="1" table:number-matrix-rows-spanned="3" office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="7"><text:p>7</text:p></table:table-cell></table:table-row><table:table-row><table:table-cell office:value-type="float" office:value="2"><text:p>2</text:p></table:table-cell></table:table-row><table:table-row><table:table-cell office:value-type="float" office:value="3"><text:p>3</text:p></table:table-cell></table:table-row><table:table-row><table:table-cell office:value-type="float" office:value="4"><text:p>4</text:p></table:table-cell></table:table-row></table:table>"#;
+    let (wb, _) = read_ods(&styled_ods("", content)).unwrap();
+    let sh = &wb.sheets[0];
+    let v = |r, c| sh.cells.get(CellRef::new(r, c)).map(|c| c.value.clone()).unwrap_or(Value::Empty);
+    assert!(sh.cells.get(CellRef::new(0, 0)).and_then(|c| c.formula.as_ref()).is_some());
+    assert_eq!((v(1, 0), v(2, 0)), (Value::Empty, Value::Empty));
+    // Outside the matrix, constants stay.
+    assert_eq!((v(0, 1), v(3, 0)), (Value::Number(7.0), Value::Number(4.0)));
+}
+
+/// Round-six reader fixes: an OR after a column's condition, and an OR holding more than
+/// conditions, warn instead of being read narrower; a pivot on a sheet renamed on import is
+/// still placed.
+#[test]
+fn ods_reader_round_six() {
+    let filter = |inner: &str| {
+        format!(
+            r#"<table:table table:name="S"><table:table-row><table:table-cell/></table:table-row></table:table><table:database-ranges><table:database-range table:target-range-address="S.A1:S.B2" table:display-filter-buttons="true"><table:filter>{inner}</table:filter></table:database-range></table:database-ranges>"#
+        )
+    };
+    for inner in [
+        r#"<table:filter-and><table:filter-condition table:field-number="0" table:operator="&gt;" table:value="1"/><table:filter-or><table:filter-condition table:field-number="0" table:operator="&lt;" table:value="5"/><table:filter-condition table:field-number="0" table:operator="=" table:value="9"/></table:filter-or></table:filter-and>"#,
+        r#"<table:filter-or><table:filter-and><table:filter-condition table:field-number="0" table:operator="=" table:value="1"/><table:filter-condition table:field-number="1" table:operator="=" table:value="2"/></table:filter-and><table:filter-condition table:field-number="0" table:operator="=" table:value="3"/></table:filter-or>"#,
+    ] {
+        let (_, report) = read_ods(&styled_ods("", &filter(inner))).unwrap();
+        assert!(report.warnings.iter().any(|w| w.contains("combine conditions")), "{inner}: {:?}", report.warnings);
+    }
+    let cell = |t: &str| format!(r#"<table:table-cell office:value-type="string"><text:p>{t}</text:p></table:table-cell>"#);
+    let sheets = format!(
+        r#"<table:table table:name="Data"><table:table-row>{}{}</table:table-row></table:table><table:table table:name="Data"><table:table-row><table:table-cell/></table:table-row></table:table><table:data-pilot-tables><table:data-pilot-table table:name="P" table:target-range-address="Data.D1:Data.E3"><table:source-cell-range table:cell-range-address="Data.A1:Data.B3"/></table:data-pilot-table></table:data-pilot-tables>"#,
+        cell("a"),
+        cell("b")
+    );
+    let (wb, report) = read_ods(&styled_ods("", &sheets)).unwrap();
+    assert_eq!(wb.sheets[0].pivots.len(), 1, "{:?}", report.warnings);
+}
+
+/// A report drawn at its anchor with its page fields below (no room above) reads back with its
+/// body where it was drawn; a page field on no source column isn't written.
+#[test]
+fn ods_pivot_drawn_near_the_top_keeps_its_body() {
+    use gridcraft_model::{PivotFilter, PivotTable, PivotValue};
+    let mut wb = gridcraft_model::Workbook::new();
+    let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    for (c, h) in ["Region", "Product", "Sales"].iter().enumerate() {
+        sh.set_value(CellRef::new(0, c as u32), text(h));
+    }
+    sh.set_value(CellRef::new(1, 0), text("East"));
+    sh.set_value(CellRef::new(1, 1), text("Pen"));
+    sh.set_value(CellRef::new(1, 2), Value::Number(1.0));
+    let page = |name: &str| PivotFilter { source_col: name.into(), selected: None };
+    for (filters, body) in [(vec![page("Region"), page("Product")], 5), (vec![page("Gone")], 2)] {
+        let mut wb = wb.clone();
+        std::sync::Arc::make_mut(&mut wb.sheets[0]).pivots = vec![PivotTable {
+            source: "Sheet1!$A$1:$C$2".into(),
+            anchor: CellRef::new(2, 5),
+            last_range: Some(RangeRef::new(CellRef::new(2, 5), CellRef::new(9, 6))),
+            filters,
+            values: vec![PivotValue { source_col: "Sales".into(), name: "Sum - Sales".into(), ..PivotValue::default() }],
+            ..PivotTable::default()
+        }];
+        let (back, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+        let pt = back.sheets[0].pivots.first().cloned().unwrap();
+        assert_eq!(pt.anchor, CellRef::new(body, 5));
+    }
+}

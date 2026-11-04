@@ -174,7 +174,7 @@ pub(crate) fn read(p: &Elem, id: u32) -> Option<(String, PivotTable)> {
         _ => {}
     }
     pt.filter_button = p.attr(Ns::Table, "show-filter-button") != Some("false");
-    pt.anchor = CellRef::new(target.start.row.saturating_add(header_rows(&pt)).min(target.end.row), target.start.col);
+    pt.anchor = CellRef::new(target.start.row.saturating_add(header_rows(pt.filter_button, shown_pages(&pt))).min(target.end.row), target.start.col);
     pt.last_range = Some(target);
     Some((sheet, pt))
 }
@@ -252,6 +252,12 @@ fn source_range(wb: &Workbook, own: &str, source: &str) -> Option<(String, Range
 const MAX_MEMBERS: usize = 10_000;
 
 /// The distinct values of the source column headed `col`, as the report names its items.
+/// The source range's column headers, folded.
+fn source_headers(wb: &Workbook, sheet: &str, src: RangeRef) -> std::collections::HashSet<String> {
+    let Some(sh) = wb.sheets.iter().find(|s| s.name == sheet) else { return Default::default() };
+    (src.start.col..=src.end.col).map(|c| sh.value(CellRef::new(src.start.row, c)).display().to_lowercase()).collect()
+}
+
 fn members(wb: &Workbook, sheet: &str, src: RangeRef, col: &str) -> Vec<String> {
     let Some(sh) = wb.sheets.iter().find(|s| s.name == sheet) else { return Vec::new() };
     let Some(c) = (src.start.col..=src.end.col).find(|c| sh.value(CellRef::new(src.start.row, *c)).display() == col) else { return Vec::new() };
@@ -269,14 +275,17 @@ fn members(wb: &Workbook, sheet: &str, src: RangeRef, col: &str) -> Vec<String> 
     out
 }
 
-/// The rows of a report's target range above its body: LibreOffice's Filter button row, the
-/// page fields shown (one that is also a row or column field is not), and a blank row after
-/// them. The writer starts the target this far above the anchor, so the anchor reads back.
-fn header_rows(pt: &PivotTable) -> u32 {
-    let button = u32::from(pt.filter_button);
+/// The page fields shown above a report's body: one that is also a row or column field is not.
+fn shown_pages(pt: &PivotTable) -> u32 {
     let on_axis = |name: &str| pt.rows.iter().chain(&pt.columns).any(|f| f.source_col.eq_ignore_ascii_case(name));
-    let pages = pt.filters.iter().filter(|f| !on_axis(&f.source_col)).count().min(u32::MAX as usize) as u32;
-    let above = button.saturating_add(pages);
+    pt.filters.iter().filter(|f| !on_axis(&f.source_col)).count().min(u32::MAX as usize) as u32
+}
+
+/// The rows of a report's target range above its body: LibreOffice's Filter button row, the
+/// `pages` shown, and a blank row after them. The writer starts the target this far above the
+/// body, so the anchor (the body's top-left) reads back.
+fn header_rows(button: bool, pages: u32) -> u32 {
+    let above = u32::from(button).saturating_add(pages);
     above.saturating_add(u32::from(above > 0))
 }
 
@@ -286,17 +295,28 @@ pub(crate) fn write(wb: &Workbook) -> String {
     for sh in &wb.sheets {
         for pt in &sh.pivots {
             let Some((src_sheet, src_range)) = source_range(wb, &sh.name, &pt.source) else { continue };
-            // The report as drawn, starting where the anchor reads back from.
+            // A page field on no column of the source is drawn nowhere (the report leaves it
+            // out), so it isn't written.
+            let headers = source_headers(wb, &src_sheet, src_range);
+            let mut pt = pt.clone();
+            pt.filters.retain(|f| headers.contains(&f.source_col.to_lowercase()));
+            let pt = &pt;
+            // The body is where the report draws it: below its page fields, or at the anchor
+            // when they fit above it. The target starts the header rows above that, the Filter
+            // button row only where there is room for it.
+            let pages = shown_pages(pt);
+            let drawn = header_rows(false, pages);
+            let body = if pt.anchor.row >= drawn { pt.anchor.row } else { pt.anchor.row.saturating_add(drawn) };
+            let button = pt.filter_button && body >= header_rows(true, pages);
             let end = pt.last_range.map_or(pt.anchor, |r| r.end);
-            let start = CellRef::new(pt.anchor.row.saturating_sub(header_rows(pt)), pt.last_range.map_or(pt.anchor.col, |r| r.start.col));
-            let target = RangeRef::new(start, CellRef::new(end.row.max(start.row), end.col.max(start.col)));
+            let start = CellRef::new(body.saturating_sub(header_rows(button, pages)), pt.last_range.map_or(pt.anchor.col, |r| r.start.col));
+            let target = RangeRef::new(start, CellRef::new(end.row.max(body), end.col.max(start.col)));
             let grand = match (pt.grand_totals_rows, pt.grand_totals_cols) {
                 (true, true) => "both",
                 (true, false) => "row",
                 (false, true) => "column",
                 (false, false) => "none",
             };
-            let button = pt.filter_button;
             let _ = write!(
                 o,
                 r#"<table:data-pilot-table table:name="{}" table:target-range-address="{}" table:grand-total="{grand}" table:show-filter-button="{button}"><table:source-cell-range table:cell-range-address="{}"/>"#,
