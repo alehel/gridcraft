@@ -231,6 +231,9 @@ struct SheetState {
     /// Merges that may still reach the rows to come, by first column, with their first cell's
     /// style: a covered cell shows that style, as LibreOffice draws a merged area.
     open_merges: BTreeMap<u32, (RangeRef, StyleId)>,
+    /// Matrix formulas' ranges that may still reach the rows to come, by first column: the
+    /// cached results in their other cells are the formula's to fill, not constants.
+    open_matrices: BTreeMap<u32, RangeRef>,
     /// The columns' default cell styles as (first, end, style) runs, built once the columns are
     /// read (they precede the rows).
     col_defaults: Option<Vec<(u32, u32, StyleId)>>,
@@ -354,6 +357,8 @@ pub(crate) struct Import {
     text: u64,
     segments: u64,
     kept_nodes: usize,
+    /// Each sheet's index by its name in the file (before any renaming).
+    file_sheets: HashMap<String, usize>,
     pivots: usize,
     validation_ranges: usize,
     images: Vec<(usize, Frame)>,
@@ -410,6 +415,7 @@ impl Import {
             text: 0,
             segments: 0,
             kept_nodes: 0,
+            file_sheets: HashMap::new(),
             pivots: 0,
             validation_ranges: 0,
             images: Vec::new(),
@@ -619,6 +625,8 @@ impl Import {
         if self.wb.check_sheet_name(&name, None).is_err() {
             name = self.wb.next_sheet_name();
         }
+        // Ranges elsewhere in the file name the sheet as the file does.
+        self.file_sheets.entry(original.trim_matches('\'').to_string()).or_insert(self.wb.sheets.len());
         if name != original {
             self.report.warn("Some ODS sheet names were shortened or renamed to valid, unique sheet names.");
         }
@@ -660,6 +668,7 @@ impl Import {
             mapped: HashMap::new(),
             has_calcext_formats: false,
             open_merges: BTreeMap::new(),
+            open_matrices: BTreeMap::new(),
             col_defaults: None,
         });
         Ok(())
@@ -795,7 +804,11 @@ impl Import {
             }
             let width = if covered { 1 } else { attr_u32(c, Ns::Table, "number-columns-spanned", 1, MAX_COLS)? };
             let height = if covered { 1 } else { attr_u32(c, Ns::Table, "number-rows-spanned", 1, MAX_ROWS)? };
-            let (value_cell, implied) = self.convert(c, CellRef::new(start_row, col))?;
+            let (mut value_cell, implied) = self.convert(c, CellRef::new(start_row, col))?;
+            self.matrix_cell(
+                &mut value_cell,
+                RangeRef::new(CellRef::new(start_row, col), CellRef::new(last_row, col.saturating_add(crepeat.saturating_sub(1)).min(MAX_COLS - 1))),
+            );
             let own_style = c.attr(Ns::Table, "style-name").map(|n| self.style_id(n));
             let cend = match col.checked_add(crepeat).filter(|n| *n <= MAX_COLS) {
                 Some(n) => n,
@@ -888,6 +901,28 @@ impl Import {
         }
         st.row = end;
         Ok(())
+    }
+
+    /// A cell element over `area`: a matrix formula's range is noted, and a cached result inside
+    /// one is dropped (the formula fills it again), as the XLSX reader does.
+    fn matrix_cell(&mut self, cell: &mut Cell, area: RangeRef) {
+        let Some(st) = self.sheet.as_mut() else { return };
+        if let Some(range) = cell.formula.as_ref().and_then(|f| f.array) {
+            if range.start != range.end {
+                st.open_matrices.insert(range.start.col, range);
+            }
+            return;
+        }
+        if cell.formula.is_some() || matches!(cell.value, Value::Empty) {
+            return;
+        }
+        let Some((&start, &m)) = st.open_matrices.range(..=area.start.col).next_back() else { return };
+        if m.end.row < area.start.row {
+            // Above these rows for good: the rows only go down.
+            st.open_matrices.remove(&start);
+        } else if m.contains(area.start) && m.contains(area.end) {
+            cell.value = Value::Empty;
+        }
     }
 
     /// Whether an empty cell's own format is worth a stored cell for each of `count` copies:
@@ -1169,6 +1204,17 @@ impl Import {
         let mut vnames: Vec<_> = st.validation_cells.into_iter().collect();
         vnames.sort_by(|a, b| a.0.cmp(&b.0));
         for (name, ranges) in vnames {
+            // Each sheet holds its own copy: its text counts as the sheet's.
+            let Some(bytes) = self
+                .validations
+                .get(&name)
+                .map(|d| d.f1.len() + d.f2.as_ref().map_or(0, String::len) + d.input_message.len() + d.error_message.len())
+            else {
+                continue;
+            };
+            if !self.take_text(bytes) {
+                break;
+            }
             if let Some(def) = self.validations.get(&name) {
                 let mut v = def.clone();
                 v.ranges = merge_ranges(ranges);
@@ -1215,7 +1261,6 @@ impl Import {
         if pivots.peek().is_none() {
             return;
         }
-        let sheets: HashMap<String, usize> = self.wb.sheets.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
         for p in pivots {
             if self.pivots >= MAX_PIVOTS {
                 self.report.warn("Some ODS pivot tables beyond the import limit were imported as their current values.");
@@ -1223,7 +1268,7 @@ impl Import {
             }
             let id = self.pivots as u32 + 1;
             let placed = super::pivot::read(p, id).and_then(|(sheet, pt)| {
-                let s = self.wb.sheets.get_mut(*sheets.get(&sheet)?)?;
+                let s = self.wb.sheets.get_mut(*self.file_sheets.get(&sheet)?)?;
                 Arc::make_mut(s).pivots.push(pt);
                 Some(())
             });
@@ -1313,7 +1358,7 @@ impl Import {
         }
         // A database range's name must be new in every scope.
         let mut taken: std::collections::HashSet<String> = defined.into_iter().map(|(_, n)| n).collect();
-        let sheets: HashMap<String, usize> = self.wb.sheets.iter().enumerate().map(|(i, s)| (s.name.clone(), i)).collect();
+        let sheets = std::mem::take(&mut self.file_sheets);
         for db in std::mem::take(&mut self.database_ranges) {
             self.database_range(&db, &sheets, &mut taken);
         }
@@ -1365,7 +1410,7 @@ impl Import {
                 // A second custom condition on a column is ANDed with the first; a column holds
                 // no more than that.
                 std::collections::btree_map::Entry::Occupied(mut o) => match (o.get_mut(), crit) {
-                    (FilterCriterion::Custom { b: b @ None, .. }, FilterCriterion::Custom { a, .. }) => {
+                    (FilterCriterion::Custom { b: b @ None, .. }, FilterCriterion::Custom { a, b: None, .. }) => {
                         *b = Some(a);
                         true
                     }
@@ -1387,7 +1432,7 @@ impl Import {
                 } else if g.is(Ns::Table, "filter-or") {
                     // Every condition of the OR, or it isn't read: one left out would widen it.
                     let conds: Option<Vec<(u32, FilterCriterion)>> =
-                        g.children(Ns::Table, "filter-condition").take(3).map(filter_criterion).collect();
+                        if g.elems().all(|c| c.is(Ns::Table, "filter-condition")) { g.elems().take(3).map(filter_criterion).collect() } else { None };
                     match conds.as_deref().unwrap_or_default() {
                         [(f, FilterCriterion::Custom { a, .. }), (f2, FilterCriterion::Custom { a: b, .. })] if f == f2 => {
                             add(*f, FilterCriterion::Custom { a: a.clone(), b: Some(b.clone()), and: false })
@@ -1470,6 +1515,17 @@ impl Import {
 
     /// Takes `n` conditional-format ranges from the import's budget; false (with a warning) when
     /// it is spent.
+    /// Charges `n` bytes of copied text to the import's text budget; false (with a warning)
+    /// once it is spent.
+    fn take_text(&mut self, n: usize) -> bool {
+        self.text = self.text.saturating_add(n as u64);
+        let ok = self.text <= MAX_TEXT;
+        if !ok {
+            self.report.warn("Some ODS conditional formatting or data validation beyond the import limit was not imported.");
+        }
+        ok
+    }
+
     fn take_cf_ranges(&mut self, n: usize) -> bool {
         self.cf_ranges = self.cf_ranges.saturating_add(n as u64);
         let ok = self.cf_ranges <= MAX_CF_RANGES;
@@ -1492,11 +1548,12 @@ impl Import {
             let Some(maps) = self.style_def(&name).map(|d| d.maps.clone()) else { continue };
             let ranges = merge_ranges(ranges);
             for (cond, apply, _) in &maps {
+                // Each condition tried counts, read or not, and its formula text is the sheet's.
+                if !self.take_cf_ranges(ranges.len()) || !self.take_text(cond.len()) {
+                    return;
+                }
                 let style = Box::new(self.dxf(apply));
                 if let Some(rule) = map_condition(cond, style) {
-                    if !self.take_cf_ranges(ranges.len()) {
-                        return;
-                    }
                     st.sheet.cond_formats.push(CondFormat { ranges: ranges.clone(), rule, priority, stop_if_true: true });
                     priority += 1;
                 }
@@ -1579,15 +1636,13 @@ impl Import {
             self.report.warn("Some ODS pictures, charts and shapes beyond the import limit were not imported.");
             frames.truncate(room);
         }
+        // A flat document's chart is kept as its document until the pictures are loaded; one
+        // past the kept-node limit is left out.
+        frames.retain(|f| match &f.inline {
+            Some(Inline::Chart(doc)) => self.keep(doc),
+            _ => true,
+        });
         self.frames += frames.len();
-        // A flat document's chart is kept as its document until the pictures are loaded.
-        for f in &mut frames {
-            if let Some(Inline::Chart(doc)) = &f.inline
-                && !self.keep(doc)
-            {
-                f.inline = None;
-            }
-        }
         if let Some(st) = self.sheet.as_mut() {
             st.frames.extend(frames);
         }
