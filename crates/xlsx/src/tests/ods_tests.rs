@@ -604,3 +604,24 @@ fn ods_merges_past_the_edge_are_clipped() {
     .unwrap();
     assert_eq!(wb.sheets[0].merges, vec![RangeRef::new(CellRef::new(0, 16380), CellRef::new(1, 16383))]);
 }
+
+/// A sheet-sized merge and a validation on whole rows are written as runs of repeated cells,
+/// not one element per covered cell, and read back whole; a link on an empty cell is kept.
+#[test]
+fn ods_writer_writes_large_merges_and_validations_as_runs() {
+    use gridcraft_model::{Hyperlink, Validation};
+    let mut wb = gridcraft_model::Workbook::new();
+    let sh = std::sync::Arc::make_mut(&mut wb.sheets[0]);
+    sh.set_value(CellRef::new(0, 0), text("big"));
+    sh.merges.push(RangeRef::new(CellRef::new(0, 0), CellRef::new(99_999, 9_999)));
+    let whole_rows = RangeRef::new(CellRef::new(200_000, 0), CellRef::new(200_009, 16_383));
+    sh.validations.push(Validation { ranges: vec![whole_rows], ..Validation::default() });
+    sh.hyperlinks.insert(CellRef::new(300_000, 3), Hyperlink { target: "https://example.com".into(), tooltip: None, external: true });
+    let bytes = write_ods(&wb).unwrap();
+    assert!(bytes.len() < 200_000, "{} bytes", bytes.len());
+    let (back, _) = read_ods(&bytes).unwrap();
+    let back = &back.sheets[0];
+    assert_eq!(back.merges, vec![RangeRef::new(CellRef::new(0, 0), CellRef::new(99_999, 9_999))]);
+    assert_eq!(back.validations.first().map(|v| v.ranges.clone()), Some(vec![whole_rows]));
+    assert_eq!(back.hyperlinks.get(&CellRef::new(300_000, 3)).map(|h| h.target.as_str()), Some("https://example.com"));
+}

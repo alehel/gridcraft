@@ -215,6 +215,56 @@ struct Writer<'a> {
     validations: Vec<(String, String)>,
 }
 
+/// The merges and validation ranges reaching each row, kept as the rows are written in order.
+struct Reach<'s> {
+    /// Merges (no name) and validation ranges (with their validation's name).
+    ranges: Vec<(RangeRef, Option<&'s str>)>,
+    /// `ranges` by first row; the ones before `next` have been reached.
+    order: Vec<usize>,
+    next: usize,
+    active: Vec<usize>,
+}
+
+impl<'s> Reach<'s> {
+    fn new(merges: &[RangeRef], validations: &'s [(RangeRef, String)]) -> Self {
+        let ranges: Vec<(RangeRef, Option<&'s str>)> =
+            merges.iter().map(|m| (*m, None)).chain(validations.iter().map(|(r, n)| (*r, Some(n.as_str())))).collect();
+        let mut order: Vec<usize> = (0..ranges.len()).collect();
+        order.sort_by_key(|i| ranges.get(*i).map_or(0, |(r, _)| r.start.row));
+        Reach { ranges, order, next: 0, active: Vec::new() }
+    }
+
+    /// Moves to `row` (rows only move down): ranges that ended above it leave, ranges starting
+    /// at or above it join.
+    fn at(&mut self, row: u32) {
+        let ranges = &self.ranges;
+        self.active.retain(|i| ranges.get(*i).is_some_and(|(r, _)| r.end.row >= row));
+        while let Some(&i) = self.order.get(self.next) {
+            let Some((r, _)) = ranges.get(i) else { break };
+            if r.start.row > row {
+                break;
+            }
+            self.next += 1;
+            if r.end.row >= row {
+                self.active.push(i);
+            }
+        }
+    }
+
+    /// The first row below `row` whose ranges differ from `row`'s.
+    fn next_change(&self, row: u32) -> u32 {
+        let starts = self.order.get(self.next).and_then(|i| self.ranges.get(*i)).map_or(u32::MAX, |(r, _)| r.start.row);
+        let ends = self.active().map(|(r, _)| r.end.row.saturating_add(1)).min().unwrap_or(u32::MAX);
+        // A merge's first row differs from the rows it covers below it.
+        let firsts = self.active().filter(|(r, n)| n.is_none() && r.start.row == row).map(|_| row + 1).min().unwrap_or(u32::MAX);
+        starts.min(ends).min(firsts)
+    }
+
+    fn active(&self) -> impl Iterator<Item = &(RangeRef, Option<&'s str>)> {
+        self.active.iter().filter_map(|i| self.ranges.get(*i))
+    }
+}
+
 fn px_to_in(px: f32) -> String {
     format!("{:.4}in", f64::from(px) / 96.0)
 }
@@ -520,11 +570,7 @@ impl<'a> Writer<'a> {
             let first = v.ranges.first().map(|r| r.start).unwrap_or_default();
             self.validations.push((name.clone(), validation_xml(&name, v, &sh.name, first, self.wb)));
             for r in &v.ranges {
-                // Wide rules stop a thousand columns past the data: each column is its own cell.
-                let r = RangeRef::new(
-                    r.start,
-                    CellRef::new(r.end.row.min(MAX_ROWS - 1), r.end.col.min(MAX_COLS - 1).min(max_col.max(r.start.col) + 1_000)),
-                );
+                let r = RangeRef::new(r.start, CellRef::new(r.end.row.min(MAX_ROWS - 1), r.end.col.min(MAX_COLS - 1)));
                 valid_at.push((r, name.clone()));
                 max_row = max_row.max(r.end.row);
                 max_col = max_col.max(r.end.col);
@@ -580,23 +626,12 @@ impl<'a> Writer<'a> {
     }
 
     fn rows(&mut self, sh: &Sheet, max_row: u32, max_col: u32, valid_at: &[(RangeRef, String)], out: &mut String) {
-        // Covered cells of merges, and the spans of their first cells.
-        let mut spans: HashMap<CellRef, (u32, u32)> = HashMap::new();
-        let mut covered: std::collections::HashSet<CellRef> = std::collections::HashSet::new();
-        for m in &sh.merges {
-            spans.insert(m.start, (m.width(), m.height()));
-            if m.count() <= 1_000_000 {
-                for r in m.start.row..=m.end.row {
-                    for c in m.start.col..=m.end.col {
-                        if (r, c) != (m.start.row, m.start.col) {
-                            covered.insert(CellRef::new(r, c));
-                        }
-                    }
-                }
-            }
+        let mut reach = Reach::new(&sh.merges, valid_at);
+        // The columns of each row's cells, notes and links: the rows that can't repeat.
+        let mut singles: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for pos in sh.cells.iter().map(|(c, _)| c).chain(sh.comments.keys().copied()).chain(sh.hyperlinks.keys().copied()) {
+            singles.entry(pos.row).or_default().push(pos.col);
         }
-        let covered_rows: std::collections::HashSet<u32> = covered.iter().map(|c| c.row).chain(spans.keys().map(|c| c.row)).collect();
-        let note_rows: std::collections::HashSet<u32> = sh.comments.keys().chain(sh.hyperlinks.keys()).map(|c| c.row).collect();
         // The rows to repeat on each printed page (`table()` counts them in the extent).
         let header = sh.print.title_rows.map(|(a, b)| (a.min(b), a.max(b).min(max_row)));
         let mut level = 0u8;
@@ -619,6 +654,7 @@ impl<'a> Writer<'a> {
                 );
                 break;
             }
+            reach.at(row);
             // A header block holds rows only, never a row group's edge: inside it the outline
             // stays at its first row's level.
             let in_header = header.is_some_and(|(a, b)| row > a && row <= b);
@@ -634,19 +670,14 @@ impl<'a> Writer<'a> {
             if header.is_some_and(|(a, _)| a == row) {
                 out.push_str("<table:table-header-rows>");
             }
-            // Rows without cells, merges or validation repeat while identical.
+            // Rows without cells, notes or links repeat while alike: the same line settings, and
+            // the same merges and validations reaching them.
             let mut repeat = 1u32;
-            // Rows that differ only in their validation's place are not alike.
-            let validations = |r: u32| -> Vec<usize> {
-                valid_at.iter().enumerate().filter(|(_, (v, _))| v.start.row <= r && v.end.row >= r).map(|(i, _)| i).collect()
-            };
-            let empty = |r: u32| sh.cells.row(r, 0, MAX_COLS - 1).next().is_none() && !covered_rows.contains(&r) && !note_rows.contains(&r);
-            if empty(row) {
-                let here = validations(row);
+            if !singles.contains_key(&row) {
+                let change = reach.next_change(row).min(singles.range(row + 1..).next().map_or(u32::MAX, |(r, _)| *r));
                 while row + repeat <= max_row
+                    && row + repeat < change
                     && sh.rows.get(&(row + repeat)).unwrap_or(&default_row) == &info
-                    && empty(row + repeat)
-                    && validations(row + repeat) == here
                     && header.is_none_or(|(a, b)| row + repeat != a && row + repeat - 1 != b)
                 {
                     repeat += 1;
@@ -666,7 +697,8 @@ impl<'a> Writer<'a> {
                 let _ = write!(out, " table:default-cell-style-name=\"{}\"", esc_attr(&st));
             }
             out.push('>');
-            self.row_cells(sh, row, max_col, &spans, &covered, valid_at, out);
+            let cols = singles.get(&row).map(Vec::as_slice).unwrap_or_default();
+            self.row_cells(sh, row, max_col, cols, &reach, out);
             out.push_str("</table:table-row>");
             if header.is_some_and(|(_, b)| b >= row && b < row + repeat) {
                 out.push_str("</table:table-header-rows>");
@@ -679,67 +711,55 @@ impl<'a> Writer<'a> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn row_cells(
-        &mut self,
-        sh: &Sheet,
-        row: u32,
-        max_col: u32,
-        spans: &HashMap<CellRef, (u32, u32)>,
-        covered: &std::collections::HashSet<CellRef>,
-        valid_at: &[(RangeRef, String)],
-        out: &mut String,
-    ) {
-        let mut col = 0u32;
-        let row_style = sh.rows.get(&row).and_then(|r| r.style);
-        let cells: BTreeMap<u32, &Cell> = sh.cells.row(row, 0, MAX_COLS - 1).collect();
-        let validation = |c: u32| valid_at.iter().find(|(r, _)| r.contains(CellRef::new(row, c))).map(|(_, n)| n.clone());
-        while col <= max_col {
-            let pos = CellRef::new(row, col);
-            let cell = cells.get(&col).copied();
-            let is_covered = covered.contains(&pos);
-            let special = cell.is_some()
-                || is_covered
-                || spans.contains_key(&pos)
-                || sh.comments.contains_key(&pos)
-                || sh.hyperlinks.contains_key(&pos)
-                || validation(col).is_some();
-            if !special {
-                // A run of untouched cells, which take their row's or column's default style.
-                let mut end = col + 1;
-                while end <= max_col {
-                    let p = CellRef::new(row, end);
-                    if cells.contains_key(&end)
-                        || covered.contains(&p)
-                        || spans.contains_key(&p)
-                        || sh.comments.contains_key(&p)
-                        || sh.hyperlinks.contains_key(&p)
-                        || validation(end).is_some()
-                    {
-                        break;
-                    }
-                    end += 1;
-                }
-                out.push_str("<table:table-cell");
-                if end - col > 1 {
-                    let _ = write!(out, " table:number-columns-repeated=\"{}\"", end - col);
-                }
-                out.push_str("/>");
-                col = end;
-                continue;
+    /// One row's cells, as runs: each cell, note, link or merge's first cell alone, and between
+    /// them runs of alike cells (empty, covered by a merge, or under a validation) repeated.
+    fn row_cells(&mut self, sh: &Sheet, row: u32, max_col: u32, singles: &[u32], reach: &Reach<'_>, out: &mut String) {
+        let end = max_col + 1;
+        let mut edges: Vec<u32> = vec![0, end];
+        for &c in singles {
+            edges.extend([c, c + 1]);
+        }
+        for (r, name) in reach.active() {
+            // A merge's first cell stands alone.
+            if name.is_none() && r.start.row == row {
+                edges.extend([r.start.col, r.start.col + 1]);
             }
-            let tag = if is_covered { "table:covered-table-cell" } else { "table:table-cell" };
+            edges.extend([r.start.col, r.end.col + 1]);
+        }
+        edges.retain(|c| *c <= end);
+        edges.sort_unstable();
+        edges.dedup();
+        let row_style = sh.rows.get(&row).and_then(|r| r.style);
+        for w in edges.windows(2) {
+            let [a, b] = [w.first().copied().unwrap_or(0), w.get(1).copied().unwrap_or(end)];
+            let pos = CellRef::new(row, a);
+            let mut covered = false;
+            let mut anchor = None;
+            let mut validation = None;
+            for (r, name) in reach.active().filter(|(r, _)| r.contains(pos)) {
+                match name {
+                    Some(n) => validation = Some(*n),
+                    None if r.start == pos => anchor = Some((r.width(), r.height())),
+                    None => covered = true,
+                }
+            }
+            let cell = sh.cell(pos);
+            let tag = if covered { "table:covered-table-cell" } else { "table:table-cell" };
             let _ = write!(out, "<{tag}");
+            // A run takes its row's or column's default style; a cell states its own.
             let style = cell.map(|c| c.style).unwrap_or_else(|| sh.style_id(pos));
-            let inherited = row_style.or_else(|| sh.cols.get(&col).and_then(|c| c.style)).unwrap_or(StyleId::DEFAULT);
+            let inherited = row_style.or_else(|| sh.cols.get(&a).and_then(|c| c.style)).unwrap_or(StyleId::DEFAULT);
             if style != inherited || cell.is_some() && style != StyleId::DEFAULT {
                 let name = self.cell_style(style);
                 let _ = write!(out, " table:style-name=\"{}\"", esc_attr(&name));
             }
-            if let Some(v) = validation(col) {
-                let _ = write!(out, " table:content-validation-name=\"{v}\"");
+            if let Some(v) = validation {
+                let _ = write!(out, " table:content-validation-name=\"{}\"", esc_attr(v));
             }
-            if let Some((w, h)) = spans.get(&pos) {
+            if b - a > 1 {
+                let _ = write!(out, " table:number-columns-repeated=\"{}\"", b - a);
+            }
+            if let Some((w, h)) = anchor {
                 let _ = write!(out, " table:number-columns-spanned=\"{w}\" table:number-rows-spanned=\"{h}\"");
             }
             let mut inner = String::new();
@@ -760,14 +780,31 @@ impl<'a> Writer<'a> {
             }
             if let Some(c) = cell {
                 self.cell_value(sh, pos, c, out, &mut inner);
+            } else if let Some(l) = self.link(sh, pos) {
+                paragraphs(&mut inner, "", Some(&l));
             }
             if inner.is_empty() {
                 out.push_str("/>");
             } else {
                 let _ = write!(out, ">{inner}</{tag}>");
             }
-            col += 1;
         }
+    }
+
+    /// The `xlink:href` of the link at `pos`, if any.
+    fn link(&self, sh: &Sheet, pos: CellRef) -> Option<String> {
+        sh.hyperlinks.get(&pos).map(|h| {
+            if h.external {
+                // Relative to the file's folder in the model, to the package in ODF.
+                if super::read::is_relative(&h.target) { format!("../{}", h.target) } else { h.target.clone() }
+            } else {
+                // `'Q1 Sales'!A1` → `#'Q1 Sales'.A1`.
+                match h.target.rsplit_once('!') {
+                    Some((s, a)) => format!("#{}.{}", formula::quote_sheet(&gridcraft_core::unquote_sheet(s)), a.replace('$', "")),
+                    None => format!("#{}", h.target),
+                }
+            }
+        })
     }
 
     fn cell_value(&mut self, sh: &Sheet, pos: CellRef, c: &Cell, out: &mut String, inner: &mut String) {
@@ -789,18 +826,7 @@ impl<'a> Writer<'a> {
                 (None, other) => other.display(),
             }
         };
-        let link = sh.hyperlinks.get(&pos).map(|h| {
-            if h.external {
-                // Relative to the file's folder in the model, to the package in ODF.
-                if super::read::is_relative(&h.target) { format!("../{}", h.target) } else { h.target.clone() }
-            } else {
-                // `'Q1 Sales'!A1` → `#'Q1 Sales'.A1`.
-                match h.target.rsplit_once('!') {
-                    Some((s, a)) => format!("#{}.{}", formula::quote_sheet(&gridcraft_core::unquote_sheet(s)), a.replace('$', "")),
-                    None => format!("#{}", h.target),
-                }
-            }
-        });
+        let link = self.link(sh, pos);
         match &c.value {
             Value::Number(n) => {
                 let kind = numfmt::value_kind(&fmt);

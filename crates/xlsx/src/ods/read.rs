@@ -758,8 +758,10 @@ impl Import {
             let height = if covered { 1 } else { attr_u32(c, Ns::Table, "number-rows-spanned", 1, MAX_ROWS)? };
             let (value_cell, implied) = self.convert(c, CellRef::new(start_row, col))?;
             let own_style = c.attr(Ns::Table, "style-name").map(|n| self.style_id(n));
-            let has_extras =
-                c.elems().any(|k| k.is(Ns::Office, "annotation") || k.ns == Ns::Draw) || c.attr(Ns::Table, "content-validation-name").is_some();
+            // What hangs off a cell even when it is empty: a note, a drawing, a validation, a link.
+            let has_extras = c.elems().any(|k| k.is(Ns::Office, "annotation") || k.ns == Ns::Draw)
+                || c.attr(Ns::Table, "content-validation-name").is_some()
+                || c.children(Ns::Text, "p").any(|p| !p.descendants(Ns::Text, "a").is_empty());
             let cend = match col.checked_add(crepeat).filter(|n| *n <= MAX_COLS) {
                 Some(n) => n,
                 None => {
