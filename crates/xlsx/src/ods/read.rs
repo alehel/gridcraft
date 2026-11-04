@@ -554,7 +554,8 @@ impl Import {
             super::page::apply(&mut sheet, "Default", &self.master_pages, &self.page_layouts);
         }
         if e.attr(Ns::Table, "protected") == Some("true") {
-            sheet.protection = Some(SheetProtection { select_locked: true, select_unlocked: true, ..SheetProtection::default() });
+            let password = self.protection_key(e);
+            sheet.protection = Some(SheetProtection { password, select_locked: true, select_unlocked: true, ..SheetProtection::default() });
         }
         if e.attr(Ns::Table, "print") == Some("false") {
             sheet.print.print_area = None;
@@ -583,6 +584,19 @@ impl Import {
             has_calcext_formats: false,
         });
         Ok(())
+    }
+
+    /// The password of a protected sheet or workbook structure (`table:protection-key`): kept
+    /// when it is a SHA-256 key, the algorithm LibreOffice writes; an older SHA-1 key can't be
+    /// checked, so the protection is kept without its password.
+    fn protection_key(&mut self, e: &Elem) -> Option<gridcraft_model::PasswordHash> {
+        let key = e.attr(Ns::Table, "protection-key").filter(|k| !k.trim().is_empty())?;
+        let algorithm = e.attr(Ns::Table, "protection-key-digest-algorithm").unwrap_or("http://www.w3.org/2000/09/xmldsig#sha1");
+        if algorithm.ends_with("#sha256") && e.attr(Ns::LoExt, "protection-key-digest-algorithm-2").is_none() {
+            return Some(gridcraft_model::PasswordHash::odf_sha256(key));
+        }
+        self.report.warn("Some ODS protection passwords use a digest GridCraft can't check; the protection was kept without its password.");
+        None
     }
 
     fn column(&mut self, e: &Elem) -> Result<(), IoError> {
@@ -1921,6 +1935,10 @@ impl Sink for Import {
                     return Err(xml_error("multiple spreadsheets in one document"));
                 }
                 self.spreadsheet_seen = true;
+                if el.attr(Ns::Table, "structure-protected") == Some("true") {
+                    self.wb.protected_structure = true;
+                    self.wb.structure_password = self.protection_key(el);
+                }
                 self.ready_styles();
             }
             (Ns::Table, "table") if self.spreadsheet_seen && self.sheet.is_none() => {

@@ -318,6 +318,8 @@ pub(super) fn threaded_xml(sheet: &Sheet, ids: &BTreeMap<CellRef, Vec<String>>, 
 pub(crate) fn password_attrs(h: &gridcraft_model::PasswordHash, prefix: &str) -> String {
     let name = |base: &str| crate::sheet_read::password_attr(prefix, base);
     match h {
+        // An OpenDocument key has no Excel form: the protection is kept without its password.
+        gridcraft_model::PasswordHash::Iterated { algorithm, .. } if algorithm == gridcraft_model::PasswordHash::ODF_SHA256 => String::new(),
         gridcraft_model::PasswordHash::Legacy(h) => format!(" {}=\"{h:04X}\"", name("password")),
         gridcraft_model::PasswordHash::Iterated { algorithm, hash, salt, spin_count } => format!(
             " {}=\"{}\" {}=\"{}\" {}=\"{}\" {}=\"{spin_count}\"",

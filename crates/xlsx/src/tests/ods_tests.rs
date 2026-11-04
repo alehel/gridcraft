@@ -329,3 +329,25 @@ fn ods_flat_documents_round_trip() {
     assert_eq!(s.images[0].data.as_slice(), b"\x89PNG\r\n\x1a\nnot really");
     assert_eq!(back.props.title, "Flat");
 }
+
+/// A protected sheet's and structure's SHA-256 keys open as passwords that check, and are written
+/// back; in XLSX, which has no form for them, the protection is kept without the password.
+#[test]
+fn ods_protection_keys_are_passwords() {
+    // SHA-256 of "abc", base64.
+    let key = "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=";
+    let doc = format!(
+        r#"<?xml version="1.0"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:spreadsheet table:structure-protected="true" table:protection-key="{key}" table:protection-key-digest-algorithm="http://www.w3.org/2000/09/xmldsig#sha256"><table:table table:name="Data" table:protected="true" table:protection-key="{key}" table:protection-key-digest-algorithm="http://www.w3.org/2000/09/xmldsig#sha256"><table:table-row><table:table-cell office:value-type="float" office:value="1"/></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#
+    );
+    let bytes = make_zip(&[("mimetype", MIME), ("META-INF/manifest.xml", MANIFEST), ("content.xml", doc.as_bytes())]);
+    let check = |wb: &gridcraft_model::Workbook| {
+        let p = wb.sheets[0].protection.as_ref().and_then(|p| p.password.clone()).unwrap();
+        assert!(p.verify("abc").unwrap() && !p.verify("x").unwrap());
+        assert!(wb.protected_structure && wb.structure_password.as_ref().unwrap().verify("abc").unwrap());
+    };
+    let (wb, _) = read_ods(&bytes).unwrap();
+    check(&wb);
+    check(&read_ods(&write_ods(&wb).unwrap()).unwrap().0);
+    let (x, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
+    assert!(x.sheets[0].protection.is_some());
+}

@@ -35,9 +35,22 @@ impl PasswordHash {
 
     /// Whether `password` matches. `Err` when the hash can't be checked (unsupported algorithm,
     /// broken base64, spin count over [`MAX_SPIN_COUNT`]).
+    /// The algorithm name of an OpenDocument protection key: the SHA-256 digest of the
+    /// password's UTF-8 bytes, unsalted (ODF 1.3 part 3 §19.699, `table:protection-key`).
+    pub const ODF_SHA256: &'static str = "ODF-SHA-256";
+
+    /// An OpenDocument protection key (base64 SHA-256 of the password) as read from a file.
+    pub fn odf_sha256(key: &str) -> PasswordHash {
+        PasswordHash::Iterated { algorithm: Self::ODF_SHA256.into(), hash: key.trim().to_string(), salt: String::new(), spin_count: 0 }
+    }
+
     pub fn verify(&self, password: &str) -> Result<bool, String> {
         match self {
             PasswordHash::Legacy(h) => Ok(legacy_hash(password) == *h),
+            PasswordHash::Iterated { algorithm, hash, .. } if algorithm == Self::ODF_SHA256 => {
+                let want = crate::b64::decode(hash).ok_or_else(|| "the stored password hash is damaged".to_string())?;
+                Ok(sha2::Sha256::digest(password.as_bytes()).as_slice() == want.as_slice())
+            }
             PasswordHash::Iterated { algorithm, hash, salt, spin_count } => {
                 if algorithm.is_empty() {
                     return Err("the stored password hash is damaged".into());
@@ -130,6 +143,16 @@ mod tests {
         assert!(!other("SHA-256", 2).verify("s3cret")?);
         let broken = PasswordHash::Iterated { algorithm: "SHA-512".into(), hash: "!!".into(), salt: salt.clone(), spin_count: 1 };
         assert!(broken.verify("s3cret").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn odf_protection_keys_verify() -> Result<(), Box<dyn std::error::Error>> {
+        // SHA-256 of "abc", base64.
+        let h = PasswordHash::odf_sha256("ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=");
+        assert!(h.verify("abc")?);
+        assert!(!h.verify("abd")?);
+        assert!(PasswordHash::odf_sha256("!!").verify("abc").is_err());
         Ok(())
     }
 }

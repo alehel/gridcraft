@@ -347,7 +347,12 @@ impl<'a> Writer<'a> {
     }
 
     fn content(&mut self) -> String {
-        let mut body = String::from("<office:body><office:spreadsheet>");
+        let mut body = String::from("<office:body><office:spreadsheet");
+        if self.wb.protected_structure {
+            body.push_str(" table:structure-protected=\"true\"");
+            body.push_str(&protection_key(self.wb.structure_password.as_ref()));
+        }
+        body.push('>');
         let calc = &self.wb.calc;
         let d1904 = self.wb.date_system == DateSystem::D1904;
         if calc.iterative || calc.precision_as_displayed || d1904 {
@@ -466,8 +471,9 @@ impl<'a> Writer<'a> {
         if let Some(area) = sh.print.print_area {
             let _ = write!(attrs, " table:print-ranges=\"{}\"", esc_attr(&range_address(&sh.name, area)));
         }
-        if sh.protection.is_some() {
+        if let Some(p) = &sh.protection {
             attrs.push_str(" table:protected=\"true\"");
+            attrs.push_str(&protection_key(p.password.as_ref()));
         }
         let _ = write!(out, "<table:table{attrs}>");
         if sh.protection.is_some() {
@@ -1053,6 +1059,17 @@ impl<'a> Writer<'a> {
     /// Data styles for the styles part: the conditional and default ones, which named styles use.
     fn data_xml_styles(&self) -> String {
         self.data_xml.clone()
+    }
+}
+
+/// A password as `table:protection-key` attributes: only an OpenDocument key has a form here
+/// (Excel's salted hashes can't be turned into one), so others protect without a password.
+fn protection_key(p: Option<&gridcraft_model::PasswordHash>) -> String {
+    match p {
+        Some(gridcraft_model::PasswordHash::Iterated { algorithm, hash, .. }) if algorithm == gridcraft_model::PasswordHash::ODF_SHA256 => {
+            format!(" table:protection-key=\"{}\" table:protection-key-digest-algorithm=\"http://www.w3.org/2000/09/xmldsig#sha256\"", esc_attr(hash))
+        }
+        _ => String::new(),
     }
 }
 
