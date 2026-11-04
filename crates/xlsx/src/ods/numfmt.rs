@@ -323,7 +323,13 @@ fn bracket(b: &str, section: &mut Section, toks: &mut Vec<Tok>) {
             toks.push(Tok::Part(Part::Currency { symbol: symbol.to_string() }));
         }
     } else if b.starts_with(['<', '>', '=']) {
-        section.cond = Some(b.to_string());
+        // A condition is an operator and a number (LibreOffice's "any number" bound,
+        // `<=1.79769313486232E+308`, rounds past the largest float); anything else is none.
+        let op_len = b.chars().take_while(|c| matches!(c, '<' | '>' | '=')).count();
+        let (op, num) = b.split_at(op_len);
+        if matches!(op, "<" | ">" | "=" | "<=" | ">=" | "<>") && num.trim().parse::<f64>().is_ok_and(|v| !v.is_nan()) {
+            section.cond = Some(format!("{op}{}", num.trim()));
+        }
     } else if let Some(l @ ('h' | 'm' | 's')) = lower.chars().next()
         && lower.chars().all(|c| c == l)
     {
@@ -432,9 +438,9 @@ fn number_run(toks: &[Tok], i: usize, n: &str, out: &mut Vec<Part>) -> usize {
         out.push(Part::Fraction { int: None, numerator: digit_count(n).max(1), denominator: *den });
         return i + 2;
     }
-    if let (Some(Tok::Part(Part::Lit(sp))), Some(Tok::Num(numer)), Some(Tok::Frac(den))) = (toks.get(i + 1), toks.get(i + 2), toks.get(i + 3))
-        && sp.trim().is_empty()
-    {
+    // A whole part joined to the fraction by any text (`0 ?/?`, `0" and "?/?`): ODF's fraction
+    // holds no text there, so the text is dropped rather than the denominator.
+    if let (Some(Tok::Part(Part::Lit(_))), Some(Tok::Num(numer)), Some(Tok::Frac(den))) = (toks.get(i + 1), toks.get(i + 2), toks.get(i + 3)) {
         out.push(Part::Fraction { int: Some(int_mask(n)), numerator: digit_count(numer).max(1), denominator: *den });
         return i + 4;
     }
@@ -454,6 +460,7 @@ fn number_run(toks: &[Tok], i: usize, n: &str, out: &mut Vec<Part>) -> usize {
     let mut j = i + 1;
     while !runs.last().is_some_and(|r| r.contains('.'))
         && let (Some(Tok::Part(Part::Lit(l))), Some(Tok::Num(m))) = (toks.get(j), toks.get(j + 1))
+        && !matches!(toks.get(j + 2), Some(Tok::Frac(_)))
     {
         texts.push(l);
         runs.push(m);
@@ -502,7 +509,8 @@ fn print_literal(out: &mut String, text: &str, date: bool) {
 }
 
 fn print_int(out: &mut String, int: &IntMask, embedded: &[(usize, String)]) {
-    let width = int.width.max(int.min).max(if int.grouping { 4 } else { 1 }).max(embedded.iter().map(|(p, _)| *p).max().unwrap_or(0));
+    // A digit stands left of every embedded text, or the text would lead the number.
+    let width = int.width.max(int.min).max(if int.grouping { 4 } else { 1 }).max(embedded.iter().map(|(p, _)| *p + 1).max().unwrap_or(0));
     for pos in (0..width).rev() {
         for (_, text) in embedded.iter().filter(|(p, _)| *p == pos + 1) {
             print_literal(out, text, false);
@@ -764,10 +772,21 @@ pub(crate) fn write_style(name: &str, code: &str) -> Option<String> {
     // The last section is the main style; the others are mapped from it by their conditions:
     // stated ones, or Excel's implicit positive;negative;zero;text.
     let explicit = sections.iter().any(|s| s.cond.is_some());
-    let n = sections.len();
-    if n == 1 && explicit {
+    if sections.len() == 1 && explicit {
         // One conditional section: other values show as General.
         sections.push(Section { parts: vec![Part::General], ..Section::default() });
+    }
+    let n = sections.len();
+    // A last text section (`0.00;@`) takes text only: the sections before it share the numbers
+    // as if it weren't there, a lone one showing negatives with a minus.
+    let text_last = !explicit && (2..4).contains(&n) && sections.last().is_some_and(|s| s.parts.contains(&Part::Text));
+    if text_last
+        && n == 2
+        && let Some(first) = sections.first().cloned()
+    {
+        let mut parts = vec![Part::Lit("-".into())];
+        parts.extend(first.parts.iter().cloned());
+        sections.insert(1, Section { parts, ..first });
     }
     let n = sections.len();
     let mut out = String::new();
@@ -776,12 +795,13 @@ pub(crate) fn write_style(name: &str, code: &str) -> Option<String> {
         let part = format!("{name}P{i}");
         let mut mapped = s.clone();
         let condition = match mapped.cond.take() {
-            Some(c) => c,
+            // ODF writes Excel's `<>` as `!=`.
+            Some(c) => c.replacen("<>", "!=", 1),
             None if explicit => ">=0".into(),
-            None => match (n, i) {
-                (2, _) => ">=0".into(),
-                (_, 0) => ">0".into(),
-                (_, 1) => "<0".into(),
+            None => match (n, i, text_last) {
+                (2, ..) | (3, 0, true) => ">=0".into(),
+                (_, 0, _) => ">0".into(),
+                (_, 1, _) => "<0".into(),
                 _ => "=0".into(),
             },
         };
@@ -863,7 +883,13 @@ pub(crate) fn code(styles: &HashMap<String, DataStyle>, name: &str) -> Option<St
         .collect();
     let conds: Vec<&str> = mapped.iter().map(|(c, _)| c.as_deref().unwrap_or("?")).collect();
     // Excel's implicit sections (positive;negative[;zero[;text]]) need no conditions.
-    let implicit = matches!(conds.as_slice(), [">=0"] | [">0", "<0"] | [">0", "<0", "=0"]);
+    // (with a text section last, positive-and-zero;negative;text).
+    let text_main = own.parts.contains(&Part::Text);
+    let implicit = match conds.as_slice() {
+        [">=0"] | [">0", "<0"] | [">0", "<0", "=0"] => true,
+        [">=0", "<0"] => text_main,
+        _ => false,
+    };
     let mut sections: Vec<Section> = mapped.into_iter().map(|(cond, s)| Section { cond: if implicit { None } else { cond }, ..s }).collect();
     sections.push(own.clone());
     Some(print_code(&sections))
@@ -1158,6 +1184,15 @@ mod tests {
             ("0,.0", "0.0,"),
             ("\"\"", "\"\""),
             ("d [h]:mm", "d [h]:mm"),
+            // Round three: leading # before embedded text, a fraction joined by text, a text
+            // section after fewer than three number sections, and conditions.
+            ("###-####", "#-####"),
+            ("(###) ###-####", "(#) ###-####"),
+            ("0\" and \"?/?", "0 ?/?"),
+            ("0.00;@", "0.00;-0.00;@"),
+            ("0;-0;@", "0;-0;@"),
+            ("[<>0]0;\"zero\"", "[<>0]0;\"zero\""),
+            ("[>abc]0", "0"),
         ] {
             assert_eq!(round_trip(code), back, "{code}");
         }

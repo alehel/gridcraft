@@ -554,6 +554,10 @@ pub(crate) fn write_font(tp: &mut String, f: &Font, g: &Font, theme: &gridcraft_
     }
     if f.color != g.color {
         match hex(f.color, theme) {
+            // A colour over an automatic one turns the automatic colour off: it would win.
+            Some(c) if hex(g.color, theme).is_none() => {
+                let _ = write!(tp, " fo:color=\"{c}\" style:use-window-font-color=\"false\"");
+            }
             Some(c) => {
                 let _ = write!(tp, " fo:color=\"{c}\"");
             }
