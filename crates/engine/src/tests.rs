@@ -5971,3 +5971,59 @@ fn table_rename_renames_every_reference() {
     assert_eq!(sh.pivots[0].source, "Data");
     s.execute("data.refreshAll", json!({})).unwrap();
 }
+
+/// Rules moved whole keep their formulas; a range an edit leaves in place keeps them too;
+/// thresholds are read as written; a cut to another sheet names the source sheet's cells.
+#[test]
+fn rules_moved_whole_or_left_in_place_keep_their_formulas() {
+    let cf = |s: &Session, sheet: usize| -> Vec<String> {
+        s.doc().unwrap().wb.sheets[sheet]
+            .cond_formats
+            .iter()
+            .map(|c| match &c.rule {
+                gridcraft_model::CfRule::Expression { formula, .. } => {
+                    format!("{}@{}", formula.trim_start_matches('='), c.ranges.iter().map(|r| r.a1()).collect::<Vec<_>>().join(","))
+                }
+                gridcraft_model::CfRule::DataBar { min: gridcraft_model::CfValueKind::Formula(f), .. } => format!("bar {f}"),
+                _ => String::new(),
+            })
+            .collect()
+    };
+    let rule = |s: &mut Session, range: &str, f: &str| {
+        s.execute("home.clearRules", json!({"whole": true})).ok();
+        s.execute("home.conditionalFormat", json!({"range": range, "rule": {"type": "expression", "formula": f}, "style": {"fill": "#FFC7CE"}}))
+            .unwrap();
+    };
+    let mut s = s();
+    rule(&mut s, "B1:B5", "=C1>0");
+    s.execute("sheet.moveColumns", json!({"cols": "B:B", "before": 4})).unwrap();
+    // The column moved whole: the rule tests the column that was beside it (C, now B), as a
+    // formula there would.
+    assert_eq!(cf(&s, 0), vec!["B1>0@D1:D5".to_string()]);
+    let mut s = super::tests::s();
+    rule(&mut s, "A1:C1", "=B1>0");
+    s.execute("home.deleteCells", json!({"range": "A1", "shift": "up"})).unwrap();
+    assert_eq!(cf(&s, 0), vec!["B1>0@A1:C1".to_string()]);
+    // A data bar's threshold formula is read as written: deleting the first row only moves it.
+    let mut s = super::tests::s();
+    s.execute("home.conditionalFormat", json!({"range": "A1:A10", "rule": {"type": "dataBar", "min": {"type": "formula", "value": "MIN(C1:C10)"}}}))
+        .unwrap();
+    assert_eq!(cf(&s, 0), vec!["bar MIN(C1:C10)".to_string()]);
+    s.execute("home.deleteRows", json!({"rows": "1:1"})).unwrap();
+    assert_eq!(cf(&s, 0), vec!["bar MIN(C1:C9)".to_string()]);
+    // A cut to another sheet: the rule still reads the source sheet's cells.
+    let mut s = super::tests::s();
+    s.execute("home.insertSheet", json!({"name": "Two"})).unwrap();
+    let one = s.doc().unwrap().wb.sheet_index("Sheet1").unwrap();
+    let two = s.doc().unwrap().wb.sheet_index("Two").unwrap();
+    s.execute("sheet.activate", json!({"sheet": one})).ok();
+    s.execute(
+        "home.conditionalFormat",
+        json!({"range": "Sheet1!A2:A4", "rule": {"type": "expression", "formula": "=B2>0"}, "style": {"fill": "#FFC7CE"}}),
+    )
+    .unwrap();
+    s.execute("edit.cut", json!({"range": "Sheet1!A2:A4"})).unwrap();
+    s.execute("sheet.activate", json!({"sheet": two})).unwrap();
+    s.execute("edit.paste", json!({"at": "F2"})).unwrap();
+    assert_eq!(cf(&s, two), vec!["Sheet1!B2>0@F2:F4".to_string()]);
+}

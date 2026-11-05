@@ -353,14 +353,30 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 /// A cut takes its cells' conditional formats and validation with it, from sheet `from` to the
-/// block at `at` on sheet `to`, replacing the rules there. On the same sheet the moved parts'
-/// formulas stay written for where their cells were, so the reference rewrite for the move
-/// shifts them once, as it does the cut cells' formulas; on another sheet they are written for
-/// where their cells land. `snapshot` is the source sheet as it was cut.
+/// block at `at` on sheet `to`, replacing the rules there. The moved parts' formulas are handled
+/// as the cut cells' are: kept written for where their cells were (on another sheet, with
+/// their references to it named), so the reference rewrite for the move shifts those into the
+/// block once. `snapshot` is the source sheet as it was cut.
 fn move_cut_rules(cx: &mut crate::cmd::Ctx, snapshot: &gridcraft_model::Sheet, (from, to): (usize, usize), src: RangeRef, at: CellRef) -> Result<()> {
-    let host = |was: CellRef, landed: CellRef| if from == to { was } else { landed };
-    let cfs = crate::cmd::data::moved_rule_parts(&snapshot.cond_formats, src, at, host);
-    let dvs = crate::cmd::data::moved_rule_parts(&snapshot.validations, src, at, host);
+    use crate::cmd::data::Rule;
+    let mut cfs = crate::cmd::data::moved_rule_parts(&snapshot.cond_formats, src, at);
+    let mut dvs = crate::cmd::data::moved_rule_parts(&snapshot.validations, src, at);
+    if from != to {
+        let name = |t: &mut String| {
+            if let Ok(e) = gridcraft_formula::parse(t.trim_start_matches('=')) {
+                let e = e.map(&mut |x| match x {
+                    gridcraft_formula::Expr::Ref(mut r) if r.sheet == gridcraft_formula::SheetSel::Current => {
+                        r.sheet = gridcraft_formula::SheetSel::Named(snapshot.name.clone());
+                        gridcraft_formula::Expr::Ref(r)
+                    }
+                    other => other,
+                });
+                *t = format!("{}{}", if t.starts_with('=') { "=" } else { "" }, gridcraft_formula::print(&e));
+            }
+        };
+        cfs.iter_mut().flat_map(|r| r.parts().1).for_each(name);
+        dvs.iter_mut().flat_map(|r| r.parts().1).for_each(name);
+    }
     let source = cx.sheet_mut(from)?;
     crate::cmd::data::remove_rule_cells(&mut source.cond_formats, &[src]);
     crate::cmd::data::remove_rule_cells(&mut source.validations, &[src]);

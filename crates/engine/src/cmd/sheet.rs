@@ -154,10 +154,9 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
     }
     sh.merges = sh.merges.iter().filter_map(|m| map_range(*m)).filter(|m| !m.is_single()).collect();
     for cf in sh.cond_formats.iter_mut() {
-        let before = RangeRef::top_left(&cf.ranges);
-        cf.ranges = cf.ranges.iter().filter_map(|r| map_range(*r)).collect();
-        let after = RangeRef::top_left(&cf.ranges);
-        rehost_rule(cf.rule.formulas_mut(), before, after, &e);
+        let moves: Vec<(RangeRef, RangeRef)> = cf.ranges.iter().filter_map(|r| map_range(*r).map(|m| (*r, m))).collect();
+        cf.ranges = moves.iter().map(|(_, m)| *m).collect();
+        rehost_rule(cf.rule.relative_formulas_mut(), &moves, &e);
     }
     for er in sh.edit_ranges.iter_mut() {
         er.ranges = er.ranges.iter().filter_map(|r| map_range(*r)).collect();
@@ -165,10 +164,9 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
     sh.edit_ranges.retain(|er| !er.ranges.is_empty());
     sh.cond_formats.retain(|cf| !cf.ranges.is_empty());
     for dv in sh.validations.iter_mut() {
-        let before = RangeRef::top_left(&dv.ranges);
-        dv.ranges = dv.ranges.iter().filter_map(|r| map_range(*r)).collect();
-        let after = RangeRef::top_left(&dv.ranges);
-        rehost_rule(dv.formulas_mut(), before, after, &e);
+        let moves: Vec<(RangeRef, RangeRef)> = dv.ranges.iter().filter_map(|r| map_range(*r).map(|m| (*r, m))).collect();
+        dv.ranges = moves.iter().map(|(_, m)| *m).collect();
+        rehost_rule(dv.formulas_mut(), &moves, &e);
     }
     sh.validations.retain(|dv| !dv.ranges.is_empty());
     for t in sh.tables.iter_mut() {
@@ -704,12 +702,37 @@ pub(crate) fn map_range(r: RangeRef, e: &Edit) -> Option<RangeRef> {
 }
 
 /// A conditional format's or validation's formulas are written for its ranges' top-left cell.
-/// When an edit moves the ranges so another cell becomes the top-left (the old one deleted),
-/// they are re-hosted at that cell where it stood before the edit; rewriting the workbook's
-/// references for the edit then moves them as it moves a formula there.
-fn rehost_rule(formulas: Vec<&mut String>, before: Option<CellRef>, after: Option<CellRef>, e: &Edit) {
-    let (Some(from), Some(to)) = (before, after) else { return };
-    let at = pre_image(e, to);
+/// When an edit moves its ranges (`moves`: each range before and after) so the top-left is
+/// another cell, they are re-hosted at that cell where it stood before the edit; rewriting the
+/// workbook's references for the edit then moves them as it moves a formula there. A range
+/// moved whole keeps its cells in step, so its top-left stood where the range's offset says;
+/// only one cut short (its first cells deleted) takes the cell that moved into its place.
+fn rehost_rule(formulas: Vec<&mut String>, moves: &[(RangeRef, RangeRef)], e: &Edit) {
+    let (Some(from), Some(to)) = (
+        RangeRef::top_left(&moves.iter().map(|(r, _)| *r).collect::<Vec<_>>()),
+        RangeRef::top_left(&moves.iter().map(|(_, m)| *m).collect::<Vec<_>>()),
+    ) else {
+        return;
+    };
+    let whole = |(r, m): &(RangeRef, RangeRef)| r.width() == m.width() && r.height() == m.height();
+    let back = |c: CellRef, (r, m): &(RangeRef, RangeRef)| {
+        CellRef::new(
+            (i64::from(c.row) - i64::from(m.start.row) + i64::from(r.start.row)).max(0) as u32,
+            (i64::from(c.col) - i64::from(m.start.col) + i64::from(r.start.col)).max(0) as u32,
+        )
+    };
+    let holder = moves.iter().find(|(_, m)| m.contains(to));
+    let same_shift = moves.iter().all(whole)
+        && moves.windows(2).all(|w| match w {
+            [a, b] => back(to, a) == back(to, b),
+            _ => true,
+        });
+    let at = match holder {
+        Some(p) if whole(p) => back(to, p),
+        Some(_) => pre_image(e, to),
+        None if same_shift => moves.first().map_or(to, |p| back(to, p)),
+        None => pre_image(e, to),
+    };
     if at != from {
         for f in formulas {
             *f = crate::cmd::data::move_rule_formula(f, from, at);
@@ -724,6 +747,7 @@ fn pre_image(e: &Edit, c: CellRef) -> CellRef {
         Edit::InsertCells { axis, range } | Edit::DeleteCells { axis, range } => {
             (axis, if axis == Axis::Rows { range.height() } else { range.width() })
         }
+        // A move takes ranges whole, which `rehost_rule` handles by their offset.
         Edit::Move { .. } | Edit::MoveToSheet { .. } => return c,
     };
     let along = |d: i64| match axis {
@@ -743,10 +767,9 @@ pub(super) fn shift_cell_features(sh: &mut Sheet, e: &Edit) {
     let map_cell = |c: CellRef| map_range(RangeRef::cell(c), e).map(|r| r.start);
     sh.merges = sh.merges.iter().filter_map(|m| map_range(*m, e)).filter(|m| !m.is_single()).collect();
     for cf in sh.cond_formats.iter_mut() {
-        let before = RangeRef::top_left(&cf.ranges);
-        cf.ranges = cf.ranges.iter().filter_map(|r| map_range(*r, e)).collect();
-        let after = RangeRef::top_left(&cf.ranges);
-        rehost_rule(cf.rule.formulas_mut(), before, after, e);
+        let moves: Vec<(RangeRef, RangeRef)> = cf.ranges.iter().filter_map(|r| map_range(*r, e).map(|m| (*r, m))).collect();
+        cf.ranges = moves.iter().map(|(_, m)| *m).collect();
+        rehost_rule(cf.rule.relative_formulas_mut(), &moves, e);
     }
     for er in sh.edit_ranges.iter_mut() {
         er.ranges = er.ranges.iter().filter_map(|r| map_range(*r, e)).collect();
@@ -754,10 +777,9 @@ pub(super) fn shift_cell_features(sh: &mut Sheet, e: &Edit) {
     sh.edit_ranges.retain(|er| !er.ranges.is_empty());
     sh.cond_formats.retain(|cf| !cf.ranges.is_empty());
     for dv in sh.validations.iter_mut() {
-        let before = RangeRef::top_left(&dv.ranges);
-        dv.ranges = dv.ranges.iter().filter_map(|r| map_range(*r, e)).collect();
-        let after = RangeRef::top_left(&dv.ranges);
-        rehost_rule(dv.formulas_mut(), before, after, e);
+        let moves: Vec<(RangeRef, RangeRef)> = dv.ranges.iter().filter_map(|r| map_range(*r, e).map(|m| (*r, m))).collect();
+        dv.ranges = moves.iter().map(|(_, m)| *m).collect();
+        rehost_rule(dv.formulas_mut(), &moves, e);
     }
     sh.validations.retain(|dv| !dv.ranges.is_empty());
     for t in sh.tables.iter_mut() {

@@ -231,8 +231,19 @@ pub enum CfRule {
 }
 
 impl CfRule {
-    /// The rule's formulas (for its range's top-left cell): what an edit that moves references
-    /// rewrites, and what moving the rule re-hosts.
+    /// The formulas written for the rule's range's top-left cell (and read at each cell
+    /// relative to it): a cell-value rule's values and an expression. What moving the rule
+    /// re-hosts. Thresholds (colour scale, data bar, icon set) are read as written.
+    pub fn relative_formulas_mut(&mut self) -> Vec<&mut String> {
+        match self {
+            CfRule::CellIs { a, b, .. } => std::iter::once(a).chain(b.as_mut()).collect(),
+            CfRule::Expression { formula, .. } => vec![formula],
+            _ => Vec::new(),
+        }
+    }
+
+    /// All the rule's formulas, thresholds included: what an edit that moves references
+    /// rewrites.
     pub fn formulas_mut(&mut self) -> Vec<&mut String> {
         let kinds: Vec<&mut CfValueKind> = match self {
             CfRule::CellIs { a, b, .. } => return std::iter::once(a).chain(b.as_mut()).collect(),

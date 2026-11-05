@@ -44,13 +44,14 @@ pub(in super::super) trait Rule: Clone {
 
 impl Rule for Validation {
     fn parts(&mut self) -> (&mut Vec<RangeRef>, Vec<&mut String>) {
-        (&mut self.ranges, std::iter::once(&mut self.f1).chain(self.f2.as_mut()).collect())
+        let Validation { ranges, f1, f2, .. } = self;
+        (ranges, std::iter::once(f1).chain(f2.as_mut()).collect())
     }
 }
 
 impl Rule for gridcraft_model::CondFormat {
     fn parts(&mut self) -> (&mut Vec<RangeRef>, Vec<&mut String>) {
-        (&mut self.ranges, self.rule.formulas_mut())
+        (&mut self.ranges, self.rule.relative_formulas_mut())
     }
 }
 
@@ -79,9 +80,9 @@ pub(in super::super) fn remove_rule_cells<T: Rule>(rules: &mut Vec<T>, cuts: &[R
 }
 
 /// The parts of `rules` inside `block`, moved to the block at `to`, as a cut takes them with
-/// its cells. Each part's formulas are written for the cell `host` gives for the part's
-/// top-left (where its cells were, or where they land).
-pub(in super::super) fn moved_rule_parts<T: Rule>(rules: &[T], block: RangeRef, to: CellRef, host: impl Fn(CellRef, CellRef) -> CellRef) -> Vec<T> {
+/// its cells. Each part's formulas stay written for where its top-left cell was, as a cut
+/// cell's formula is copied: the reference rewrite for the move then shifts them.
+pub(in super::super) fn moved_rule_parts<T: Rule>(rules: &[T], block: RangeRef, to: CellRef) -> Vec<T> {
     let dr = i64::from(to.row) - i64::from(block.start.row);
     let dc = i64::from(to.col) - i64::from(block.start.col);
     let mut out = Vec::new();
@@ -92,10 +93,8 @@ pub(in super::super) fn moved_rule_parts<T: Rule>(rules: &[T], block: RangeRef, 
         let inside: Vec<RangeRef> = ranges.iter().filter_map(|r| r.intersection(&block)).collect();
         let Some(from) = RangeRef::top_left(&inside) else { continue };
         let moved: Vec<RangeRef> = inside.iter().filter_map(|r| Some(RangeRef::new(r.start.offset(dr, dc)?, r.end.offset(dr, dc)?))).collect();
-        let Some(landed) = RangeRef::top_left(&moved) else { continue };
-        let at = host(from, landed);
         for f in formulas {
-            *f = move_rule_formula(f, first, at);
+            *f = move_rule_formula(f, first, from);
         }
         *ranges = moved;
         out.push(part);
