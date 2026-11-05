@@ -1123,3 +1123,22 @@ fn ods_turned_text_keeps_its_cell_upright() {
     let xml = String::from_utf8(crate::write_fods(&wb, None).unwrap()).unwrap();
     assert!(xml.contains(r#"style:rotation-angle="5" style:rotation-align="none""#), "{xml}");
 }
+
+/// The default style's languages and Asian/complex fonts survive a save: without them
+/// LibreOffice takes its own locale's (en-US, zh-CN, hi-IN) and picks other CJK fonts.
+#[test]
+fn ods_default_languages_and_script_fonts_round_trip() {
+    let styles = r#"<?xml version="1.0"?><office:document-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"><office:font-face-decls><style:font-face style:name="CJK Face" svg:font-family="'Sample Mincho'"/></office:font-face-decls><office:styles><style:default-style style:family="table-cell"><style:text-properties fo:language="de" fo:country="DE" style:language-asian="ja" style:country-asian="JP" style:font-name-asian="CJK Face" style:language-complex="ar" style:country-complex="SA" style:font-family-complex="'Sample Naskh'"/></style:default-style></office:styles></office:document-styles>"#;
+    let manifest = br#"<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/><manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/></manifest:manifest>"#;
+    let body = content(r#"<table:table table:name="Data"><table:table-row><table:table-cell/></table:table-row></table:table>"#);
+    let pkg =
+        make_zip(&[("mimetype", MIME), ("META-INF/manifest.xml", manifest), ("content.xml", body.as_bytes()), ("styles.xml", styles.as_bytes())]);
+    let (wb, _) = read_ods(&pkg).unwrap();
+    let d = &wb.text_defaults;
+    let s = |v: &Option<String>| v.clone().unwrap_or_default();
+    assert_eq!((s(&d.western.language), s(&d.western.country)), ("de".into(), "DE".into()));
+    assert_eq!((s(&d.asian.language), s(&d.asian.country), s(&d.asian.font)), ("ja".into(), "JP".into(), "Sample Mincho".into()));
+    assert_eq!((s(&d.complex.language), s(&d.complex.country), s(&d.complex.font)), ("ar".into(), "SA".into(), "Sample Naskh".into()));
+    let (again, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+    assert_eq!(&again.text_defaults, d);
+}

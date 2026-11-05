@@ -144,6 +144,42 @@ pub struct DefinedName {
     pub hidden: bool,
 }
 
+/// The language, country and font a document gives one script's text by default, each `None`
+/// when unstated. Codes are as files spell them (`de`/`DE`; ODF's `zxx`/`none` for no language).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ScriptDefault {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    /// Asian and complex text only: Western text takes the default style's font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+}
+
+impl ScriptDefault {
+    pub fn is_empty(&self) -> bool {
+        self.language.is_none() && self.country.is_none() && self.font.is_none()
+    }
+}
+
+/// Default language and fonts of Western, Asian (CJK) and complex (right-to-left, Indic) text.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TextDefaults {
+    #[serde(default, skip_serializing_if = "ScriptDefault::is_empty")]
+    pub western: ScriptDefault,
+    #[serde(default, skip_serializing_if = "ScriptDefault::is_empty")]
+    pub asian: ScriptDefault,
+    #[serde(default, skip_serializing_if = "ScriptDefault::is_empty")]
+    pub complex: ScriptDefault,
+}
+
+impl TextDefaults {
+    pub fn is_empty(&self) -> bool {
+        self.western.is_empty() && self.asian.is_empty() && self.complex.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DocProps {
     pub title: String,
@@ -261,6 +297,10 @@ pub struct Workbook {
     /// Shared between snapshots, as nothing changes them.
     #[serde(skip)]
     pub macros_unread: Arc<Vec<serde_json::Value>>,
+    /// The language and fonts the document gives text of each script by default (an
+    /// OpenDocument file's default cell style). Empty unless a file stated them.
+    #[serde(default, skip_serializing_if = "TextDefaults::is_empty")]
+    pub text_defaults: TextDefaults,
     /// Unmodelled file content kept for saving (package root and workbook level). Not in JSON.
     #[serde(skip)]
     pub preserved: Option<Arc<crate::preserved::Preserved>>,
@@ -451,6 +491,7 @@ impl Workbook {
             macros: crate::macros::Macros::default(),
             macros_read: vec![],
             macros_unread: Arc::default(),
+            text_defaults: TextDefaults::default(),
             preserved: None,
             source_dir: None,
             source_path: None,

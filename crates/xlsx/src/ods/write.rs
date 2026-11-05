@@ -1117,6 +1117,11 @@ impl<'a> Writer<'a> {
         let mut o = String::new();
         let mut tp = String::new();
         style::write_font(&mut tp, &default.font, &base.font, &self.wb.theme);
+        let mut decls = vec![];
+        style::write_text_defaults(&mut tp, &self.wb.text_defaults, |f| decls.push(f.to_string()));
+        for f in decls {
+            self.font(&f);
+        }
         let _ = write!(o, "<style:default-style style:family=\"table-cell\"><style:text-properties{tp}/></style:default-style>");
         // The font is the default style's; the Default style states the rest.
         let mut no_font = default.clone();

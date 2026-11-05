@@ -456,6 +456,9 @@ impl Import {
         for e in list.elems() {
             if e.is(Ns::Style, "default-style") && e.attr(Ns::Style, "family") == Some("table-cell") {
                 self.default_props = style::read_props(e, &self.fonts);
+                if let Some(tp) = e.child(Ns::Style, "text-properties") {
+                    self.wb.text_defaults = style::read_text_defaults(tp, &self.fonts);
+                }
                 continue;
             }
             if e.is(Ns::Style, "page-layout") {

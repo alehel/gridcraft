@@ -277,6 +277,48 @@ fn paragraph_props(pp: &Elem, cell_align: bool, p: &mut Props) {
 }
 
 /// `style:text-properties`: the font.
+/// The longest language, country or font name kept from a default style.
+const MAX_TEXT_DEFAULT: usize = 128;
+
+/// The default style's language, country and Asian/complex fonts (`style:text-properties`).
+pub(crate) fn read_text_defaults(tp: &Elem, fonts: &HashMap<String, String>) -> gridcraft_model::TextDefaults {
+    let kept = |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty() && v.len() <= MAX_TEXT_DEFAULT).map(str::to_string);
+    let font = |name: &str, family: &str| {
+        kept(tp.attr(Ns::Style, name).map(|n| fonts.get(n).map_or(n, String::as_str)))
+            .or_else(|| kept(tp.attr(Ns::Style, family).map(|f| f.trim().trim_matches(|c| c == '\'' || c == '"'))))
+    };
+    let script = |lang: (Ns, &str), country: (Ns, &str), f: Option<(&str, &str)>| gridcraft_model::ScriptDefault {
+        language: kept(tp.attr(lang.0, lang.1)),
+        country: kept(tp.attr(country.0, country.1)),
+        font: f.and_then(|(n, fam)| font(n, fam)),
+    };
+    gridcraft_model::TextDefaults {
+        western: script((Ns::Fo, "language"), (Ns::Fo, "country"), None),
+        asian: script((Ns::Style, "language-asian"), (Ns::Style, "country-asian"), Some(("font-name-asian", "font-family-asian"))),
+        complex: script((Ns::Style, "language-complex"), (Ns::Style, "country-complex"), Some(("font-name-complex", "font-family-complex"))),
+    }
+}
+
+/// Writes `d` as `style:text-properties` attributes; the fonts named go through `font_decl`.
+pub(crate) fn write_text_defaults(out: &mut String, d: &gridcraft_model::TextDefaults, mut font_decl: impl FnMut(&str)) {
+    let mut attr = |name: &str, v: &Option<String>| {
+        if let Some(v) = v {
+            let _ = write!(out, " {name}=\"{}\"", esc_attr(v));
+        }
+    };
+    attr("fo:language", &d.western.language);
+    attr("fo:country", &d.western.country);
+    attr("style:language-asian", &d.asian.language);
+    attr("style:country-asian", &d.asian.country);
+    attr("style:language-complex", &d.complex.language);
+    attr("style:country-complex", &d.complex.country);
+    attr("style:font-name-asian", &d.asian.font);
+    attr("style:font-name-complex", &d.complex.font);
+    for f in [&d.asian.font, &d.complex.font].into_iter().flatten() {
+        font_decl(f);
+    }
+}
+
 fn text_props(tp: &Elem, fonts: &HashMap<String, String>, p: &mut Props) {
     if let Some(n) = tp.attr(Ns::Style, "font-name") {
         p.font_name = Some(fonts.get(n).cloned().unwrap_or_else(|| n.to_string()));
