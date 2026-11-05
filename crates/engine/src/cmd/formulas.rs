@@ -1,7 +1,7 @@
 //! Formulas tab: AutoSum, Insert Function, names, auditing, calculation.
 
 use gridcraft_core::{CellError, CellRef, RangeRef, Value};
-use gridcraft_model::{CalcMode, Cell, DefinedName, Formula, Workbook};
+use gridcraft_model::{CalcMode, Cell, DefinedName, Workbook};
 use serde_json::{Value as Json, json};
 
 use super::{
@@ -438,29 +438,9 @@ fn rename_name_in_formulas(wb: &mut gridcraft_model::Workbook, old: &str, old_sc
         });
         hit.then_some(out)
     };
-    for i in 0..wb.sheets.len() {
-        if !applies(i) {
-            continue;
-        }
-        let Some(sh) = wb.sheet_mut(i) else { continue };
-        let formulas: Vec<(CellRef, std::sync::Arc<Formula>)> = sh.cells.iter().filter_map(|(c, x)| x.formula.clone().map(|f| (c, f))).collect();
-        for (c, f) in formulas {
-            let Some(e) = f.expr().and_then(rename) else { continue };
-            let mut nf = Formula::from_expr(e);
-            nf.array = f.array;
-            nf.dynamic = f.dynamic;
-            if let Some(cell) = sh.cells.get_mut(c) {
-                cell.formula = Some(std::sync::Arc::new(nf));
-            }
-        }
-    }
-    for n in wb.names.iter_mut() {
-        if n.scope.is_none_or(applies)
-            && let Some(e) = gridcraft_formula::parse_name(&n.formula).ok().and_then(rename)
-        {
-            n.formula = gridcraft_formula::print(&e);
-        }
-    }
+    // Every reference held where the renamed name is the one meant: on its sheet (or, for a
+    // workbook name, every sheet without one of its own), and in workbook names.
+    wb.rewrite_references(&|host, e| if host.sheet.is_none_or(applies) { rename(e.clone()).unwrap_or(e) } else { e });
 }
 
 /// Refuses a name of the shape GridCraft keeps its own workbook data in ([`super::stash`]):

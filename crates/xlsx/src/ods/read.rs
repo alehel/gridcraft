@@ -1300,7 +1300,7 @@ impl Import {
         }
         self.report.warn("Some ODS sheet names were shortened or renamed to valid, unique sheet names.");
         let map = |n: &str| renamed.get(&n.to_ascii_lowercase()).cloned();
-        self.wb.rewrite_references(&|e| gridcraft_formula::adjust::rename_sheets(e, &map));
+        self.wb.rewrite_references(&|_, e| gridcraft_formula::adjust::rename_sheets(e, &map));
     }
 
     /// The pivot tables of a `table:data-pilot-tables`, placed on their sheets, numbered over
@@ -1567,8 +1567,6 @@ impl Import {
         }
     }
 
-    /// Takes `n` conditional-format ranges from the import's budget; false (with a warning) when
-    /// it is spent.
     /// Counts `n` bytes of decoded text; past the import's text limit the file is refused.
     fn charge_text(&mut self, n: usize) -> Result<(), IoError> {
         self.text = self.text.saturating_add(n as u64);
@@ -1590,6 +1588,8 @@ impl Import {
         true
     }
 
+    /// Takes `n` conditional-format ranges from the import's budget; false (with a warning) when
+    /// it is spent.
     fn take_cf_ranges(&mut self, n: usize) -> bool {
         self.cf_ranges = self.cf_ranges.saturating_add(n as u64);
         let ok = self.cf_ranges <= MAX_CF_RANGES;
@@ -1707,12 +1707,8 @@ impl Import {
     }
 
     /// Adds pictures, charts and shapes to the sheet, up to the workbook's [`MAX_FRAMES`].
+    /// (They come from [`Import::read_drawings`], which reads no more than there is room for.)
     fn add_frames(&mut self, mut frames: Vec<Frame>) {
-        let room = MAX_FRAMES.saturating_sub(self.frames);
-        if frames.len() > room {
-            self.report.warn("Some ODS pictures, charts and shapes beyond the import limit were not imported.");
-            frames.truncate(room);
-        }
         // A flat document's chart is kept as its document until the pictures are loaded; one
         // past the kept-node limit is left out.
         frames.retain(|f| match &f.inline {
@@ -2001,15 +1997,16 @@ fn drawings(
 ) -> bool {
     let mut stack: Vec<(&Elem, usize)> = parent.elems().filter(|e| e.ns == Ns::Draw).map(|e| (e, 0)).collect();
     stack.reverse();
+    let mut cut = false;
     while let Some((e, depth)) = stack.pop() {
-        if out.len() >= room || *text_left == 0 {
-            return true;
-        }
         if e.name == "g" {
             if depth < 16 {
                 stack.extend(e.elems().filter(|k| k.ns == Ns::Draw).map(|k| (k, depth + 1)).collect::<Vec<_>>().into_iter().rev());
             }
             continue;
+        }
+        if out.len() >= room {
+            return true;
         }
         if e.name == "frame"
             && let Some(f) = read_frame(e, cell)
@@ -2017,12 +2014,15 @@ fn drawings(
             out.push(f);
             continue;
         }
-        if let Some(d) = super::shape::read(e, styles, (*text_left).min(dom::MAX_CELL_TEXT)) {
+        let cap = (*text_left).min(dom::MAX_CELL_TEXT);
+        if let Some(d) = super::shape::read(e, styles, cap) {
+            // Text as long as what was left of the budget was cut at it.
+            cut |= cap < dom::MAX_CELL_TEXT && d.text.len() >= cap && !e.descendants(Ns::Text, "p").is_empty();
             *text_left = text_left.saturating_sub(d.text.len());
             out.push(Frame { cell, x: d.x, y: d.y, width: d.width, height: d.height, shape: Some(d), ..Frame::default() });
         }
     }
-    false
+    cut
 }
 
 fn read_annotation(a: &Elem) -> Comment {

@@ -215,38 +215,10 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
     }
 }
 
-/// Rewrites every formula reference (chart series included), sparkline source and PivotTable
-/// source for a structural edit on `target`.
+/// Rewrites every reference the workbook holds for a structural edit on `target`.
 pub(super) fn rewrite(cx: &mut Ctx, target: &str, e: &Edit) -> Result<()> {
     cx.edits.push((target.to_string(), e.clone()));
-    let wb = &mut cx.wb;
-    super::edit::rewrite_all_formulas(wb, target, e)?;
-    for si in 0..wb.sheets.len() {
-        let host = wb.sheets.get(si).map(|s| s.name.clone()).unwrap_or_default();
-        let Some(sh) = wb.sheet_mut(si) else { continue };
-        let fix = |text: &str| -> String {
-            match gridcraft_formula::parse(text) {
-                Ok(expr) => gridcraft_formula::print(&gridcraft_formula::adjust::adjust(expr, &host, target, e)),
-                Err(_) => text.to_string(),
-            }
-        };
-        for sp in sh.sparklines.iter_mut() {
-            sp.source = fix(&sp.source);
-        }
-        // PivotTable sources (a range, table or defined name) are only rewritten when the edit
-        // moves them, so table and name sources keep their text.
-        for pt in sh.pivots.iter_mut() {
-            let body = pt.source.trim().trim_start_matches('=');
-            if let Ok(expr) = gridcraft_formula::parse(body) {
-                let before = gridcraft_formula::print(&expr);
-                let after = gridcraft_formula::print(&gridcraft_formula::adjust::adjust(expr, &host, target, e));
-                if after != before {
-                    pt.source = after;
-                }
-            }
-        }
-    }
-    Ok(())
+    super::edit::rewrite_all_formulas(&mut cx.wb, target, e)
 }
 
 /// Inserting or deleting cells moves the copied block away from the stored source range, so, like
