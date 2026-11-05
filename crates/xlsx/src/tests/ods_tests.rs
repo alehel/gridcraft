@@ -1075,3 +1075,24 @@ fn ods_header_spacing_lies_inside_its_height() {
     let (again, _) = crate::read_fods(&saved).unwrap();
     assert_eq!(again.sheets[0].print.margins.map(|v| (v * 1e4).round()), m.map(|v| (v * 1e4).round()));
 }
+
+/// A page layout with no size leaves the paper to the application (A4 or Letter by locale) and
+/// prints upright whatever its orientation says: it is read as unstated, written back without
+/// a size, and a page turned to landscape afterwards names Letter so it prints turned.
+#[test]
+fn ods_page_without_a_size_keeps_the_paper_unstated() {
+    let flat = r#"<?xml version="1.0"?><office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" office:mimetype="application/vnd.oasis.opendocument.spreadsheet"><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties style:print-orientation="landscape" fo:margin-top="1in"/></style:page-layout><style:style style:name="ta1" style:family="table" style:master-page-name="Default"/></office:automatic-styles><office:master-styles><style:master-page style:name="Default" style:page-layout-name="pm1"/></office:master-styles><office:body><office:spreadsheet><table:table table:name="S" table:style-name="ta1"><table:table-row><table:table-cell/></table:table-row></table:table></office:spreadsheet></office:body></office:document>"#;
+    let (mut wb, _) = crate::read_fods(flat.as_bytes()).unwrap();
+    let p = &wb.sheets[0].print;
+    assert_eq!((p.paper.as_str(), p.orientation), ("", gridcraft_model::Orientation::Portrait));
+    let xml = String::from_utf8(crate::write_fods(&wb, None).unwrap()).unwrap();
+    assert!(!xml.contains("fo:page-width"), "{xml}");
+    let (again, _) = crate::read_fods(xml.as_bytes()).unwrap();
+    assert_eq!(again.sheets[0].print.paper, "");
+    std::sync::Arc::make_mut(&mut wb.sheets[0]).print.orientation = gridcraft_model::Orientation::Landscape;
+    let xml = String::from_utf8(crate::write_fods(&wb, None).unwrap()).unwrap();
+    assert!(xml.contains(r#"fo:page-width="792pt" fo:page-height="612pt""#), "{xml}");
+    // A sheet with no page style at all is unstated too.
+    let (plain, _) = read_ods(&row("<table:table-cell/>")).unwrap();
+    assert_eq!(plain.sheets[0].print.paper, "");
+}

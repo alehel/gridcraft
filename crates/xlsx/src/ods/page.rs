@@ -88,6 +88,8 @@ const HF_SPACING_IN: f32 = 0.0984;
 
 /// Applies master page `name` (and its page layout) to the sheet's print settings.
 pub(crate) fn apply(sheet: &mut Sheet, name: &str, masters: &HashMap<String, Elem>, layouts: &HashMap<String, Elem>) {
+    // Without a page style giving a size the sheet prints on the application's own paper.
+    sheet.print.paper.clear();
     let Some(master) = masters.get(name) else { return };
     let p = &mut sheet.print;
     let layout = master.attr(Ns::Style, "page-layout-name").and_then(|l| layouts.get(l));
@@ -96,7 +98,10 @@ pub(crate) fn apply(sheet: &mut Sheet, name: &str, masters: &HashMap<String, Ele
     if let Some(props) = layout.and_then(|l| l.child(Ns::Style, "page-layout-properties")) {
         let w = props.attr(Ns::Fo, "page-width").and_then(length_pt);
         let h = props.attr(Ns::Fo, "page-height").and_then(length_pt);
+        // A layout without a page size prints on the application's own paper, upright whatever
+        // its orientation says (LibreOffice, observed): the paper is left unstated.
         p.orientation = match props.attr(Ns::Style, "print-orientation") {
+            _ if w.is_none() || h.is_none() => Orientation::Portrait,
             Some("landscape") => Orientation::Landscape,
             Some("portrait") => Orientation::Portrait,
             _ if w.zip(h).is_some_and(|(w, h)| w > h) => Orientation::Landscape,
@@ -105,9 +110,7 @@ pub(crate) fn apply(sheet: &mut Sheet, name: &str, masters: &HashMap<String, Ele
         // A landscape page is its paper turned: the paper is the page's size the other way.
         if let (Some(w), Some(h)) = (w, h) {
             let (pw, ph) = if p.orientation == Orientation::Landscape { (h, w) } else { (w, h) };
-            if let Some(paper) = gridcraft_model::paper::for_size(pw as f32, ph as f32) {
-                p.paper = paper.into();
-            }
+            p.paper = gridcraft_model::paper::for_size(pw as f32, ph as f32).unwrap_or("Letter").into();
         }
         let m = |n: &str| inches(props, Ns::Fo, n).or_else(|| inches(props, Ns::Fo, "margin"));
         // The header's height holds its spacing to the body (LibreOffice draws the body that
@@ -294,8 +297,11 @@ fn regions(code: &str) -> String {
 
 /// The page layout and master page elements for sheet `i`: (`style:page-layout`, `style:master-page`).
 pub(crate) fn write(i: usize, p: &PrintSettings) -> (String, String) {
-    let (w, h) = gridcraft_model::paper::size_pt(&p.paper).unwrap_or((612.0, 792.0));
-    let (w, h) = if p.orientation == Orientation::Landscape { (h, w) } else { (w, h) };
+    // An unstated paper is left to the application, unless the page is turned: a layout
+    // without a size prints upright, so a landscape page names its paper (Letter by default).
+    let size = gridcraft_model::paper::size_pt(&p.paper)
+        .or_else(|| (p.orientation == Orientation::Landscape).then_some((612.0, 792.0)))
+        .map(|(w, h)| if p.orientation == Orientation::Landscape { (h, w) } else { (w, h) });
     let mut print = vec!["charts", "drawings", "objects", "zero-values"];
     if p.gridlines {
         print.push("grid");
@@ -312,7 +318,8 @@ pub(crate) fn write(i: usize, p: &PrintSettings) -> (String, String) {
     let (top, header_extra) = if has_header { (mh, (mt - mh).max(0.0)) } else { (mt, 0.0) };
     let (bottom, footer_extra) = if has_footer { (mf, (mb - mf).max(0.0)) } else { (mb, 0.0) };
     let mut layout = format!(
-        "<style:page-layout style:name=\"pm{i}\"><style:page-layout-properties fo:page-width=\"{w}pt\" fo:page-height=\"{h}pt\" style:print-orientation=\"{}\" fo:margin-top=\"{top}in\" fo:margin-bottom=\"{bottom}in\" fo:margin-left=\"{ml}in\" fo:margin-right=\"{mr}in\" style:print-page-order=\"{}\" style:print=\"{}\"",
+        "<style:page-layout style:name=\"pm{i}\"><style:page-layout-properties{} style:print-orientation=\"{}\" fo:margin-top=\"{top}in\" fo:margin-bottom=\"{bottom}in\" fo:margin-left=\"{ml}in\" fo:margin-right=\"{mr}in\" style:print-page-order=\"{}\" style:print=\"{}\"",
+        size.map(|(w, h)| format!(" fo:page-width=\"{w}pt\" fo:page-height=\"{h}pt\"")).unwrap_or_default(),
         if p.orientation == Orientation::Landscape { "landscape" } else { "portrait" },
         if p.page_order == PageOrder::OverThenDown { "ltr" } else { "ttb" },
         print.join(" ")

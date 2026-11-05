@@ -11,7 +11,8 @@ pub enum Orientation {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PrintSettings {
     pub orientation: Orientation,
-    /// Paper size name (`Letter`, `A4`, `Legal`…).
+    /// Paper size name (`Letter`, `A4`, `Legal`…), or empty when the file stated none: the
+    /// printer's or locale's paper then, which an ODF file leaves to the application.
     pub paper: String,
     /// Margins in inches: left, right, top, bottom, header, footer.
     pub margins: [f32; 6],
