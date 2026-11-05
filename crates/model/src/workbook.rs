@@ -395,35 +395,11 @@ impl Workbook {
                     cell.formula = Some(Arc::new(Formula { array: old.array, dynamic: old.dynamic, ..new }));
                 }
             }
-            for cf in &mut sh.cond_formats {
-                let kinds: Vec<&mut crate::CfValueKind> = match &mut cf.rule {
-                    crate::CfRule::CellIs { a, b, .. } => {
-                        rewrite_text(a, &f);
-                        if let Some(b) = b {
-                            rewrite_text(b, &f);
-                        }
-                        Vec::new()
-                    }
-                    crate::CfRule::Expression { formula, .. } => {
-                        rewrite_text(formula, &f);
-                        Vec::new()
-                    }
-                    crate::CfRule::ColorScale { stops } => stops.iter_mut().map(|(k, _)| k).collect(),
-                    crate::CfRule::DataBar { min, max, .. } => vec![min, max],
-                    crate::CfRule::IconSet { thresholds, .. } => thresholds.iter_mut().collect(),
-                    _ => Vec::new(),
-                };
-                for k in kinds {
-                    if let crate::CfValueKind::Formula(t) = k {
-                        rewrite_text(t, &f);
-                    }
-                }
+            for t in sh.cond_formats.iter_mut().flat_map(|cf| cf.rule.formulas_mut()) {
+                rewrite_text(t, &f);
             }
-            for v in &mut sh.validations {
-                rewrite_text(&mut v.f1, &f);
-                if let Some(f2) = &mut v.f2 {
-                    rewrite_text(f2, &f);
-                }
+            for t in sh.validations.iter_mut().flat_map(|v| v.formulas_mut()) {
+                rewrite_text(t, &f);
             }
             for l in sh.hyperlinks.values_mut().filter(|l| !l.external) {
                 rewrite_text(&mut l.target, &f);

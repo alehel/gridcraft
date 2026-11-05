@@ -407,7 +407,7 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
         if let Some((old_name, old_scope)) = &old {
             cx.wb.names.retain(|n| !(n.name.eq_ignore_ascii_case(old_name) && n.scope == *old_scope));
             if !old_name.eq_ignore_ascii_case(&name) {
-                rename_name_in_formulas(&mut cx.wb, old_name, *old_scope, &name);
+                rename_name_in_formulas(&mut cx.wb, old_name, *old_scope, &name)?;
             }
         }
         cx.wb.names.retain(|n| !(n.name.eq_ignore_ascii_case(&name) && n.scope == scope));
@@ -420,7 +420,7 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
 /// Formulas that use a renamed name follow it: cell formulas and other names' definitions, on
 /// the sheets where `old` resolves to the renamed name (its own sheet for a sheet-scoped name;
 /// every sheet without a same-named sheet-level name for a workbook-level one).
-fn rename_name_in_formulas(wb: &mut gridcraft_model::Workbook, old: &str, old_scope: Option<usize>, new: &str) {
+fn rename_name_in_formulas(wb: &mut gridcraft_model::Workbook, old: &str, old_scope: Option<usize>, new: &str) -> Result<()> {
     let shadowed: Vec<usize> = wb.names.iter().filter(|n| n.name.eq_ignore_ascii_case(old)).filter_map(|n| n.scope).collect();
     let applies = |sheet: usize| match old_scope {
         Some(s) => s == sheet,
@@ -441,6 +441,11 @@ fn rename_name_in_formulas(wb: &mut gridcraft_model::Workbook, old: &str, old_sc
     // Every reference held where the renamed name is the one meant: on its sheet (or, for a
     // workbook name, every sheet without one of its own), and in workbook names.
     wb.rewrite_references(&|host, e| if host.sheet.is_none_or(applies) { rename(e.clone()).unwrap_or(e) } else { e });
+    // Python cells' `xl("…")` references too.
+    let sheet_of: std::collections::HashMap<String, usize> = wb.sheets.iter().enumerate().map(|(i, s)| (s.name.to_ascii_lowercase(), i)).collect();
+    crate::cmd::edit::rewrite_python_refs(wb, &|host, e| {
+        if sheet_of.get(&host.to_ascii_lowercase()).copied().is_none_or(applies) { rename(e.clone()).unwrap_or(e) } else { e }
+    })
 }
 
 /// Refuses a name of the shape GridCraft keeps its own workbook data in ([`super::stash`]):

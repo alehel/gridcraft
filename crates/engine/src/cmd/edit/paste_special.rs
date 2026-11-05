@@ -278,7 +278,7 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
                 }
             }
             // The copied cell's validation rule replaces whatever rule the destination had.
-            if !link && matches!(what, What::All | What::AllExceptBorders | What::Validation) {
+            if !link && !cut_move && matches!(what, What::All | What::AllExceptBorders | What::Validation) {
                 let rule = src_sheet.validations.iter().find(|dv| dv.ranges.iter().any(|r| r.contains(sc))).cloned();
                 let sh = cx.sheet_mut(dest_sheet)?;
                 crate::cmd::data::remove_validation_cells(&mut sh.validations, &[RangeRef::new(dest, dest)]);
@@ -321,6 +321,7 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
         // Merged areas inside the copied block travel with it.
         copy_merges(cx, dest_sheet, src_sheet, src, at, what, transpose)?;
         if cut_move {
+            move_cut_rules(cx, src_sheet, (clip.sheet, dest_sheet), src, at)?;
             // References elsewhere to the moved block now point to its new place.
             let dest_name = cx.wb.sheet(dest_sheet).map(|s| s.name.clone()).unwrap_or_default();
             let e = if dest_sheet == clip.sheet {
@@ -349,6 +350,27 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
         s.clipboard = None;
     }
     Ok(json!({"pasted": s.doc()?.selection.a1()}))
+}
+
+/// A cut takes its cells' conditional formats and validation with it, from sheet `from` to the
+/// block at `at` on sheet `to`, replacing the rules there. On the same sheet the moved parts'
+/// formulas stay written for where their cells were, so the reference rewrite for the move
+/// shifts them once, as it does the cut cells' formulas; on another sheet they are written for
+/// where their cells land. `snapshot` is the source sheet as it was cut.
+fn move_cut_rules(cx: &mut crate::cmd::Ctx, snapshot: &gridcraft_model::Sheet, (from, to): (usize, usize), src: RangeRef, at: CellRef) -> Result<()> {
+    let host = |was: CellRef, landed: CellRef| if from == to { was } else { landed };
+    let cfs = crate::cmd::data::moved_rule_parts(&snapshot.cond_formats, src, at, host);
+    let dvs = crate::cmd::data::moved_rule_parts(&snapshot.validations, src, at, host);
+    let source = cx.sheet_mut(from)?;
+    crate::cmd::data::remove_rule_cells(&mut source.cond_formats, &[src]);
+    crate::cmd::data::remove_rule_cells(&mut source.validations, &[src]);
+    let block = RangeRef::new(at, at.offset_clamped(i64::from(src.height()) - 1, i64::from(src.width()) - 1));
+    let dest = cx.sheet_mut(to)?;
+    crate::cmd::data::remove_rule_cells(&mut dest.cond_formats, &[block]);
+    crate::cmd::data::remove_rule_cells(&mut dest.validations, &[block]);
+    dest.cond_formats.extend(cfs);
+    dest.validations.extend(dvs);
+    Ok(())
 }
 
 /// Applies a reference adjustment to every reference the workbook holds

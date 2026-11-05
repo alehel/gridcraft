@@ -154,7 +154,10 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
     }
     sh.merges = sh.merges.iter().filter_map(|m| map_range(*m)).filter(|m| !m.is_single()).collect();
     for cf in sh.cond_formats.iter_mut() {
+        let before = RangeRef::top_left(&cf.ranges);
         cf.ranges = cf.ranges.iter().filter_map(|r| map_range(*r)).collect();
+        let after = RangeRef::top_left(&cf.ranges);
+        rehost_rule(cf.rule.formulas_mut(), before, after, &e);
     }
     for er in sh.edit_ranges.iter_mut() {
         er.ranges = er.ranges.iter().filter_map(|r| map_range(*r)).collect();
@@ -162,7 +165,10 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
     sh.edit_ranges.retain(|er| !er.ranges.is_empty());
     sh.cond_formats.retain(|cf| !cf.ranges.is_empty());
     for dv in sh.validations.iter_mut() {
+        let before = RangeRef::top_left(&dv.ranges);
         dv.ranges = dv.ranges.iter().filter_map(|r| map_range(*r)).collect();
+        let after = RangeRef::top_left(&dv.ranges);
+        rehost_rule(dv.formulas_mut(), before, after, &e);
     }
     sh.validations.retain(|dv| !dv.ranges.is_empty());
     for t in sh.tables.iter_mut() {
@@ -697,13 +703,50 @@ pub(crate) fn map_range(r: RangeRef, e: &Edit) -> Option<RangeRef> {
     }
 }
 
+/// A conditional format's or validation's formulas are written for its ranges' top-left cell.
+/// When an edit moves the ranges so another cell becomes the top-left (the old one deleted),
+/// they are re-hosted at that cell where it stood before the edit; rewriting the workbook's
+/// references for the edit then moves them as it moves a formula there.
+fn rehost_rule(formulas: Vec<&mut String>, before: Option<CellRef>, after: Option<CellRef>, e: &Edit) {
+    let (Some(from), Some(to)) = (before, after) else { return };
+    let at = pre_image(e, to);
+    if at != from {
+        for f in formulas {
+            *f = crate::cmd::data::move_rule_formula(f, from, at);
+        }
+    }
+}
+
+/// Where the cell that `e` puts at `c` stood before it (`c` itself when nothing moved it).
+fn pre_image(e: &Edit, c: CellRef) -> CellRef {
+    let (axis, count) = match *e {
+        Edit::Insert { axis, count, .. } | Edit::Delete { axis, count, .. } => (axis, count),
+        Edit::InsertCells { axis, range } | Edit::DeleteCells { axis, range } => {
+            (axis, if axis == Axis::Rows { range.height() } else { range.width() })
+        }
+        Edit::Move { .. } | Edit::MoveToSheet { .. } => return c,
+    };
+    let along = |d: i64| match axis {
+        Axis::Rows => c.offset(d, 0),
+        Axis::Cols => c.offset(0, d),
+    };
+    [Some(c), along(i64::from(count)), along(-i64::from(count))]
+        .into_iter()
+        .flatten()
+        .find(|p| map_range(RangeRef::cell(*p), e).map(|r| r.start) == Some(c))
+        .unwrap_or(c)
+}
+
 /// Shifts what Insert/Delete Cells moves along with the cells: merged areas, conditional
 /// format, validation, table, filter and print-area ranges, notes, links and sparklines.
 pub(super) fn shift_cell_features(sh: &mut Sheet, e: &Edit) {
     let map_cell = |c: CellRef| map_range(RangeRef::cell(c), e).map(|r| r.start);
     sh.merges = sh.merges.iter().filter_map(|m| map_range(*m, e)).filter(|m| !m.is_single()).collect();
     for cf in sh.cond_formats.iter_mut() {
+        let before = RangeRef::top_left(&cf.ranges);
         cf.ranges = cf.ranges.iter().filter_map(|r| map_range(*r, e)).collect();
+        let after = RangeRef::top_left(&cf.ranges);
+        rehost_rule(cf.rule.formulas_mut(), before, after, e);
     }
     for er in sh.edit_ranges.iter_mut() {
         er.ranges = er.ranges.iter().filter_map(|r| map_range(*r, e)).collect();
@@ -711,7 +754,10 @@ pub(super) fn shift_cell_features(sh: &mut Sheet, e: &Edit) {
     sh.edit_ranges.retain(|er| !er.ranges.is_empty());
     sh.cond_formats.retain(|cf| !cf.ranges.is_empty());
     for dv in sh.validations.iter_mut() {
+        let before = RangeRef::top_left(&dv.ranges);
         dv.ranges = dv.ranges.iter().filter_map(|r| map_range(*r, e)).collect();
+        let after = RangeRef::top_left(&dv.ranges);
+        rehost_rule(dv.formulas_mut(), before, after, e);
     }
     sh.validations.retain(|dv| !dv.ranges.is_empty());
     for t in sh.tables.iter_mut() {

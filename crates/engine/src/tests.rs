@@ -5905,3 +5905,69 @@ fn a_copied_sheets_chart_plots_the_copy() {
     let copy = wb.sheets.iter().find(|sh| sh.name != "Sheet1").unwrap();
     assert!(copy.charts[0].series[0].values.contains(&copy.name), "{}", copy.charts[0].series[0].values);
 }
+
+/// A rule's formulas follow its ranges: deleting its top-left row re-hosts them at the cell
+/// that takes its place, and a cut takes rules with their cells, moving their references once.
+#[test]
+fn rule_formulas_follow_their_ranges() {
+    let rule_text = |s: &Session| -> (Vec<String>, Vec<String>) {
+        let sh = s.doc().unwrap().wb.sheets[0].clone();
+        let cf = sh.cond_formats.iter().map(|c| match &c.rule {
+            gridcraft_model::CfRule::Expression { formula, .. } => {
+                format!("{}@{}", formula.trim_start_matches('='), c.ranges.iter().map(|r| r.a1()).collect::<Vec<_>>().join(","))
+            }
+            _ => String::new(),
+        });
+        let dv = sh
+            .validations
+            .iter()
+            .map(|v| format!("{}@{}", v.f1.trim_start_matches('='), v.ranges.iter().map(|r| r.a1()).collect::<Vec<_>>().join(",")));
+        (cf.collect(), dv.collect())
+    };
+    let mut s = s();
+    s.execute("home.conditionalFormat", json!({"range": "A2:A5", "rule": {"type": "expression", "formula": "=B2>0"}, "style": {"fill": "#FFC7CE"}}))
+        .unwrap();
+    s.execute("data.validation", json!({"range": "C2:C5", "type": "custom", "formula1": "=D2>0"})).unwrap();
+    s.execute("home.deleteRows", json!({"rows": "2:2"})).unwrap();
+    assert_eq!(rule_text(&s), (vec!["B2>0@A2:A4".to_string()], vec!["D2>0@C2:C4".to_string()]));
+    // Cut A2:A4 to F2: the rule goes with the cells, still testing the cells beside them.
+    s.execute("edit.cut", json!({"range": "A2:A4"})).unwrap();
+    s.execute("edit.paste", json!({"at": "F2"})).unwrap();
+    assert_eq!(rule_text(&s).0, vec!["B2>0@F2:F4".to_string()]);
+    // An overlapping cut moves a self-referring rule's reference once.
+    let mut s = super::tests::s();
+    s.execute("data.validation", json!({"range": "A1:A2", "type": "custom", "formula1": "=A1>0"})).unwrap();
+    s.execute("edit.cut", json!({"range": "A1:A2"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A2"})).unwrap();
+    assert_eq!(rule_text(&s).1, vec!["A2>0@A2:A3".to_string()]);
+}
+
+/// Renaming a table renames every reference to it (a PivotTable's source, a name, a rule) and
+/// leaves formulas that don't name it, legacy arrays included, as they are.
+#[test]
+fn table_rename_renames_every_reference() {
+    let mut s = s();
+    s.execute("range.setValues", json!({"range": "A1:B3", "values": [["k", "v"], ["a", 1], ["b", 2]]})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:B3"})).unwrap();
+    let table = s.doc().unwrap().wb.sheets[0].tables[0].name.clone();
+    s.execute("cell.set", json!({"cell": "D1", "input": "=A2:A3", "array": true})).unwrap();
+    s.execute("formulas.defineName", json!({"name": "Tot", "refersTo": format!("=SUM({table}[v])")})).unwrap();
+    s.execute(
+        "home.conditionalFormat",
+        json!({"range": "F1:F3", "rule": {"type": "expression", "formula": format!("=COUNT({table}[v])>0")}, "style": {"fill": "#FFC7CE"}}),
+    )
+    .unwrap();
+    s.execute("insert.pivotTable", json!({"source": table, "destination": "Sheet1!H3", "rows": ["k"], "values": ["v"]})).unwrap();
+    let array = s.doc().unwrap().wb.sheets[0].cell(CellRef::new(0, 3)).and_then(|c| c.formula.clone()).unwrap();
+    s.execute("table.rename", json!({"table": table, "name": "Data"})).unwrap();
+    let wb = &s.doc().unwrap().wb;
+    let sh = &wb.sheets[0];
+    assert_eq!(
+        sh.cell(CellRef::new(0, 3)).and_then(|c| c.formula.clone()).map(|f| (f.text.clone(), f.array, f.dynamic)),
+        Some((array.text.clone(), array.array, array.dynamic))
+    );
+    assert_eq!(wb.names.iter().find(|n| n.name == "Tot").map(|n| n.formula.clone()).as_deref(), Some("SUM(Data[v])"));
+    assert!(matches!(&sh.cond_formats[0].rule, gridcraft_model::CfRule::Expression { formula, .. } if formula.contains("Data[v]")));
+    assert_eq!(sh.pivots[0].source, "Data");
+    s.execute("data.refreshAll", json!({})).unwrap();
+}

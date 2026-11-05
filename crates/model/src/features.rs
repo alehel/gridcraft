@@ -230,6 +230,35 @@ pub enum CfRule {
     },
 }
 
+impl CfRule {
+    /// The rule's formulas (for its range's top-left cell): what an edit that moves references
+    /// rewrites, and what moving the rule re-hosts.
+    pub fn formulas_mut(&mut self) -> Vec<&mut String> {
+        let kinds: Vec<&mut CfValueKind> = match self {
+            CfRule::CellIs { a, b, .. } => return std::iter::once(a).chain(b.as_mut()).collect(),
+            CfRule::Expression { formula, .. } => return vec![formula],
+            CfRule::ColorScale { stops } => stops.iter_mut().map(|(k, _)| k).collect(),
+            CfRule::DataBar { min, max, .. } => vec![min, max],
+            CfRule::IconSet { thresholds, .. } => thresholds.iter_mut().collect(),
+            _ => Vec::new(),
+        };
+        kinds
+            .into_iter()
+            .filter_map(|k| match k {
+                CfValueKind::Formula(t) => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl Validation {
+    /// The validation's formulas (for its range's top-left cell).
+    pub fn formulas_mut(&mut self) -> Vec<&mut String> {
+        std::iter::once(&mut self.f1).chain(self.f2.as_mut()).collect()
+    }
+}
+
 /// Number of icons in an icon set (`3Arrows` → 3, `5Quarters` → 5), always 3 to 5.
 pub fn icon_count(set: &str) -> usize {
     set.chars().next().and_then(|c| c.to_digit(10)).unwrap_or(3).clamp(3, 5) as usize
@@ -582,7 +611,7 @@ pub struct Chart {
 
 /// Whether a series of kind `b` can be drawn in a chart of kind `a` without making it a combo:
 /// the same kind, or a line with or without markers, or a scatter with or without lines.
-fn same_family(a: ChartKind, b: ChartKind) -> bool {
+pub fn same_family(a: ChartKind, b: ChartKind) -> bool {
     use ChartKind::*;
     a == b || matches!((a, b), (Line | LineMarkers, Line | LineMarkers) | (Scatter | ScatterLines, Scatter | ScatterLines))
 }
