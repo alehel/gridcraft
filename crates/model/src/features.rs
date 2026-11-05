@@ -580,6 +580,13 @@ pub struct Chart {
     pub pivot: Option<String>,
 }
 
+/// Whether a series of kind `b` can be drawn in a chart of kind `a` without making it a combo:
+/// the same kind, or a line with or without markers, or a scatter with or without lines.
+fn same_family(a: ChartKind, b: ChartKind) -> bool {
+    use ChartKind::*;
+    a == b || matches!((a, b), (Line | LineMarkers, Line | LineMarkers) | (Scatter | ScatterLines, Scatter | ScatterLines))
+}
+
 /// The kind a combo chart's series `i` with its own kind `own` is drawn as.
 fn combo_series_kind(own: Option<ChartKind>, i: usize) -> ChartKind {
     match own {
@@ -596,8 +603,22 @@ impl Chart {
         let own = self.series.get(i).and_then(|s| s.kind).filter(|k| *k != ChartKind::Combo);
         match (self.kind, own) {
             (ChartKind::Combo, own) => combo_series_kind(own, i),
-            (_, Some(k)) => k,
-            (k, None) => k,
+            (k, Some(own)) if same_family(k, own) => own,
+            (k, _) => k,
+        }
+    }
+
+    /// Drops the series' own kinds the chart's kind doesn't draw (after a change of type):
+    /// outside a combo, a series keeps only its own markers or lines.
+    pub fn drop_foreign_series_kinds(&mut self) {
+        if self.kind == ChartKind::Combo {
+            return;
+        }
+        let kind = self.kind;
+        for s in &mut self.series {
+            if s.kind.is_some_and(|k| !same_family(kind, k)) {
+                s.kind = None;
+            }
         }
     }
 
@@ -620,7 +641,7 @@ impl Chart {
                     | ChartKind::AreaStacked100
             )
         };
-        eligible(self.kind) || (self.kind == ChartKind::Combo && self.series.iter().all(|s| eligible(s.kind.unwrap_or(ChartKind::Line))))
+        eligible(self.kind) || (self.kind == ChartKind::Combo && (0..self.series.len()).all(|i| eligible(self.series_kind(i))))
     }
 }
 

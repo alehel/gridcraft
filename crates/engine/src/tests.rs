@@ -5854,3 +5854,54 @@ fn sheet_rename_renames_every_reference() {
     assert_eq!(wb.sheets[0].pivots[0].source, "Data!$A$1:$B$3");
     s.execute("pivot.refresh", json!({})).unwrap();
 }
+
+/// Every edit that moves references moves those in conditional formats and validation too:
+/// inserting rows, renaming a name, deleting a sheet; and deleting a sheet leaves arrays be.
+#[test]
+fn reference_edits_reach_conditional_formats_and_validation() {
+    let mut s = s();
+    s.execute("home.insertSheet", json!({"name": "Lists"})).unwrap();
+    s.execute("range.setValues", json!({"range": "Lists!A1:A3", "values": [["a"], ["b"], ["c"]]})).unwrap();
+    s.execute("sheet.activate", json!({"sheet": 1})).ok();
+    let sheet1 = s.doc().unwrap().wb.sheet_index("Sheet1").unwrap();
+    s.execute("sheet.activate", json!({"sheet": sheet1})).ok();
+    s.execute("formulas.defineName", json!({"name": "Opts", "refersTo": "=Lists!$A$1:$A$3"})).unwrap();
+    s.execute("data.validation", json!({"range": "Sheet1!B1:B5", "type": "list", "formula1": "=Opts"})).unwrap();
+    s.execute("data.validation", json!({"range": "Sheet1!E1:E5", "type": "list", "formula1": "=Lists!$A$1:$A$3"})).unwrap();
+    s.execute(
+        "home.conditionalFormat",
+        json!({"range": "Sheet1!C1:C5", "rule": {"type": "expression", "formula": "=C1>$D$3"}, "style": {"fill": "#FFC7CE"}}),
+    )
+    .unwrap();
+    s.execute("cell.set", json!({"cell": "Sheet1!G2", "input": "=B2:B3*2", "array": true})).unwrap();
+    let sh = |s: &Session| s.doc().unwrap().wb.sheet(s.doc().unwrap().wb.sheet_index("Sheet1").unwrap()).cloned().unwrap();
+    // Inserting a row above moves the rule's references with its range.
+    s.execute("home.insertRows", json!({"rows": "1:1", "sheet": "Sheet1"})).unwrap();
+    let rule = match &sh(&s).cond_formats[0].rule {
+        gridcraft_model::CfRule::Expression { formula, .. } => formula.clone(),
+        _ => String::new(),
+    };
+    assert_eq!(rule.trim_start_matches('='), "C2>$D$4");
+    // Renaming a name renames it in validation lists.
+    s.execute("formulas.defineName", json!({"name": "Choices", "oldName": "Opts", "refersTo": "=Lists!$A$1:$A$3"})).unwrap();
+    assert!(sh(&s).validations.iter().any(|v| v.f1.trim_start_matches('=') == "Choices"));
+    // Deleting the sheet a list comes from makes it #REF!, and keeps the array formula.
+    let array_before = sh(&s).cells.iter().find_map(|(_, c)| c.formula.as_ref().and_then(|f| f.array));
+    assert!(array_before.is_some());
+    let lists = s.doc().unwrap().wb.sheet_index("Lists").unwrap();
+    s.execute("home.deleteSheet", json!({"sheet": lists})).unwrap();
+    assert!(sh(&s).validations.iter().any(|v| v.f1.contains("#REF!")), "{:?}", sh(&s).validations.iter().map(|v| v.f1.clone()).collect::<Vec<_>>());
+    assert_eq!(sh(&s).cells.iter().find_map(|(_, c)| c.formula.as_ref().and_then(|f| f.array)), array_before);
+}
+
+/// A copied sheet's chart plots the copy's data.
+#[test]
+fn a_copied_sheets_chart_plots_the_copy() {
+    let mut s = s();
+    s.execute("range.setValues", json!({"range": "A1:B3", "values": [["x", "y"], ["a", 1], ["b", 2]]})).unwrap();
+    s.execute("insert.chart", json!({"range": "A1:B3", "type": "column"})).unwrap();
+    s.execute("sheet.move", json!({"sheet": 0, "to": 1, "copy": true})).unwrap();
+    let wb = &s.doc().unwrap().wb;
+    let copy = wb.sheets.iter().find(|sh| sh.name != "Sheet1").unwrap();
+    assert!(copy.charts[0].series[0].values.contains(&copy.name), "{}", copy.charts[0].series[0].values);
+}

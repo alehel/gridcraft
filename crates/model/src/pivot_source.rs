@@ -146,7 +146,7 @@ pub fn item_label(v: &Value, group: PivotDateGroup, fmt: &NumberFormat, sys: Dat
         Value::Empty => "(blank)".into(),
         Value::Number(n) => match date_group_item(sys, *n, group) {
             Some((label, _)) => label,
-            None => format_value(v, fmt, sys).text,
+            None => format_value(v, fmt, sys).plain(),
         },
         Value::Text(t) => t.to_string(),
         Value::Bool(b) => (if *b { "TRUE" } else { "FALSE" }).into(),

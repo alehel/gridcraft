@@ -69,3 +69,32 @@ fn series_keep_their_own_markers_and_lines() {
         assert_eq!(drawn(&back), drawn(&chart), "{kind:?}");
     }
 }
+
+/// A combo chart is written with one group per kind its series are drawn as, and read back in
+/// the series' own order.
+#[test]
+fn combo_series_keep_their_kinds_and_order() {
+    use gridcraft_model::{Chart, Series, Workbook};
+    let xml = format!(
+        "<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart><c:plotArea>{}{}</c:plotArea></c:chart></c:chartSpace>",
+        bar(&ser(0)),
+        line(&ser(1))
+    );
+    let base = read_chart(&parse(xml.as_bytes()).unwrap()).unwrap();
+    for kinds in [
+        vec![ChartKind::ColumnClustered, ChartKind::Area],
+        vec![ChartKind::ColumnStacked, ChartKind::LineMarkers],
+        vec![ChartKind::BarClustered, ChartKind::Line],
+        vec![ChartKind::LineMarkers, ChartKind::ColumnClustered],
+    ] {
+        let series: Vec<Series> = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, k)| Series { values: format!("Sheet1!${}$1:${}$3", ["B", "C"][i], ["B", "C"][i]), kind: Some(*k), ..Series::default() })
+            .collect();
+        let chart = Chart { kind: ChartKind::Combo, series, ..base.clone() };
+        let back = read_chart(&parse(crate::chart::write_chart(&Workbook::new(), 0, &chart, "Book1").as_bytes()).unwrap()).unwrap();
+        let drawn = |c: &Chart| (0..c.series.len()).map(|i| (c.series_kind(i), c.series[i].values.clone())).collect::<Vec<_>>();
+        assert_eq!(drawn(&back), drawn(&chart), "{kinds:?}");
+    }
+}

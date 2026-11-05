@@ -257,6 +257,14 @@ pub fn read_chart(root: &El) -> Option<Chart> {
             series.push(ser);
         }
     }
+    // Series in the order the file gives them (`c:order`), whichever group holds them.
+    let order = |s: &El| s.child_val("order").and_then(|v| v.parse::<u32>().ok()).unwrap_or(u32::MAX);
+    let orders: Vec<u32> = groups.iter().flat_map(|(g, _)| g.kids("ser").map(order)).collect();
+    if orders.len() == series.len() {
+        let mut keyed: Vec<(u32, Series)> = orders.into_iter().zip(series).collect();
+        keyed.sort_by_key(|(o, _)| *o);
+        series = keyed.into_iter().map(|(_, s)| s).collect();
+    }
     let kind = if groups.len() > 1 { ChartKind::Combo } else { first_kind };
     let show_val = |e: &El| e.child("dLbls").is_some_and(|d| bool_val(d, "showVal"));
     let data_labels = groups.iter().any(|(g, _)| show_val(g) || g.kids("ser").any(show_val));
@@ -798,26 +806,37 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
     let primary_g;
     let mut secondary: Option<G> = None;
     if ch.kind == ChartKind::Combo {
-        // Each series as it is drawn (a series without a kind: the first a column, the others lines).
-        let is_line = |i: usize| matches!(group_for(ch.series_kind(i)), G::Line { .. } | G::Area { .. } | G::Radar | G::Scatter { .. });
-        let bars: Vec<(usize, &Series)> = all.iter().filter(|(i, x)| !x.secondary && !is_line(*i)).copied().collect();
-        let lines: Vec<(usize, &Series)> = all.iter().filter(|(i, x)| !x.secondary && is_line(*i)).copied().collect();
-        let sec: Vec<(usize, &Series)> = all.iter().filter(|(_, x)| x.secondary).copied().collect();
-        primary_g = G::Bar { bar: false, grouping: "clustered" };
-        if !bars.is_empty() || (lines.is_empty() && sec.is_empty()) {
-            s.push_str(&group_xml(primary_g, &bars, ch, (1, 2), wb, si));
+        // One group per kind the series are drawn as, on each axis, in the order they first
+        // appear (a line's markers and a scatter's lines are the series' own, not the group's).
+        let group_of = |i: usize| match group_for(ch.series_kind(i)) {
+            G::Line { stacked, .. } => G::Line { stacked, markers: false },
+            G::Scatter { .. } => G::Scatter { lines: true },
+            g => g,
+        };
+        let groups = |secondary: bool| {
+            let mut out: Vec<(G, Vec<(usize, &Series)>)> = Vec::new();
+            for &(i, x) in all.iter().filter(|(_, x)| x.secondary == secondary) {
+                let g = group_of(i);
+                match out.iter_mut().find(|(k, _)| *k == g) {
+                    Some((_, members)) => members.push((i, x)),
+                    None => out.push((g, vec![(i, x)])),
+                }
+            }
+            out
+        };
+        let (mut primary, mut sec) = (groups(false), groups(true));
+        // With every series on the secondary axis, that axis is the only one.
+        if primary.is_empty() {
+            std::mem::swap(&mut primary, &mut sec);
         }
-        if !lines.is_empty() {
-            s.push_str(&group_xml(G::Line { stacked: false, markers: false }, &lines, ch, (1, 2), wb, si));
+        primary_g = primary.first().map_or(G::Bar { bar: false, grouping: "clustered" }, |(g, _)| *g);
+        for (g, members) in &primary {
+            s.push_str(&group_xml(*g, members, ch, (1, 2), wb, si));
         }
-        if !sec.is_empty() {
-            let g = match sec.first().and_then(|(_, x)| x.kind).map(group_for) {
-                Some(b @ G::Bar { .. }) => b,
-                _ => G::Line { stacked: false, markers: false },
-            };
-            s.push_str(&group_xml(g, &sec, ch, (3, 4), wb, si));
-            secondary = Some(g);
+        for (g, members) in &sec {
+            s.push_str(&group_xml(*g, members, ch, (3, 4), wb, si));
         }
+        secondary = sec.first().map(|(g, _)| *g);
     } else {
         primary_g = match group_for(ch.kind) {
             // A stock chart has 3 or 4 series (high-low-close, open-high-low-close).

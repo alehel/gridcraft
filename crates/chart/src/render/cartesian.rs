@@ -1,5 +1,5 @@
 use super::frame::{Bx, CatAxis, ValAxis, frame, on, value_range};
-use super::legend::{cat_label, plot_kind};
+use super::legend::cat_label;
 use super::lines::{decimate_area, draw_markers, draw_runs};
 use super::trend::{draw_trend_labels, draw_trendlines, max_backward, max_forward, max_forward_slots, supports_trendline};
 use super::{
@@ -187,7 +187,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
     if ncat == 0 {
         return;
     }
-    let kinds: Vec<ChartKind> = data.series.iter().map(|s| if horizontal { chart.kind } else { plot_kind(s) }).collect();
+    let kinds: Vec<ChartKind> = data.series.iter().map(|s| if horizontal { chart.kind } else { s.kind }).collect();
     let fams: Vec<Fam> = kinds.iter().map(|k| family(*k)).collect();
     let any_primary = data.series.iter().any(|s| !s.secondary);
     let sec: Vec<bool> = data.series.iter().map(|s| s.secondary && any_primary && !horizontal).collect();

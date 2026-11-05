@@ -256,8 +256,7 @@ fn members(wb: &Workbook, sheet: usize, src: RangeRef, col: u32, group: PivotDat
 
 /// The page fields shown above a report's body: one that is also a row or column field is not.
 fn shown_pages(pt: &PivotTable) -> u32 {
-    let on_axis = |name: &str| pt.rows.iter().chain(&pt.columns).any(|f| f.source_col.eq_ignore_ascii_case(name));
-    pt.filters.iter().filter(|f| !on_axis(&f.source_col)).count().min(u32::MAX as usize) as u32
+    pt.filters.iter().filter(|f| pt.axis_field(&f.source_col).is_none()).count().min(u32::MAX as usize) as u32
 }
 
 /// The rows of a report's target range above its body: LibreOffice's Filter button row, the
@@ -322,12 +321,7 @@ pub(crate) fn write(wb: &Workbook) -> String {
                     let chosen: std::collections::HashSet<String> = chosen.iter().map(|c| c.to_lowercase()).collect();
                     o.push_str("<table:data-pilot-members>");
                     // A page field that is also a row or column field takes its grouping.
-                    let group = pt
-                        .rows
-                        .iter()
-                        .chain(&pt.columns)
-                        .find(|g| g.source_col.eq_ignore_ascii_case(&f.source_col))
-                        .map_or(PivotDateGroup::None, |g| g.date_group);
+                    let group = pt.axis_field(&f.source_col).map_or(PivotDateGroup::None, |g| g.date_group);
                     for m in column(&f.source_col).map(|c| members(wb, src_index, src_range, c, group)).unwrap_or_default() {
                         let shown = chosen.contains(&m.to_lowercase());
                         let _ = write!(

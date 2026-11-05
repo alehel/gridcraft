@@ -895,6 +895,7 @@ fn chart_set(s: &mut Session, p: &Json) -> Result<Json> {
         let Some(c) = sh.charts.get_mut(ci) else { return Ok(Json::Null) };
         if let Some(t) = str_param(p, "type") {
             c.kind = chart_kind(t, str_param(p, "subtype").unwrap_or(""));
+            c.drop_foreign_series_kinds();
             if !c.supports_data_table() {
                 c.data_table = None;
             }

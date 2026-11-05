@@ -201,11 +201,6 @@ fn series_name(wb: &Workbook, sheet: usize, name: &str) -> String {
     t.to_string()
 }
 
-/// The kind series `i` of `chart` is drawn as: its own kind in a combo chart, else the chart's.
-pub fn series_plot_kind(chart: &Chart, i: usize) -> ChartKind {
-    chart.series_kind(i)
-}
-
 /// Evaluates a chart's series formulas: names, values, categories (default "1", "2", …), X
 /// values (scatter/bubble), bubble sizes, number formats and colours (explicit, else the
 /// default palette derived from the workbook theme accents).
