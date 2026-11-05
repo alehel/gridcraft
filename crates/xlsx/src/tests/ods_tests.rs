@@ -1142,3 +1142,15 @@ fn ods_default_languages_and_script_fonts_round_trip() {
     let (again, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
     assert_eq!(&again.text_defaults, d);
 }
+
+/// A sheet marked not to print (`table:print="false"`) keeps the mark through a save.
+#[test]
+fn ods_sheets_left_out_of_printing_stay_out() {
+    let (wb, _) = read_ods(&ods(
+        r#"<table:table table:name="Notes" table:print="false"><table:table-row><table:table-cell/></table:table-row></table:table><table:table table:name="Report"><table:table-row><table:table-cell/></table:table-row></table:table>"#,
+    ))
+    .unwrap();
+    assert!(wb.sheets[0].print.excluded && !wb.sheets[1].print.excluded);
+    let (again, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+    assert!(again.sheets[0].print.excluded && !again.sheets[1].print.excluded);
+}

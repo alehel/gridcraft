@@ -591,6 +591,9 @@ impl<'a> Writer<'a> {
         let Some(sh) = self.wb.sheets.get(i) else { return };
         let sh: &Sheet = sh;
         let mut attrs = format!(" table:name=\"{}\" table:style-name=\"ta{i}\"", esc_attr(&sh.name));
+        if sh.print.excluded {
+            attrs.push_str(" table:print=\"false\"");
+        }
         if let Some(area) = sh.print.print_area {
             let _ = write!(attrs, " table:print-ranges=\"{}\"", esc_attr(&formula::range_address(&sh.name, area)));
         }

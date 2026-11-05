@@ -54,6 +54,10 @@ pub struct PrintSettings {
     /// sheet is more than one page wide and tall.
     #[serde(default)]
     pub page_order: PageOrder,
+    /// Left out when the whole workbook prints (an OpenDocument sheet's `table:print="false"`),
+    /// unless every sheet is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub excluded: bool,
 }
 
 fn yes() -> bool {
@@ -188,6 +192,7 @@ impl Default for PrintSettings {
             hf_scale_with_doc: true,
             hf_align_with_margins: true,
             page_order: PageOrder::DownThenOver,
+            excluded: false,
         }
     }
 }

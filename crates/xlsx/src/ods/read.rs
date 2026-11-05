@@ -652,6 +652,7 @@ impl Import {
         }
         let master = ts.and_then(|t| t.master_page.as_deref()).unwrap_or("Default");
         super::page::apply(&mut sheet, master, &self.master_pages, &self.page_layouts);
+        sheet.print.excluded = e.attr(Ns::Table, "print") == Some("false");
         if e.attr(Ns::Table, "protected") == Some("true") {
             let password = self.protection_key(e);
             sheet.protection = Some(SheetProtection { password, select_locked: true, select_unlocked: true, ..SheetProtection::default() });

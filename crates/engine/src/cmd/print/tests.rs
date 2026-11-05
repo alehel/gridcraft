@@ -938,3 +938,22 @@ fn equations_print_with_the_symbol_font() {
     // A glyph no standard font has is a [?] box.
     assert!(contains(&pdf, "(?) Tj"));
 }
+
+/// Printing the workbook leaves out sheets marked not to print, unless every sheet is.
+#[test]
+fn workbook_printing_skips_excluded_sheets() {
+    use gridcraft_core::Value;
+    let mut wb = gridcraft_model::Workbook::new();
+    wb.sheets.clear();
+    for name in ["One", "Two"] {
+        let mut sh = gridcraft_model::Sheet::new(name);
+        sh.set_value(CellRef::new(0, 0), Value::Text(name.into()));
+        wb.sheets.push(std::sync::Arc::new(sh));
+    }
+    let all = super::layout::PrintOptions { all_sheets: true, ..Default::default() };
+    let printed = |wb: &gridcraft_model::Workbook| super::layout::layouts(wb, &all).iter().map(|l| l.sheet).collect::<Vec<_>>();
+    std::sync::Arc::make_mut(&mut wb.sheets[0]).print.excluded = true;
+    assert_eq!(printed(&wb), vec![1]);
+    std::sync::Arc::make_mut(&mut wb.sheets[1]).print.excluded = true;
+    assert_eq!(printed(&wb), vec![0, 1]);
+}
