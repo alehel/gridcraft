@@ -82,7 +82,7 @@ pub fn headers(wb: &Workbook, sheet: usize, range: RangeRef) -> Result<Vec<Strin
     for c in range.start.col..=range.end.col {
         let at = CellRef::new(range.start.row, c);
         let fmt = NumberFormat::parse(wb.styles.get(sh.style_id(at)).num_fmt.as_str());
-        let h = format_value(&sh.value(at).scalar(), &fmt, wb.date_system).text.trim().to_string();
+        let h = format_value(&sh.value(at).scalar(), &fmt, wb.date_system).plain().trim().to_string();
         if h.is_empty() {
             return Err(
                 "The PivotTable field name is not valid. To create a PivotTable, you must use data that is organized as a list with labeled columns."
@@ -136,16 +136,21 @@ impl ItemLabels {
     }
 
     pub fn label(&self, v: &Value) -> String {
-        match v {
-            Value::Empty => "(blank)".into(),
-            Value::Number(n) => match date_group_item(self.sys, *n, self.group) {
-                Some((label, _)) => label,
-                None => format_value(v, &self.fmt, self.sys).text,
-            },
-            Value::Text(t) => t.to_string(),
-            Value::Bool(b) => (if *b { "TRUE" } else { "FALSE" }).into(),
-            Value::Error(e) => e.as_str().into(),
-            Value::Array(_) => self.label(&v.scalar()),
-        }
+        item_label(v, self.group, &self.fmt, self.sys)
+    }
+}
+
+/// The label an item shows (see [`ItemLabels`]), its column's format `fmt` parsed.
+pub fn item_label(v: &Value, group: PivotDateGroup, fmt: &NumberFormat, sys: DateSystem) -> String {
+    match v {
+        Value::Empty => "(blank)".into(),
+        Value::Number(n) => match date_group_item(sys, *n, group) {
+            Some((label, _)) => label,
+            None => format_value(v, fmt, sys).text,
+        },
+        Value::Text(t) => t.to_string(),
+        Value::Bool(b) => (if *b { "TRUE" } else { "FALSE" }).into(),
+        Value::Error(e) => e.as_str().into(),
+        Value::Array(_) => item_label(&v.scalar(), group, fmt, sys),
     }
 }
