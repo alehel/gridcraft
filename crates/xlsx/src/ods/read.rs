@@ -1090,7 +1090,7 @@ impl Import {
         // becomes of it; the copies a repeat stores count again when they are stored.
         let decoded = std::cell::Cell::new(0usize);
         let text = || {
-            let t = c.paragraphs_text();
+            let t = c.cell_text();
             decoded.set(decoded.get().saturating_add(t.len()));
             t
         };

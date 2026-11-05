@@ -144,8 +144,18 @@ impl Elem {
         self.paragraphs_text_within(MAX_CELL_TEXT)
     }
 
+    /// A cell's text: [`Elem::paragraphs_text`] with its whitespace as written. LibreOffice keeps
+    /// a cell's spaces, tabs and newlines as they are (observed), not ODF's collapsed ones.
+    pub fn cell_text(&self) -> String {
+        self.paragraphs_with(MAX_CELL_TEXT, &mut Literal)
+    }
+
     /// [`Elem::paragraphs_text`], at most `cap` bytes of it.
     pub fn paragraphs_text_within(&self, cap: usize) -> String {
+        self.paragraphs_with(cap, &mut Plain)
+    }
+
+    fn paragraphs_with(&self, cap: usize, text: &mut dyn ParagraphText) -> String {
         let mut out = String::new();
         let mut first = true;
         for p in self.elems().filter(|e| e.ns == Ns::Text && (e.name == "p" || e.name == "h")) {
@@ -153,7 +163,7 @@ impl Elem {
                 out.push('\n');
             }
             first = false;
-            walk_paragraph(p, &mut out, cap, &mut Plain);
+            walk_paragraph(p, &mut out, cap, text);
         }
         if out.len() > cap {
             out.truncate(out.floor_char_boundary(cap));
@@ -175,16 +185,29 @@ pub(crate) trait ParagraphText {
     fn field(&mut self, _e: &Elem) -> Option<&'static str> {
         None
     }
+    /// Whitespace is kept as written instead of collapsing by ODF's rules.
+    fn literal_space(&self) -> bool {
+        false
+    }
 }
 
 /// The text as it reads, fields read for what they hold.
 struct Plain;
 impl ParagraphText for Plain {}
 
+/// The text as it reads, its whitespace as written.
+struct Literal;
+impl ParagraphText for Literal {
+    fn literal_space(&self) -> bool {
+        true
+    }
+}
+
 /// Appends a paragraph's text to `out` as ODF reads it: whitespace runs (XML whitespace only)
 /// collapse to one space, none at the start; `text:s`, `text:tab` and `text:line-break` are
 /// what they stand for; notes and bookmarks are left out. `out` stays within `cap` bytes.
 pub(crate) fn walk_paragraph(p: &Elem, out: &mut String, cap: usize, text: &mut dyn ParagraphText) {
+    let literal = text.literal_space();
     let mut started = false;
     let mut pending = false;
     let mut stack: Vec<&Node> = p.kids.iter().rev().collect();
@@ -198,7 +221,7 @@ pub(crate) fn walk_paragraph(p: &Elem, out: &mut String, cap: usize, text: &mut 
                     if out.len() >= cap {
                         break;
                     }
-                    if matches!(ch, ' ' | '\t' | '\n' | '\r') {
+                    if !literal && matches!(ch, ' ' | '\t' | '\n' | '\r') {
                         pending = started;
                     } else {
                         if pending {
@@ -214,7 +237,12 @@ pub(crate) fn walk_paragraph(p: &Elem, out: &mut String, cap: usize, text: &mut 
                 let special = match e.name.as_str() {
                     "s" => Some((
                         " ",
-                        e.attr(Ns::Text, "c").and_then(|c| c.trim().parse::<usize>().ok()).unwrap_or(1).min(cap.saturating_sub(out.len())),
+                        // A count below one (invalid) is one space, as LibreOffice reads it.
+                        e.attr(Ns::Text, "c")
+                            .and_then(|c| c.trim().parse::<usize>().ok())
+                            .filter(|c| *c > 0)
+                            .unwrap_or(1)
+                            .min(cap.saturating_sub(out.len())),
                     )),
                     "tab" => Some(("\t", 1)),
                     "line-break" => Some(("\n", 1)),

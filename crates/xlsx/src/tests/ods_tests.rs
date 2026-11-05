@@ -88,7 +88,9 @@ fn ods_ordered_text_preserves_paragraphs_runs_entities_spaces_tabs_and_breaks() 
     assert_eq!(wb.sheets[0].value(CellRef::new(0, 0)), text("one two & three four   five\tsix\nseven!<eight>\nnine"));
     let bytes = row(r#"<table:table-cell office:value-type="string"><text:p>  one
         <text:span> two  </text:span>  three <text:s text:c="0"/>four<text:s text:c="2"/>  </text:p><text:p><text:s/>  five  </text:p></table:table-cell>"#);
-    assert_eq!(read_ods(&bytes).unwrap().0.sheets[0].value(CellRef::new(0, 0)), text("one two three four  \n  five"));
+    // A cell's whitespace is kept as written, as LibreOffice shows it (observed), and a space
+    // count of 0 is one space.
+    assert_eq!(read_ods(&bytes).unwrap().0.sheets[0].value(CellRef::new(0, 0)), text("  one\n         two    three  four    \n   five  "));
 }
 
 #[test]
@@ -1209,4 +1211,14 @@ fn ods_cell_padding_round_trips() {
     assert_eq!(pad(&wb, 1), [Some(300), Some(100), Some(100), Some(100)]);
     let (again, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
     assert_eq!((pad(&again, 0), pad(&again, 1)), (pad(&wb, 0), pad(&wb, 1)));
+}
+
+/// Spaces at either end of a cell's text survive a save (LibreOffice keeps them; ODF's
+/// collapsing rule dropped the trailing one).
+#[test]
+fn ods_cell_text_keeps_its_end_spaces() {
+    let (wb, _) = read_ods(&row(r#"<table:table-cell office:value-type="string"><text:p> padded label </text:p></table:table-cell>"#)).unwrap();
+    assert_eq!(wb.sheets[0].value(CellRef::new(0, 0)), text(" padded label "));
+    let (again, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+    assert_eq!(again.sheets[0].value(CellRef::new(0, 0)), text(" padded label "));
 }
