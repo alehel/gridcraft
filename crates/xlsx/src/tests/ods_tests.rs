@@ -1109,3 +1109,17 @@ fn ods_unstated_margins_are_two_centimetres() {
     let (plain, _) = read_ods(&row("<table:table-cell/>")).unwrap();
     assert_eq!(plain.sheets[0].print.margins, [0.7874; 6]);
 }
+
+/// Turned text keeps its cell upright: the writer says `rotation-align="none"`, or LibreOffice
+/// skews the cell's fill along the text (its default when the attribute is missing).
+#[test]
+fn ods_turned_text_keeps_its_cell_upright() {
+    let styles = r#"<style:style style:name="ce1" style:family="table-cell"><style:table-cell-properties style:rotation-angle="5" style:rotation-align="none"/></style:style>"#;
+    let (wb, _) = read_ods(&styled_ods(
+        styles,
+        r#"<table:table table:name="Data"><table:table-row><table:table-cell table:style-name="ce1"/></table:table-row></table:table>"#,
+    ))
+    .unwrap();
+    let xml = String::from_utf8(crate::write_fods(&wb, None).unwrap()).unwrap();
+    assert!(xml.contains(r#"style:rotation-angle="5" style:rotation-align="none""#), "{xml}");
+}

@@ -463,7 +463,9 @@ pub(crate) fn write_props(s: &Style, base: &Style, theme: &gridcraft_model::Them
                 tc.push_str(" style:direction=\"ltr\"");
             }
             let deg = (a.rotation as i32).rem_euclid(360);
-            let _ = write!(tc, " style:rotation-angle=\"{deg}\"");
+            // The cell itself stays upright, as GridCraft and Excel draw it: without `none`
+            // LibreOffice skews the cell's fill and borders along the text (its default `bottom`).
+            let _ = write!(tc, " style:rotation-angle=\"{deg}\" style:rotation-align=\"none\"");
         }
     }
     if a.h != b.h {
