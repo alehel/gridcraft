@@ -1154,3 +1154,17 @@ fn ods_sheets_left_out_of_printing_stay_out() {
     let (again, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
     assert!(again.sheets[0].print.excluded && !again.sheets[1].print.excluded);
 }
+
+/// A declared font's generic family is kept: LibreOffice picks a stand-in of the same kind
+/// (a script face for a missing script font) only when the declaration says so.
+#[test]
+fn ods_font_declarations_keep_their_generic_family() {
+    let doc = r#"<?xml version="1.0"?><office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:mimetype="application/vnd.oasis.opendocument.spreadsheet"><office:font-face-decls><style:font-face style:name="Hand" svg:font-family="'Sample Hand'" style:font-family-generic="script"/><style:font-face style:name="Body" svg:font-family="'Sample Serif'" style:font-family-generic="roman"/></office:font-face-decls><office:styles><style:default-style style:family="table-cell"><style:text-properties style:font-name="Body"/></style:default-style></office:styles><office:automatic-styles><style:style style:name="ce1" style:family="table-cell"><style:text-properties style:font-name="Hand"/></style:style></office:automatic-styles><office:body><office:spreadsheet><table:table table:name="S"><table:table-row><table:table-cell table:style-name="ce1" office:value-type="string"><text:p>x</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>y</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document>"#;
+    let (wb, _) = crate::read_fods(doc.as_bytes()).unwrap();
+    let font = |wb: &gridcraft_model::Workbook, col: u32| wb.styles.get(wb.sheets[0].style_id(CellRef::new(0, col))).font.clone();
+    assert_eq!((font(&wb, 0).name.as_str(), font(&wb, 0).family), ("Sample Hand", Some(4)));
+    assert_eq!((font(&wb, 1).name.as_str(), font(&wb, 1).family), ("Sample Serif", Some(1)));
+    let xml = String::from_utf8(crate::write_fods(&wb, None).unwrap()).unwrap();
+    assert!(xml.contains(r#"svg:font-family="'Sample Hand'" style:font-family-generic="script""#), "{xml}");
+    assert!(xml.contains(r#"svg:font-family="'Sample Serif'" style:font-family-generic="roman""#), "{xml}");
+}

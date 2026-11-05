@@ -344,6 +344,8 @@ pub(crate) struct Import {
     pub wb: Workbook,
     pub report: ReadReport,
     fonts: HashMap<String, String>,
+    /// Font family class of each declared font family (`style:font-family-generic`).
+    font_classes: HashMap<String, u8>,
     data_styles: HashMap<String, DataStyle>,
     named: HashMap<String, CellStyleDef>,
     auto: HashMap<String, CellStyleDef>,
@@ -403,6 +405,7 @@ impl Import {
             wb,
             report: ReadReport::default(),
             fonts: HashMap::new(),
+            font_classes: HashMap::new(),
             data_styles: HashMap::new(),
             named: HashMap::new(),
             auto: HashMap::new(),
@@ -444,6 +447,9 @@ impl Import {
         for f in decls.children(Ns::Style, "font-face") {
             if let Some(name) = f.attr(Ns::Style, "name") {
                 let family = f.attr(Ns::Svg, "font-family").unwrap_or(name).trim().trim_matches(|c| c == '\'' || c == '"').to_string();
+                if let Some(class) = f.attr(Ns::Style, "font-family-generic").and_then(style::font_class) {
+                    self.font_classes.insert(family.clone(), class);
+                }
                 self.fonts.insert(name.to_string(), family);
             }
         }
@@ -587,7 +593,12 @@ impl Import {
     /// The style `p` describes on top of `base`, its data style's format included.
     fn props_style(&self, p: &Props, base: &Style) -> Style {
         let code = p.data_style.as_deref().and_then(|d| numfmt::code(&self.data_styles, d));
-        style::to_style(p, base, code)
+        let mut s = style::to_style(p, base, code);
+        // A font named here takes its declaration's family class (roman, swiss, script…).
+        if p.font_name.is_some() {
+            s.font.family = self.font_classes.get(&s.font.name).copied();
+        }
+        s
     }
 
     fn base_style(&self) -> Style {
@@ -621,9 +632,16 @@ impl Import {
 
     /// A style that looks exactly like the default one but is stored apart from it: the model
     /// drops cells in the default style, so a cell that overrides its row's or column's format with
-    /// the default needs it. Only the font family class differs (none and 2 are both swiss).
+    /// the default needs it. Only the font family class differs (none and 2 are both swiss), or for
+    /// fonts of another class the character set.
     fn default_twin(&mut self) -> StyleId {
-        self.wb.styles.derive(StyleId::DEFAULT, |s| s.font.family = if s.font.family.is_none() { Some(2) } else { None })
+        self.wb.styles.derive(StyleId::DEFAULT, |s| match s.font.family {
+            None => s.font.family = Some(2),
+            Some(2) => s.font.family = None,
+            // A font of another class differs in its character set instead (none and 1 are both
+            // the default one).
+            Some(_) => s.font.charset = if s.font.charset.is_none() { Some(1) } else { None },
+        })
     }
 
     /// The differential style of a conditional format's named style: only what it and its

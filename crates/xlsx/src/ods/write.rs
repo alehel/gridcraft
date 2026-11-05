@@ -496,9 +496,17 @@ impl<'a> Writer<'a> {
     fn font_decls(&mut self) -> String {
         let default = self.wb.styles.get(StyleId::DEFAULT).font.name.clone();
         self.font(&default);
+        // Each font's family class, as the styles naming it hold it.
+        let mut classes: HashMap<&str, &'static str> = HashMap::new();
+        for (_, st) in self.wb.styles.iter() {
+            if let Some(g) = st.font.family.and_then(style::font_generic) {
+                classes.entry(st.font.name.as_str()).or_insert(g);
+            }
+        }
         let mut o = String::from("<office:font-face-decls>");
         for f in &self.fonts {
-            let _ = write!(o, r#"<style:font-face style:name="{0}" svg:font-family="'{0}'"/>"#, esc_attr(f));
+            let generic = classes.get(f.as_str()).map(|g| format!(" style:font-family-generic=\"{g}\"")).unwrap_or_default();
+            let _ = write!(o, r#"<style:font-face style:name="{0}" svg:font-family="'{0}'"{generic}/>"#, esc_attr(f));
         }
         o.push_str("</office:font-face-decls>");
         o

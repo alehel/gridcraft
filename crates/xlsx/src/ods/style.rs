@@ -277,6 +277,30 @@ fn paragraph_props(pp: &Elem, cell_align: bool, p: &mut Props) {
 }
 
 /// `style:text-properties`: the font.
+/// The model's font family class for an ODF generic family (`style:font-family-generic`).
+pub(crate) fn font_class(generic: &str) -> Option<u8> {
+    Some(match generic {
+        "roman" => 1,
+        "swiss" => 2,
+        "modern" => 3,
+        "script" => 4,
+        "decorative" => 5,
+        _ => return None,
+    })
+}
+
+/// The ODF generic family of a model font family class.
+pub(crate) fn font_generic(class: u8) -> Option<&'static str> {
+    Some(match class {
+        1 => "roman",
+        2 => "swiss",
+        3 => "modern",
+        4 => "script",
+        5 => "decorative",
+        _ => return None,
+    })
+}
+
 /// The longest language, country or font name kept from a default style.
 const MAX_TEXT_DEFAULT: usize = 128;
 
