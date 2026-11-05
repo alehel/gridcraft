@@ -1,4 +1,4 @@
-use super::{CellError, HashMap, MONTHS, Ordering, PivotDateGroup, PivotField, PivotFunc, PivotSort, Source, Value, Workbook, datetime_from_serial};
+use super::{CellError, HashMap, Ordering, PivotDateGroup, PivotField, PivotFunc, PivotSort, Source, Value, Workbook};
 
 // ---------------------------------------------------------------- items
 
@@ -38,19 +38,7 @@ fn make_item(wb: &Workbook, v: &Value, group: PivotDateGroup, fmt: &str, first: 
     match v {
         Value::Empty => ("b".into(), it(Value::text("(blank)"), "(blank)".into(), 4, 0.0, false)),
         Value::Number(n) => {
-            if group != PivotDateGroup::None
-                && let Some(dt) = datetime_from_serial(wb.date_system, *n)
-            {
-                let mon = MONTHS.get(dt.month.saturating_sub(1) as usize).copied().unwrap_or("Jan");
-                let (label, key) = match group {
-                    PivotDateGroup::Years => (dt.year.to_string(), dt.year as f64),
-                    PivotDateGroup::Quarters => {
-                        let q = (dt.month.saturating_sub(1)) / 3 + 1;
-                        (format!("Qtr{q}"), q as f64)
-                    }
-                    PivotDateGroup::Months => (mon.to_string(), dt.month as f64),
-                    _ => (format!("{}-{mon}", dt.day), (dt.month * 100 + dt.day) as f64),
-                };
+            if let Some((label, key)) = gridcraft_model::pivot_source::date_group_item(wb.date_system, *n, group) {
                 return (format!("g{key}"), it(Value::text(label.as_str()), label, 0, key, false));
             }
             let label = crate::display::format(v, fmt, wb).text;

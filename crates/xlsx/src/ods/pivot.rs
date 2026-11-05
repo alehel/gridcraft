@@ -228,45 +228,24 @@ fn field_xml(o: &mut String, f: &PivotField, orientation: &str, layout: Option<(
     o.push_str("</table:data-pilot-field>");
 }
 
-/// A pivot's source (a range, a table or a defined name) as its sheet and range; `own` is the
-/// pivot's sheet, for a range that names none.
-fn source_range(wb: &Workbook, own: &str, source: &str) -> Option<(String, RangeRef)> {
-    match gridcraft_formula::parse(source.trim_start_matches('=')).ok()? {
-        gridcraft_formula::Expr::Ref(r) => Some((r.sheet_name().unwrap_or(own).to_string(), r.range())),
-        gridcraft_formula::Expr::Name(n) => {
-            let table =
-                wb.sheets.iter().find_map(|sh| sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(&n)).map(|t| (sh.name.clone(), t.range)));
-            table.or_else(|| {
-                let name = wb.names.iter().find(|d| d.name.eq_ignore_ascii_case(&n) && d.scope.is_none())?;
-                match gridcraft_formula::parse(name.formula.trim_start_matches('=')).ok()? {
-                    gridcraft_formula::Expr::Ref(r) => Some((r.sheet_name()?.to_string(), r.range())),
-                    _ => None,
-                }
-            })
-        }
-        _ => None,
-    }
-}
-
 /// The most members listed for a page field.
 const MAX_MEMBERS: usize = 10_000;
 
-/// The distinct values of the source column headed `col`, as the report names its items.
-/// The source range's column headers, folded.
-fn source_headers(wb: &Workbook, sheet: &str, src: RangeRef) -> std::collections::HashSet<String> {
-    let Some(sh) = wb.sheets.iter().find(|s| s.name == sheet) else { return Default::default() };
-    (src.start.col..=src.end.col).map(|c| sh.value(CellRef::new(src.start.row, c)).display().to_lowercase()).collect()
-}
-
-fn members(wb: &Workbook, sheet: &str, src: RangeRef, col: &str) -> Vec<String> {
-    let Some(sh) = wb.sheets.iter().find(|s| s.name == sheet) else { return Vec::new() };
-    let Some(c) = (src.start.col..=src.end.col).find(|c| sh.value(CellRef::new(src.start.row, *c)).display() == col) else { return Vec::new() };
+/// The distinct items of source column `col`, as the report labels them (its number format or
+/// `group`ing, `(blank)` for an empty cell), in source order.
+fn members(wb: &Workbook, sheet: usize, src: RangeRef, col: u32, group: PivotDateGroup) -> Vec<String> {
+    let Some(sh) = wb.sheets.get(sheet) else { return Vec::new() };
+    let labels = gridcraft_model::pivot_source::ItemLabels::new(wb, sheet, src, col, group);
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (_, cell) in sh.cells.iter().filter(|(p, _)| p.col == c && p.row > src.start.row && p.row <= src.end.row) {
-        let v = cell.value.display();
-        if seen.insert(v.clone()) {
-            out.push(v);
+    for row in src.start.row.saturating_add(1)..=src.end.row {
+        // A record with nothing in it is no record.
+        if (src.start.col..=src.end.col).all(|c| sh.value(CellRef::new(row, c)).is_empty()) {
+            continue;
+        }
+        let label = labels.label(&sh.value(CellRef::new(row, col)));
+        if seen.insert(label.to_lowercase()) {
+            out.push(label);
             if out.len() >= MAX_MEMBERS {
                 break;
             }
@@ -292,14 +271,18 @@ fn header_rows(button: bool, pages: u32) -> u32 {
 /// `table:data-pilot-tables` for every sheet's PivotTables (empty when there are none).
 pub(crate) fn write(wb: &Workbook) -> String {
     let mut o = String::new();
-    for sh in &wb.sheets {
+    for (sheet_index, sh) in wb.sheets.iter().enumerate() {
         for pt in &sh.pivots {
-            let Some((src_sheet, src_range)) = source_range(wb, &sh.name, &pt.source) else { continue };
+            // The source as the report reads it, and its column names.
+            let Ok((src_index, src_range)) = gridcraft_model::pivot_source::resolve(wb, &pt.source, sheet_index) else { continue };
+            let Some(src_sheet) = wb.sheets.get(src_index).map(|s| s.name.as_str()) else { continue };
+            let headers = gridcraft_model::pivot_source::headers(wb, src_index, src_range).unwrap_or_default();
+            let column =
+                |name: &str| headers.iter().position(|h| h.eq_ignore_ascii_case(name)).and_then(|i| src_range.start.col.checked_add(i as u32));
             // A page field on no column of the source is drawn nowhere (the report leaves it
             // out), so it isn't written.
-            let headers = source_headers(wb, &src_sheet, src_range);
             let mut pt = pt.clone();
-            pt.filters.retain(|f| headers.contains(&f.source_col.to_lowercase()));
+            pt.filters.retain(|f| column(&f.source_col).is_some());
             let pt = &pt;
             // The body is where the report draws it: below its page fields, or at the anchor
             // when they fit above it. The target starts the header rows above that, the Filter
@@ -322,7 +305,7 @@ pub(crate) fn write(wb: &Workbook) -> String {
                 r#"<table:data-pilot-table table:name="{}" table:target-range-address="{}" table:grand-total="{grand}" table:show-filter-button="{button}"><table:source-cell-range table:cell-range-address="{}"/>"#,
                 esc_attr(&pt.name),
                 esc_attr(&formula::range_address(&sh.name, target)),
-                esc_attr(&formula::range_address(&src_sheet, src_range))
+                esc_attr(&formula::range_address(src_sheet, src_range))
             );
             for f in &pt.filters {
                 let selected = match f.selected.as_deref() {
@@ -336,10 +319,17 @@ pub(crate) fn write(wb: &Workbook) -> String {
                 );
                 // Several items chosen: the others are listed as hidden members.
                 if let Some(chosen) = f.selected.as_deref().filter(|s| s.len() > 1) {
-                    let chosen: std::collections::HashSet<&String> = chosen.iter().collect();
+                    let chosen: std::collections::HashSet<String> = chosen.iter().map(|c| c.to_lowercase()).collect();
                     o.push_str("<table:data-pilot-members>");
-                    for m in members(wb, &src_sheet, src_range, &f.source_col) {
-                        let shown = chosen.contains(&m);
+                    // A page field that is also a row or column field takes its grouping.
+                    let group = pt
+                        .rows
+                        .iter()
+                        .chain(&pt.columns)
+                        .find(|g| g.source_col.eq_ignore_ascii_case(&f.source_col))
+                        .map_or(PivotDateGroup::None, |g| g.date_group);
+                    for m in column(&f.source_col).map(|c| members(wb, src_index, src_range, c, group)).unwrap_or_default() {
+                        let shown = chosen.contains(&m.to_lowercase());
                         let _ = write!(
                             o,
                             r#"<table:data-pilot-member table:name="{}" table:display="{shown}" table:show-details="true"/>"#,
