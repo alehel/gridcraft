@@ -470,10 +470,6 @@ pub(crate) struct SheetNames {
 }
 
 impl SheetNames {
-    pub(crate) fn of(wb: &Workbook) -> Self {
-        SheetNames { taken: wb.sheets.iter().map(|s| s.name.to_ascii_lowercase()).collect(), next: HashMap::new() }
-    }
-
     /// A valid name for the i-th sheet, unique among the names assigned so far, which it joins.
     pub(crate) fn unique(&mut self, name: &str, i: usize) -> String {
         let mut base: String = name.chars().filter(|c| !matches!(c, ':' | '\\' | '/' | '?' | '*' | '[' | ']')).take(31).collect();

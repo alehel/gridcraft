@@ -986,3 +986,50 @@ fn ods_pivot_drawn_near_the_top_keeps_its_body() {
         assert_eq!(pt.anchor, CellRef::new(body, 5));
     }
 }
+
+/// A sheet name GridCraft can't hold (longer than 31 characters) is shortened once the file is
+/// read, and the formulas and names that refer to it follow it.
+#[test]
+fn ods_renamed_sheets_keep_their_references() {
+    let long = "A sheet name much longer than thirty-one";
+    let content = format!(
+        r#"<table:table table:name="{long}"><table:table-row><table:table-cell office:value-type="float" office:value="5"><text:p>5</text:p></table:table-cell></table:table-row></table:table><table:table table:name="Other"><table:table-row><table:table-cell table:formula="of:=['{long}'.A1]*2" office:value-type="float" office:value="10"><text:p>10</text:p></table:table-cell></table:table-row></table:table><table:named-expressions><table:named-range table:name="Five" table:cell-range-address="'{long}'.$A$1"/></table:named-expressions>"#
+    );
+    let (wb, report) = read_ods(&styled_ods("", &content)).unwrap();
+    let short = wb.sheets[0].name.clone();
+    assert!(short.chars().count() <= 31 && short != long, "{short}");
+    assert!(report.warnings.iter().any(|w| w.contains("renamed")));
+    let f = wb.sheets[1].cells.get(CellRef::new(0, 0)).and_then(|c| c.formula.clone()).unwrap();
+    assert!(f.text.contains(&short), "{}", f.text);
+    let five = wb.names.iter().find(|n| n.name == "Five").unwrap();
+    assert!(five.formula.contains(&short), "{}", five.formula);
+}
+
+/// Decoded text counts where it is decoded: a run of spaces expanding in every error cell, or
+/// in cells a matrix formula's results replace, is refused at the text limit.
+#[test]
+fn ods_decoded_text_is_counted() {
+    let wide = r#"<table:table-cell calcext:value-type="error" xmlns:calcext="urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0"><text:p><text:s text:c="1048576"/></text:p></table:table-cell>"#.repeat(300);
+    assert!(matches!(read_ods(&row(&wide)), Err(IoError::TooLarge(_))));
+}
+
+/// A matrix ending above a row doesn't hide the one that holds it.
+#[test]
+fn ods_matrix_after_an_ended_one_still_holds_its_cells() {
+    let m = |f: &str, c: u32, r: u32| {
+        format!(
+            r#"<table:table-cell table:formula="of:={f}" table:number-matrix-columns-spanned="{c}" table:number-matrix-rows-spanned="{r}" office:value-type="float" office:value="1"><text:p>1</text:p></table:table-cell>"#
+        )
+    };
+    let num = r#"<table:table-cell office:value-type="float" office:value="9"><text:p>9</text:p></table:table-cell>"#;
+    let content = format!(
+        r#"<table:table table:name="S"><table:table-row><table:table-cell/>{}</table:table-row><table:table-row><table:table-cell/>{num}</table:table-row><table:table-row/><table:table-row>{}{num}{num}</table:table-row><table:table-row>{num}{num}{num}</table:table-row></table:table>"#,
+        m("SEQUENCE(2)", 1, 2),
+        m("SEQUENCE(2;3)", 3, 2)
+    );
+    let (wb, _) = read_ods(&styled_ods("", &content)).unwrap();
+    let sh = &wb.sheets[0];
+    for (r, c) in [(1, 1), (3, 1), (3, 2), (4, 0), (4, 1), (4, 2)] {
+        assert_eq!(sh.value(CellRef::new(r, c)), Value::Empty, "{r},{c}");
+    }
+}

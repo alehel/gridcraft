@@ -160,26 +160,41 @@ pub(crate) const MAX_CELL_TEXT: usize = 1024 * 1024;
 /// Appends a paragraph's text to `out` (see [`Elem::paragraphs_text`]), keeping `out` within
 /// [`MAX_CELL_TEXT`].
 pub(crate) fn paragraph_text(p: &Elem, out: &mut String) {
-    paragraph_text_uncapped(p, out);
-    if out.len() > MAX_CELL_TEXT {
-        out.truncate(out.floor_char_boundary(MAX_CELL_TEXT));
+    walk_paragraph(p, out, MAX_CELL_TEXT, &mut Plain);
+}
+
+/// What [`walk_paragraph`] makes of a paragraph's text and of its fields.
+pub(crate) trait ParagraphText {
+    /// Appends one character of text.
+    fn push(&mut self, out: &mut String, ch: char) {
+        out.push(ch);
+    }
+    /// The text a field element stands for (`text:page-number`…), or `None` to read inside it.
+    fn field(&mut self, _e: &Elem) -> Option<&'static str> {
+        None
     }
 }
 
-/// [`paragraph_text`], stopping once `out` reaches the cap (it may pass it by a few bytes).
-fn paragraph_text_uncapped(p: &Elem, out: &mut String) {
+/// The text as it reads, fields read for what they hold.
+struct Plain;
+impl ParagraphText for Plain {}
+
+/// Appends a paragraph's text to `out` as ODF reads it: whitespace runs (XML whitespace only)
+/// collapse to one space, none at the start; `text:s`, `text:tab` and `text:line-break` are
+/// what they stand for; notes and bookmarks are left out. `out` stays within `cap` bytes.
+pub(crate) fn walk_paragraph(p: &Elem, out: &mut String, cap: usize, text: &mut dyn ParagraphText) {
     let mut started = false;
     let mut pending = false;
     let mut stack: Vec<&Node> = p.kids.iter().rev().collect();
     while let Some(n) = stack.pop() {
-        if out.len() >= MAX_CELL_TEXT {
-            return;
+        if out.len() >= cap {
+            break;
         }
         match n {
             Node::Text(t) => {
                 for ch in t.chars() {
-                    if out.len() >= MAX_CELL_TEXT {
-                        return;
+                    if out.len() >= cap {
+                        break;
                     }
                     if matches!(ch, ' ' | '\t' | '\n' | '\r') {
                         pending = started;
@@ -188,7 +203,7 @@ fn paragraph_text_uncapped(p: &Elem, out: &mut String) {
                             out.push(' ');
                             pending = false;
                         }
-                        out.push(ch);
+                        text.push(out, ch);
                         started = true;
                     }
                 }
@@ -197,11 +212,11 @@ fn paragraph_text_uncapped(p: &Elem, out: &mut String) {
                 let special = match e.name.as_str() {
                     "s" => Some((
                         " ",
-                        e.attr(Ns::Text, "c").and_then(|c| c.parse::<usize>().ok()).unwrap_or(1).min(MAX_CELL_TEXT.saturating_sub(out.len())),
+                        e.attr(Ns::Text, "c").and_then(|c| c.trim().parse::<usize>().ok()).unwrap_or(1).min(cap.saturating_sub(out.len())),
                     )),
                     "tab" => Some(("\t", 1)),
                     "line-break" => Some(("\n", 1)),
-                    _ => None,
+                    _ => text.field(e).map(|f| (f, 1)),
                 };
                 match special {
                     Some((s, count)) => {
@@ -223,6 +238,9 @@ fn paragraph_text_uncapped(p: &Elem, out: &mut String) {
             Node::El(e) if e.ns == Ns::Office && e.name == "annotation" => {}
             Node::El(e) => stack.extend(e.kids.iter().rev()),
         }
+    }
+    if out.len() > cap {
+        out.truncate(out.floor_char_boundary(cap));
     }
 }
 

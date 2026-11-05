@@ -7,75 +7,51 @@ use std::fmt::Write as _;
 
 use gridcraft_model::{Orientation, PageOrder, PrintSettings, Sheet};
 
-use super::dom::{Elem, Node, Ns};
+use super::dom::{Elem, Ns, ParagraphText, walk_paragraph};
 use super::style::length_pt;
 
 fn inches(e: &Elem, ns: Ns, name: &str) -> Option<f32> {
     e.attr(ns, name).and_then(length_pt).map(|pt| (pt / 72.0) as f32)
 }
 
-/// Header/footer region text as an Excel code section (`&P`, `&A`…), escaping `&`.
+/// The most text one header or footer region keeps (Excel holds 255 characters per header).
+const MAX_REGION: usize = 8 * 1024;
+
+/// Header/footer text as Excel's codes: fields as `&P`, `&A`…, a text `&` doubled.
+struct Codes;
+impl ParagraphText for Codes {
+    fn push(&mut self, out: &mut String, ch: char) {
+        if ch == '&' {
+            out.push('&');
+        }
+        out.push(ch);
+    }
+    fn field(&mut self, e: &Elem) -> Option<&'static str> {
+        Some(match e.name.as_str() {
+            "page-number" => "&P",
+            "page-count" => "&N",
+            "sheet-name" => "&A",
+            "date" => "&D",
+            "time" => "&T",
+            "file-name" => match e.attr(Ns::Text, "display") {
+                Some("full") => "&Z&F",
+                Some("path") => "&Z",
+                _ => "&F",
+            },
+            "title" => "&F",
+            _ => return None,
+        })
+    }
+}
+
+/// Header/footer region text as an Excel code section, paragraphs on their own lines.
 fn region_code(region: &Elem) -> String {
     let mut out = String::new();
-    let mut first = true;
-    for p in region.children(Ns::Text, "p") {
-        if !first {
+    for (i, p) in region.children(Ns::Text, "p").enumerate() {
+        if i > 0 {
             out.push('\n');
         }
-        first = false;
-        let mut stack: Vec<&Node> = p.kids.iter().rev().collect();
-        // ODF whitespace: runs collapse to one space, none at the paragraph's start.
-        let mut started = false;
-        let mut pending = false;
-        while let Some(n) = stack.pop() {
-            if let Node::Text(t) = n {
-                for ch in t.chars() {
-                    if ch.is_whitespace() {
-                        pending = started;
-                    } else {
-                        if pending {
-                            out.push(' ');
-                            pending = false;
-                        }
-                        if ch == '&' {
-                            out.push('&');
-                        }
-                        out.push(ch);
-                        started = true;
-                    }
-                }
-                continue;
-            }
-            if pending {
-                out.push(' ');
-                pending = false;
-            }
-            started = true;
-            match n {
-                Node::Text(_) => {}
-                Node::El(e) if e.ns == Ns::Text => match e.name.as_str() {
-                    "page-number" => out.push_str("&P"),
-                    "page-count" => out.push_str("&N"),
-                    "sheet-name" => out.push_str("&A"),
-                    "date" => out.push_str("&D"),
-                    "time" => out.push_str("&T"),
-                    "file-name" => out.push_str(match e.attr(Ns::Text, "display") {
-                        Some("full") => "&Z&F",
-                        Some("path") => "&Z",
-                        _ => "&F",
-                    }),
-                    "title" => out.push_str("&F"),
-                    "s" => {
-                        let n = e.attr(Ns::Text, "c").and_then(|c| c.trim().parse::<usize>().ok()).unwrap_or(1).clamp(1, 255);
-                        out.push_str(&" ".repeat(n));
-                    }
-                    "tab" => out.push('\t'),
-                    "line-break" => out.push('\n'),
-                    _ => stack.extend(e.kids.iter().rev()),
-                },
-                Node::El(e) => stack.extend(e.kids.iter().rev()),
-            }
-        }
+        walk_paragraph(p, &mut out, MAX_REGION, &mut Codes);
     }
     out
 }
@@ -419,6 +395,15 @@ mod tests {
         for code in ["&KFF0000Red", "&K00FF00Red", "&K01+000Red", "&K05-050Red"] {
             assert_eq!(regions(code), regions("Red"), "{code}");
         }
+    }
+
+    #[test]
+    fn header_spaces_are_odf_whitespace_only() {
+        // A no-break space is text, not a space to collapse; a text `&` is doubled.
+        let page = |xml: &str| super::region_code(&crate::ods::dom::parse_tree(xml.as_bytes()).unwrap());
+        let xml =
+            "<r xmlns:text=\"urn:oasis:names:tc:opendocument:xmlns:text:1.0\"><text:p>\u{a0}1\u{a0}000 &amp;   <text:page-number/></text:p></r>";
+        assert_eq!(page(xml), "\u{a0}1\u{a0}000 && &P");
     }
 
     #[test]

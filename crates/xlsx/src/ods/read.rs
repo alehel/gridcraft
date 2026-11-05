@@ -228,12 +228,12 @@ struct SheetState {
     /// Cells whose style carries `style:map` conditions, by style name.
     mapped: HashMap<String, Vec<RangeRef>>,
     has_calcext_formats: bool,
-    /// Merges that may still reach the rows to come, by first column, with their first cell's
-    /// style: a covered cell shows that style, as LibreOffice draws a merged area.
-    open_merges: BTreeMap<u32, (RangeRef, StyleId)>,
-    /// Matrix formulas' ranges that may still reach the rows to come, by first column: the
-    /// cached results in their other cells are the formula's to fill, not constants.
-    open_matrices: BTreeMap<u32, RangeRef>,
+    /// Merges still open, with their first cell's style: a covered cell shows that style, as
+    /// LibreOffice draws a merged area.
+    open_merges: OpenRanges<StyleId>,
+    /// Matrix formulas still open: the cached results in their other cells are the formula's
+    /// to fill, not constants.
+    open_matrices: OpenRanges<()>,
     /// The columns' default cell styles as (first, end, style) runs, built once the columns are
     /// read (they precede the rows).
     col_defaults: Option<Vec<(u32, u32, StyleId)>>,
@@ -285,19 +285,35 @@ fn cell_link(c: &Elem) -> Option<&Elem> {
     c.elems().filter(|p| p.is(Ns::Text, "p") || p.is(Ns::Text, "h")).find_map(|p| p.descendants(Ns::Text, "a").into_iter().next())
 }
 
-/// The style of the merge holding `at` among the merges still open, and the column where that
-/// answer ends (the merge's right edge, or the next merge's left one), dropping merges that ended
-/// above `at`. Merges don't overlap, so the one starting nearest at or left of `at` is the only
-/// candidate.
-fn merge_style(open: &mut BTreeMap<u32, (RangeRef, StyleId)>, at: CellRef) -> (Option<StyleId>, u32) {
-    let next = |open: &BTreeMap<u32, (RangeRef, StyleId)>| open.range(at.col.saturating_add(1)..).next().map_or(MAX_COLS, |(k, _)| *k);
-    loop {
-        let Some((&key, &(m, style))) = open.range(..=at.col).next_back() else { return (None, next(open)) };
-        if m.end.row < at.row {
-            open.remove(&key);
-            continue;
+/// Ranges (merges, matrix formulas) that may still reach the rows to come, by first column,
+/// each with what it carries. They don't overlap, and rows are read top down, so the range
+/// starting nearest at or left of a cell is the only one that can hold it, and a range ending
+/// above the current row is done for good.
+struct OpenRanges<T>(BTreeMap<u32, (RangeRef, T)>);
+
+impl<T: Copy> Default for OpenRanges<T> {
+    fn default() -> Self {
+        OpenRanges(BTreeMap::new())
+    }
+}
+
+impl<T: Copy> OpenRanges<T> {
+    fn insert(&mut self, r: RangeRef, value: T) {
+        self.0.insert(r.start.col, (r, value));
+    }
+
+    /// The range holding `at`, and the column where that answer ends (its right edge, or the
+    /// next range's left one); ranges that ended above `at` are dropped on the way.
+    fn at(&mut self, at: CellRef) -> (Option<(RangeRef, T)>, u32) {
+        let next = |open: &BTreeMap<u32, (RangeRef, T)>| open.range(at.col.saturating_add(1)..).next().map_or(MAX_COLS, |(k, _)| *k);
+        loop {
+            let Some((&key, &(r, value))) = self.0.range(..=at.col).next_back() else { return (None, next(&self.0)) };
+            if r.end.row < at.row {
+                self.0.remove(&key);
+                continue;
+            }
+            return if r.contains(at) { (Some((r, value)), r.end.col.saturating_add(1)) } else { (None, next(&self.0)) };
         }
-        return if m.contains(at) { (Some(style), m.end.col.saturating_add(1)) } else { (None, next(open)) };
     }
 }
 
@@ -313,6 +329,8 @@ struct RowCell<'a> {
     fallback: StyleId,
     /// What each of its positions holds besides the cell: a note and a link.
     extras: &'a Extras,
+    /// Whether one copy of the cell's text was counted already, as it was decoded.
+    prepaid: bool,
 }
 
 /// What hangs off a cell element at each position it repeats to.
@@ -357,8 +375,6 @@ pub(crate) struct Import {
     text: u64,
     segments: u64,
     kept_nodes: usize,
-    /// Each sheet's index by its name in the file (before any renaming).
-    file_sheets: HashMap<String, usize>,
     pivots: usize,
     validation_ranges: usize,
     images: Vec<(usize, Frame)>,
@@ -415,7 +431,6 @@ impl Import {
             text: 0,
             segments: 0,
             kept_nodes: 0,
-            file_sheets: HashMap::new(),
             pivots: 0,
             validation_ranges: 0,
             images: Vec::new(),
@@ -620,16 +635,9 @@ impl Import {
         if self.wb.sheets.len() >= MAX_SHEETS {
             return Err(IoError::TooLarge("ODS contains more than 1024 sheets".into()));
         }
-        let original = e.attr(Ns::Table, "name").unwrap_or_default().to_string();
-        let mut name = crate::read::SheetNames::of(&self.wb).unique(original.trim_matches('\''), self.wb.sheets.len());
-        if self.wb.check_sheet_name(&name, None).is_err() {
-            name = self.wb.next_sheet_name();
-        }
-        // Ranges elsewhere in the file name the sheet as the file does.
-        self.file_sheets.entry(original.trim_matches('\'').to_string()).or_insert(self.wb.sheets.len());
-        if name != original {
-            self.report.warn("Some ODS sheet names were shortened or renamed to valid, unique sheet names.");
-        }
+        // The sheet keeps the file's name while the file is read, as everything in it refers
+        // to it by that name; a name GridCraft can't hold is changed once the file is read.
+        let name = e.attr(Ns::Table, "name").unwrap_or_default().trim_matches('\'').to_string();
         let mut sheet = Sheet::new(name);
         let ts = e.attr(Ns::Table, "style-name").and_then(|n| self.table_styles.get(n));
         if let Some(ts) = ts {
@@ -667,8 +675,8 @@ impl Import {
             frames: Vec::new(),
             mapped: HashMap::new(),
             has_calcext_formats: false,
-            open_merges: BTreeMap::new(),
-            open_matrices: BTreeMap::new(),
+            open_merges: OpenRanges::default(),
+            open_matrices: OpenRanges::default(),
             col_defaults: None,
         });
         Ok(())
@@ -804,7 +812,7 @@ impl Import {
             }
             let width = if covered { 1 } else { attr_u32(c, Ns::Table, "number-columns-spanned", 1, MAX_COLS)? };
             let height = if covered { 1 } else { attr_u32(c, Ns::Table, "number-rows-spanned", 1, MAX_ROWS)? };
-            let (mut value_cell, implied) = self.convert(c, CellRef::new(start_row, col))?;
+            let (mut value_cell, implied, mut prepaid) = self.convert(c, CellRef::new(start_row, col))?;
             self.matrix_cell(
                 &mut value_cell,
                 RangeRef::new(CellRef::new(start_row, col), CellRef::new(last_row, col.saturating_add(crepeat.saturating_sub(1)).min(MAX_COLS - 1))),
@@ -848,7 +856,8 @@ impl Import {
                 // A covered run is split at the edges of the merges it lies under.
                 let mut own = own_style;
                 if covered {
-                    let (anchor, edge) = merge_style(&mut open_merges, CellRef::new(start_row, seg));
+                    let (merge, edge) = open_merges.at(CellRef::new(start_row, seg));
+                    let anchor = merge.map(|(_, style)| style);
                     seg_end = seg_end.min(edge.max(seg + 1));
                     own = anchor.or(own_style);
                 }
@@ -861,12 +870,13 @@ impl Import {
                         last_row.saturating_add(height - 1).min(MAX_ROWS - 1),
                         (seg_end - 1).saturating_add(width - 1).min(MAX_COLS - 1),
                     );
-                    open_merges.insert(seg, (RangeRef::new(CellRef::new(start_row, seg), to), cell.style));
+                    open_merges.insert(RangeRef::new(CellRef::new(start_row, seg), to), cell.style);
                 }
                 if cell.has_content() || cell.style != fallback || width > 1 || height > 1 || extras.comment.is_some() || extras.link.is_some() {
                     row_has_content |= cell.has_content();
                     // Placed at once, so the import limits apply as the row is read.
-                    self.place(start_row, rows, RowCell { col: seg, count: seg_end - seg, width, height, cell, fallback, extras: &extras })?;
+                    self.place(start_row, rows, RowCell { col: seg, count: seg_end - seg, width, height, cell, fallback, extras: &extras, prepaid })?;
+                    prepaid = false;
                 }
                 seg = seg_end;
             }
@@ -909,18 +919,16 @@ impl Import {
         let Some(st) = self.sheet.as_mut() else { return };
         if let Some(range) = cell.formula.as_ref().and_then(|f| f.array) {
             if range.start != range.end {
-                st.open_matrices.insert(range.start.col, range);
+                st.open_matrices.insert(range, ());
             }
             return;
         }
         if cell.formula.is_some() || matches!(cell.value, Value::Empty) {
             return;
         }
-        let Some((&start, &m)) = st.open_matrices.range(..=area.start.col).next_back() else { return };
-        if m.end.row < area.start.row {
-            // Above these rows for good: the rows only go down.
-            st.open_matrices.remove(&start);
-        } else if m.contains(area.start) && m.contains(area.end) {
+        if let (Some((m, ())), _) = st.open_matrices.at(area.start)
+            && m.contains(area.end)
+        {
             cell.value = Value::Empty;
         }
     }
@@ -964,14 +972,15 @@ impl Import {
             }
         }
         Extras {
-            comment: el.child(Ns::Office, "annotation").map(read_annotation),
+            // A note's text counts as it is decoded; past the limit the note is left out.
+            comment: el.child(Ns::Office, "annotation").map(read_annotation).filter(|n| self.take_text(n.text.len() + n.author.len())),
             link: cell_link(el).and_then(|a| Some(hyperlink(a.attr(Ns::XLink, "href")?, a.attr(Ns::Office, "title")))),
         }
     }
 
     /// Stores a (repeated) cell and what each of its positions holds: merges, notes, links.
     fn place(&mut self, row: u32, rows: u32, k: RowCell<'_>) -> Result<(), IoError> {
-        let RowCell { col, count: cols, mut width, mut height, cell, fallback, extras } = k;
+        let RowCell { col, count: cols, mut width, mut height, cell, fallback, extras, prepaid } = k;
         if (cols > 1 && width > 1) || (rows > 1 && height > 1) {
             return Err(IoError::Format("repeated ODS cells have overlapping merges".into()));
         }
@@ -991,7 +1000,8 @@ impl Import {
         if store {
             self.cells = self.cells.saturating_add(count);
             if let Value::Text(t) = &cell.value {
-                self.text = self.text.saturating_add(count.saturating_mul(t.len() as u64));
+                let copies = count.saturating_sub(u64::from(prepaid));
+                self.text = self.text.saturating_add(copies.saturating_mul(t.len() as u64));
             }
         } else if cell.style != fallback && self.blank_worth_storing(cell.style, fallback, count) {
             self.blanks = self.blanks.saturating_add(count);
@@ -1052,10 +1062,18 @@ impl Import {
 
     /// The value and formula of a cell element, with the number format its value type implies
     /// (a date or a time) for a cell whose style doesn't set one.
-    fn convert(&mut self, c: &Elem, at: CellRef) -> Result<(Cell, Option<&'static str>), IoError> {
+    /// Also whether the cell's text is the paragraph text counted as it was decoded.
+    fn convert(&mut self, c: &Elem, at: CellRef) -> Result<(Cell, Option<&'static str>, bool), IoError> {
         let error = c.attr(Ns::CalcExt, "value-type") == Some("error");
         let kind = if error { Some("error") } else { c.attr(Ns::Office, "value-type") };
-        let text = || c.paragraphs_text();
+        // Paragraph text is counted as it is decoded (a `text:s` run expands), whatever then
+        // becomes of it; the copies a repeat stores count again when they are stored.
+        let decoded = std::cell::Cell::new(0usize);
+        let text = || {
+            let t = c.paragraphs_text();
+            decoded.set(decoded.get().saturating_add(t.len()));
+            t
+        };
         let raw = |k: &str| c.attr(Ns::Office, k);
         let mut fmt: Option<&'static str> = None;
         let formula_text = c.attr(Ns::Table, "formula");
@@ -1122,7 +1140,9 @@ impl Import {
                 None => self.report.warn("Some ODS formulas use syntax GridCraft doesn't read; their saved results were kept as values."),
             }
         }
-        Ok((cell, fmt))
+        self.charge_text(decoded.get())?;
+        let counted = matches!(&cell.value, Value::Text(t) if decoded.get() >= t.len() && decoded.get() > 0);
+        Ok((cell, fmt, counted))
     }
 
     fn finish_sheet(&mut self) {
@@ -1251,7 +1271,97 @@ impl Import {
             None => {}
         }
         self.load_pictures(package);
+        self.rename_sheets();
         Ok((self.wb, self.report))
+    }
+
+    /// Gives each sheet a name GridCraft can hold (valid, unique, at most 31 characters) and
+    /// renames the references to it, all at once, once the file is read.
+    fn rename_sheets(&mut self) {
+        let mut names = crate::read::SheetNames::default();
+        let mut renamed: HashMap<String, String> = HashMap::new();
+        for i in 0..self.wb.sheets.len() {
+            let Some(old) = self.wb.sheets.get(i).map(|s| s.name.clone()) else { continue };
+            let mut new = names.unique(&old, i);
+            if new.eq_ignore_ascii_case("History") || new.starts_with('\'') || new.ends_with('\'') {
+                new = names.unique(&format!("Sheet{}", i + 1), i);
+            }
+            if new != old {
+                // The first sheet the file calls so is the one its references mean.
+                renamed.entry(old.to_lowercase()).or_insert_with(|| new.clone());
+                if let Some(sh) = self.wb.sheets.get_mut(i) {
+                    Arc::make_mut(sh).name = new;
+                }
+            }
+        }
+        if renamed.is_empty() {
+            return;
+        }
+        self.report.warn("Some ODS sheet names were shortened or renamed to valid, unique sheet names.");
+        let map = |n: &str| renamed.get(&n.to_lowercase()).cloned();
+        let expr = |e: gridcraft_formula::Expr| gridcraft_formula::adjust::rename_sheets(e, &map);
+        // Formula text with its references renamed; text that isn't a formula stays.
+        let text = |t: &mut String| {
+            if let Ok(e) = gridcraft_formula::parse(t.trim_start_matches('=')) {
+                let before = gridcraft_formula::print(&e);
+                let new = gridcraft_formula::print(&expr(e));
+                if new != before {
+                    *t = if t.starts_with('=') { format!("={new}") } else { new };
+                }
+            }
+        };
+        for n in &mut self.wb.names {
+            text(&mut n.formula);
+        }
+        for sh in &mut self.wb.sheets {
+            let sh = Arc::make_mut(sh);
+            let formulas: Vec<_> = sh.cells.iter().filter_map(|(c, cell)| cell.formula.as_ref().map(|f| (c, f.clone()))).collect();
+            for (c, f) in formulas {
+                let Some(e) = f.expr() else { continue };
+                let new = Formula::from_expr(expr(e));
+                if new.text != f.text
+                    && let Some(cell) = sh.cells.get_mut(c)
+                {
+                    let array = f.array;
+                    cell.formula = Some(Arc::new(Formula { array, ..new }));
+                }
+            }
+            for cf in &mut sh.cond_formats {
+                match &mut cf.rule {
+                    CfRule::CellIs { a, b, .. } => {
+                        text(a);
+                        if let Some(b) = b {
+                            text(b);
+                        }
+                    }
+                    CfRule::Expression { formula, .. } => text(formula),
+                    _ => {}
+                }
+            }
+            for v in &mut sh.validations {
+                text(&mut v.f1);
+                if let Some(f2) = &mut v.f2 {
+                    text(f2);
+                }
+            }
+            for l in sh.hyperlinks.values_mut().filter(|l| !l.external) {
+                text(&mut l.target);
+            }
+            for ch in &mut sh.charts {
+                for se in &mut ch.series {
+                    text(&mut se.values);
+                    for t in [&mut se.categories, &mut se.name, &mut se.bubble_sizes].into_iter().flatten() {
+                        text(t);
+                    }
+                }
+                if let Some(src) = &mut ch.source {
+                    text(src);
+                }
+            }
+            for pt in &mut sh.pivots {
+                text(&mut pt.source);
+            }
+        }
     }
 
     /// The pivot tables of a `table:data-pilot-tables`, placed on their sheets, numbered over
@@ -1268,7 +1378,8 @@ impl Import {
             }
             let id = self.pivots as u32 + 1;
             let placed = super::pivot::read(p, id).and_then(|(sheet, pt)| {
-                let s = self.wb.sheets.get_mut(*self.file_sheets.get(&sheet)?)?;
+                let i = self.wb.sheets.iter().position(|s| s.name == sheet)?;
+                let s = self.wb.sheets.get_mut(i)?;
                 Arc::make_mut(s).pivots.push(pt);
                 Some(())
             });
@@ -1358,7 +1469,7 @@ impl Import {
         }
         // A database range's name must be new in every scope.
         let mut taken: std::collections::HashSet<String> = defined.into_iter().map(|(_, n)| n).collect();
-        let sheets = std::mem::take(&mut self.file_sheets);
+        let sheets: HashMap<String, usize> = self.wb.sheets.iter().enumerate().rev().map(|(i, s)| (s.name.clone(), i)).collect();
         for db in std::mem::take(&mut self.database_ranges) {
             self.database_range(&db, &sheets, &mut taken);
         }
@@ -1484,7 +1595,11 @@ impl Import {
             } else if cv.child(Ns::Table, "error-macro").is_some() {
                 v.show_error = false;
             }
-            self.validations.insert(name.to_string(), v);
+            // Its messages and formulas count as they are decoded; past the limit it is left out.
+            let bytes = v.f1.len() + v.f2.as_ref().map_or(0, String::len) + v.input_message.len() + v.error_message.len();
+            if self.take_text(bytes) {
+                self.validations.insert(name.to_string(), v);
+            }
         }
     }
 
@@ -1515,13 +1630,22 @@ impl Import {
 
     /// Takes `n` conditional-format ranges from the import's budget; false (with a warning) when
     /// it is spent.
+    /// Counts `n` bytes of decoded text; past the import's text limit the file is refused.
+    fn charge_text(&mut self, n: usize) -> Result<(), IoError> {
+        self.text = self.text.saturating_add(n as u64);
+        if self.text > MAX_TEXT {
+            return Err(IoError::TooLarge("ODS expands beyond the import limit (256 MiB of text)".into()));
+        }
+        Ok(())
+    }
+
     /// Charges `n` bytes of copied text to the import's text budget; false (with a warning)
     /// once it is spent.
     fn take_text(&mut self, n: usize) -> bool {
         self.text = self.text.saturating_add(n as u64);
         let ok = self.text <= MAX_TEXT;
         if !ok {
-            self.report.warn("Some ODS conditional formatting or data validation beyond the import limit was not imported.");
+            self.report.warn("Some ODS notes, conditional formatting or data validation beyond the import limit were not imported.");
         }
         ok
     }

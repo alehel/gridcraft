@@ -248,16 +248,26 @@ fn adjust_ref(r: &Reference, edit: &Edit) -> Option<Reference> {
 
 /// Renames sheet references `old` → `new`.
 pub fn rename_sheet(e: Expr, old: &str, new: &str) -> Expr {
+    rename_sheets(e, &|n: &str| n.eq_ignore_ascii_case(old).then(|| new.to_string()))
+}
+
+/// Renames every sheet reference at once: `renamed` gives a sheet's new name, or `None` to keep
+/// it. All at once, so a name that another sheet is renamed to isn't renamed again.
+pub fn rename_sheets(e: Expr, renamed: &dyn Fn(&str) -> Option<String>) -> Expr {
     e.map(&mut |x| match x {
         Expr::Ref(mut r) => {
             match &mut r.sheet {
-                SheetSel::Named(n) if n.eq_ignore_ascii_case(old) => *n = new.to_string(),
-                SheetSel::Span(a, b) => {
-                    if a.eq_ignore_ascii_case(old) {
-                        *a = new.to_string();
+                SheetSel::Named(n) => {
+                    if let Some(new) = renamed(n) {
+                        *n = new;
                     }
-                    if b.eq_ignore_ascii_case(old) {
-                        *b = new.to_string();
+                }
+                SheetSel::Span(a, b) => {
+                    if let Some(new) = renamed(a) {
+                        *a = new;
+                    }
+                    if let Some(new) = renamed(b) {
+                        *b = new;
                     }
                 }
                 _ => {}
@@ -266,9 +276,12 @@ pub fn rename_sheet(e: Expr, old: &str, new: &str) -> Expr {
         }
         // Sheet-qualified defined name `Old!MyName` is stored as one string, with the bare sheet name as the parser
         // stores it (the printer adds the quotes).
-        Expr::Name(n) => match n.split_at_checked(old.len()) {
-            Some((head, rest)) if head.eq_ignore_ascii_case(old) && rest.starts_with('!') => Expr::Name(format!("{new}{rest}")),
-            _ => Expr::Name(n),
+        Expr::Name(n) => match n.split_once('!') {
+            Some((sheet, rest)) => match renamed(sheet) {
+                Some(new) => Expr::Name(format!("{new}!{rest}")),
+                None => Expr::Name(n),
+            },
+            None => Expr::Name(n),
         },
         other => other,
     })
