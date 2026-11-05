@@ -1190,13 +1190,13 @@ impl Import {
         // sheet to its end with one); otherwise the most common automatic height is the default.
         let tail = st.rows.last().filter(|r| r.start.saturating_add(r.count) >= MAX_ROWS && r.count > 10_000 && !r.hidden && r.outline == 0);
         let tail_start = tail.map(|r| r.start);
-        // Heights marked optimal are recalculated from the content when the file opens (their
-        // stored value may be stale): one line of the default font is 1.28 times its size, as
-        // LibreOffice lays it out (10 pt → 0.452 cm). Only a manually sized run at the end sets
-        // another default.
+        // Heights are kept as stored, optimal ones too: LibreOffice recalculates those when it
+        // opens a file unless they equal its default height (observed), so a stored height lets
+        // it lay the row out again, where a guessed default would pin it. The run at the end
+        // holds the sheet's default; without one (a file of 65536 rows), the height most rows
+        // have; else a line of the default font, 1.28 times its size.
         let font_h = pt_to_px(f64::from(self.wb.styles.get(StyleId::DEFAULT).font.size) * 1.28);
-        let near = |h: f32| (h - font_h).abs() <= font_h * 0.2;
-        let default_h = tail.filter(|r| !r.optimal).and_then(|r| r.size).unwrap_or(font_h);
+        let default_h = tail.and_then(|r| r.size).or_else(|| most_common_size(&st.rows)).unwrap_or(font_h);
         st.sheet.default_row_height = default_h;
         let last = st.last_content_row;
         for r in &st.rows {
@@ -1211,14 +1211,7 @@ impl Import {
                 }
                 continue;
             }
-            // An optimal height close to one line is one line of the default font (the sheet's
-            // default, unless a manual tail set another); a taller one (wrapped or larger text)
-            // is kept as the automatic height it was.
-            let size = match r.size {
-                Some(h) if r.optimal && near(h) => Some(font_h),
-                other => other,
-            }
-            .filter(|h| !same_size(*h, default_h));
+            let size = r.size.filter(|h| !same_size(*h, default_h));
             if let Some(info) = r.info(size) {
                 capped |= !store_run(&mut st.sheet.rows, r, MAX_ROWS, info, &mut budget);
             }
@@ -2154,6 +2147,21 @@ fn merge_ranges(mut ranges: Vec<RangeRef>) -> Vec<RangeRef> {
 }
 
 /// Whether two row heights or column widths (in pixels) are the same size.
+/// The size the most lines of `runs` have (hidden ones aside), if any has one.
+fn most_common_size(runs: &[LineRun]) -> Option<f32> {
+    let mut counts: Vec<(f32, u64)> = Vec::new();
+    for r in runs.iter().filter(|r| !r.hidden) {
+        let Some(size) = r.size else { continue };
+        if let Some((_, n)) = counts.iter_mut().find(|(s, _)| same_size(*s, size)) {
+            *n += u64::from(r.count);
+        } else if counts.len() < 64 {
+            // Few distinct sizes are kept: a sheet of many is sized line by line anyway.
+            counts.push((size, u64::from(r.count)));
+        }
+    }
+    counts.into_iter().max_by_key(|(_, n)| *n).map(|(s, _)| s)
+}
+
 fn same_size(a: f32, b: f32) -> bool {
     (a - b).abs() < 0.01
 }

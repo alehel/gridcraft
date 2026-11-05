@@ -136,8 +136,9 @@ pub(crate) fn apply(sheet: &mut Sheet, name: &str, masters: &HashMap<String, Ele
         if let Some(s) = props.attr(Ns::Style, "scale-to").and_then(|s| s.trim_end_matches('%').parse::<f64>().ok()) {
             p.scale = s.clamp(10.0, 400.0) as u16;
         }
-        let fx = props.attr(Ns::Style, "scale-to-X").and_then(|s| s.parse::<u16>().ok());
-        let fy = props.attr(Ns::Style, "scale-to-Y").and_then(|s| s.parse::<u16>().ok());
+        // LibreOffice before 7.x wrote the page counts in its extension namespace.
+        let count = |n: &str| props.attr(Ns::Style, n).or_else(|| props.attr(Ns::LoExt, n)).and_then(|s| s.parse::<u16>().ok());
+        let (fx, fy) = (count("scale-to-X"), count("scale-to-Y"));
         if fx.is_some() || fy.is_some() {
             p.fit_to = Some((fx.unwrap_or(0), fy.unwrap_or(0)));
         } else if let Some(n) = props.attr(Ns::Style, "scale-to-pages").and_then(|s| s.parse::<u16>().ok()) {

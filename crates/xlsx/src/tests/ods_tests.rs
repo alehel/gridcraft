@@ -1168,3 +1168,28 @@ fn ods_font_declarations_keep_their_generic_family() {
     assert!(xml.contains(r#"svg:font-family="'Sample Hand'" style:font-family-generic="script""#), "{xml}");
     assert!(xml.contains(r#"svg:font-family="'Sample Serif'" style:font-family-generic="roman""#), "{xml}");
 }
+
+/// An optimal row height is shown as stored: LibreOffice keeps it when it opens a file, so
+/// one line of 11 pt text stored as 0.1917 in is written back as that, not as a guess from
+/// the font size (0.1955 in), which grew every row and moved page breaks.
+#[test]
+fn ods_optimal_row_heights_are_kept_as_stored() {
+    let styles = r#"<style:style style:name="ro1" style:family="table-row"><style:table-row-properties style:row-height="0.1917in" style:use-optimal-row-height="true"/></style:style><style:style style:name="ro2" style:family="table-row"><style:table-row-properties style:row-height="0.3in" style:use-optimal-row-height="true"/></style:style>"#;
+    let rows = r#"<table:table table:name="Data"><table:table-row table:style-name="ro1"><table:table-cell office:value-type="string"><text:p>a</text:p></table:table-cell></table:table-row><table:table-row table:style-name="ro2"><table:table-cell office:value-type="string"><text:p>b</text:p></table:table-cell></table:table-row><table:table-row table:style-name="ro1" table:number-rows-repeated="1048574"><table:table-cell/></table:table-row></table:table>"#;
+    let (wb, _) = read_ods(&styled_ods(styles, rows)).unwrap();
+    let xml = String::from_utf8(crate::write_fods(&wb, None).unwrap()).unwrap();
+    assert!(xml.contains(r#"style:row-height="0.1917in""#), "{xml}");
+    assert!(xml.contains(r#"style:row-height="0.3000in""#), "{xml}");
+    assert!(!xml.contains(r#"style:row-height="0.1955in""#), "{xml}");
+}
+
+/// Fit to pages wide and tall is read in either spelling: `style:` and the `loext:` one older
+/// LibreOffice versions wrote (without it a sheet printed on one page spread over several).
+#[test]
+fn ods_fit_to_pages_reads_the_extension_spelling() {
+    let flat = r#"<?xml version="1.0"?><office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:loext="urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" office:mimetype="application/vnd.oasis.opendocument.spreadsheet"><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="11in" fo:page-height="8.5in" style:print-orientation="landscape" loext:scale-to-X="1" loext:scale-to-Y="2"/></style:page-layout><style:style style:name="ta1" style:family="table" style:master-page-name="Default"/></office:automatic-styles><office:master-styles><style:master-page style:name="Default" style:page-layout-name="pm1"/></office:master-styles><office:body><office:spreadsheet><table:table table:name="S" table:style-name="ta1"><table:table-row><table:table-cell/></table:table-row></table:table></office:spreadsheet></office:body></office:document>"#;
+    let (wb, _) = crate::read_fods(flat.as_bytes()).unwrap();
+    assert_eq!(wb.sheets[0].print.fit_to, Some((1, 2)));
+    let xml = String::from_utf8(crate::write_fods(&wb, None).unwrap()).unwrap();
+    assert!(xml.contains(r#"style:scale-to-X="1" style:scale-to-Y="2""#), "{xml}");
+}
