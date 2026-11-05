@@ -86,10 +86,15 @@ fn hf_code(e: &Elem) -> String {
 /// (0.25 cm), written inside the header's height.
 const HF_SPACING_IN: f32 = 0.0984;
 
+/// The page margin LibreOffice gives a page style that states none (2 cm, observed).
+const ODF_MARGIN_IN: f32 = 0.7874;
+
 /// Applies master page `name` (and its page layout) to the sheet's print settings.
 pub(crate) fn apply(sheet: &mut Sheet, name: &str, masters: &HashMap<String, Elem>, layouts: &HashMap<String, Elem>) {
     // Without a page style giving a size the sheet prints on the application's own paper.
     sheet.print.paper.clear();
+    // Margins a page style leaves out are the application's own, not Excel's defaults.
+    sheet.print.margins = [ODF_MARGIN_IN; 6];
     let Some(master) = masters.get(name) else { return };
     let p = &mut sheet.print;
     let layout = master.attr(Ns::Style, "page-layout-name").and_then(|l| layouts.get(l));
@@ -112,7 +117,7 @@ pub(crate) fn apply(sheet: &mut Sheet, name: &str, masters: &HashMap<String, Ele
             let (pw, ph) = if p.orientation == Orientation::Landscape { (h, w) } else { (w, h) };
             p.paper = gridcraft_model::paper::for_size(pw as f32, ph as f32).unwrap_or("Letter").into();
         }
-        let m = |n: &str| inches(props, Ns::Fo, n).or_else(|| inches(props, Ns::Fo, "margin"));
+        let m = |n: &str| inches(props, Ns::Fo, n).or_else(|| inches(props, Ns::Fo, "margin")).unwrap_or(ODF_MARGIN_IN);
         // The header's height holds its spacing to the body (LibreOffice draws the body that
         // far below the page margin, observed), so the spacing is not added to it again.
         let extra = |hf: Option<&Elem>, side: &str| -> Option<f32> {
@@ -120,32 +125,14 @@ pub(crate) fn apply(sheet: &mut Sheet, name: &str, masters: &HashMap<String, Ele
             let h = inches(hf, Ns::Fo, "min-height").or_else(|| inches(hf, Ns::Svg, "height")).unwrap_or(0.0);
             Some(h.max(inches(hf, Ns::Fo, side).unwrap_or(0.0)))
         };
-        if let Some(v) = m("margin-left") {
-            p.margins[0] = v;
-        }
-        if let Some(v) = m("margin-right") {
-            p.margins[1] = v;
-        }
+        p.margins[0] = m("margin-left");
+        p.margins[1] = m("margin-right");
         let header_on = master.child(Ns::Style, "header").is_some_and(|h| h.attr(Ns::Style, "display") != Some("false"));
         let footer_on = master.child(Ns::Style, "footer").is_some_and(|h| h.attr(Ns::Style, "display") != Some("false"));
-        if let Some(v) = m("margin-top") {
-            match extra(header_h, "margin-bottom").filter(|_| header_on) {
-                Some(e) => {
-                    p.margins[4] = v;
-                    p.margins[2] = v + e;
-                }
-                None => p.margins[2] = v,
-            }
-        }
-        if let Some(v) = m("margin-bottom") {
-            match extra(footer_h, "margin-top").filter(|_| footer_on) {
-                Some(e) => {
-                    p.margins[5] = v;
-                    p.margins[3] = v + e;
-                }
-                None => p.margins[3] = v,
-            }
-        }
+        let (top, bottom) = (m("margin-top"), m("margin-bottom"));
+        (p.margins[4], p.margins[5]) = (top, bottom);
+        p.margins[2] = top + extra(header_h, "margin-bottom").filter(|_| header_on).unwrap_or(0.0);
+        p.margins[3] = bottom + extra(footer_h, "margin-top").filter(|_| footer_on).unwrap_or(0.0);
         if let Some(s) = props.attr(Ns::Style, "scale-to").and_then(|s| s.trim_end_matches('%').parse::<f64>().ok()) {
             p.scale = s.clamp(10.0, 400.0) as u16;
         }

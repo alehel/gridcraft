@@ -1096,3 +1096,16 @@ fn ods_page_without_a_size_keeps_the_paper_unstated() {
     let (plain, _) = read_ods(&row("<table:table-cell/>")).unwrap();
     assert_eq!(plain.sheets[0].print.paper, "");
 }
+
+/// Margins a page style leaves out are LibreOffice's 2 cm, not Excel's defaults: the body of a
+/// page with a 0.3 in footer and no stated margins ends 2 cm + 0.3 in from the bottom.
+#[test]
+fn ods_unstated_margins_are_two_centimetres() {
+    let flat = r#"<?xml version="1.0"?><office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:mimetype="application/vnd.oasis.opendocument.spreadsheet"><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties style:table-centering="none"/><style:footer-style><style:header-footer-properties fo:min-height="0.3in" fo:margin-top="0.1in"/></style:footer-style></style:page-layout><style:style style:name="ta1" style:family="table" style:master-page-name="Default"/></office:automatic-styles><office:master-styles><style:master-page style:name="Default" style:page-layout-name="pm1"><style:header style:display="false"/><style:footer><text:p>Page</text:p></style:footer></style:master-page></office:master-styles><office:body><office:spreadsheet><table:table table:name="S" table:style-name="ta1"><table:table-row><table:table-cell/></table:table-row></table:table></office:spreadsheet></office:body></office:document>"#;
+    let (wb, _) = crate::read_fods(flat.as_bytes()).unwrap();
+    let m = wb.sheets[0].print.margins.map(|v| (v * 1e4).round() / 1e4);
+    assert_eq!(m, [0.7874, 0.7874, 0.7874, 1.0874, 0.7874, 0.7874]);
+    // Without any page style the margins are LibreOffice's too.
+    let (plain, _) = read_ods(&row("<table:table-cell/>")).unwrap();
+    assert_eq!(plain.sheets[0].print.margins, [0.7874; 6]);
+}
