@@ -104,21 +104,10 @@ pub(super) fn rename_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     edit(s, |cx| {
         let old = cx.wb.sheet(i).map(|s| s.name.clone()).unwrap_or_default();
         cx.sheet_mut(i)?.name = name.clone();
+        // Every reference the workbook holds follows the sheet.
+        cx.wb.rewrite_references(&|e| gridcraft_formula::adjust::rename_sheet(e, &old, &name));
         for si in 0..cx.wb.sheets.len() {
-            let keys: Vec<(CellRef, Arc<gridcraft_model::Formula>)> =
-                cx.wb.sheets.get(si).map(|s| s.cells.iter().filter_map(|(c, x)| x.formula.clone().map(|f| (c, f))).collect()).unwrap_or_default();
             let Some(sh) = cx.wb.sheet_mut(si) else { continue };
-            for (c, f) in keys {
-                if let Some(e) = f.expr() {
-                    let ne = gridcraft_formula::adjust::rename_sheet(e, &old, &name);
-                    let text = gridcraft_formula::print(&ne);
-                    if text != f.text
-                        && let Some(cell) = sh.cells.get_mut(c)
-                    {
-                        cell.formula = Some(Arc::new(gridcraft_model::Formula::from_expr(ne)));
-                    }
-                }
-            }
             for ch in sh.charts.iter_mut() {
                 // A PivotChart follows its PivotTable's sheet.
                 if let Some((sheet, pivot)) = ch.pivot.as_deref().and_then(crate::pivot::parse_chart_link)
@@ -126,12 +115,6 @@ pub(super) fn rename_sheet(s: &mut Session, p: &Json) -> Result<Json> {
                 {
                     ch.pivot = Some(crate::pivot::chart_link(&name, &pivot));
                 }
-            }
-        }
-        crate::cmd::edit::rewrite_cell_links(&mut cx.wb, |_, e| gridcraft_formula::adjust::rename_sheet(e, &old, &name));
-        for n in cx.wb.names.iter_mut() {
-            if let Ok(e) = gridcraft_formula::parse_name(&n.formula) {
-                n.formula = gridcraft_formula::print(&gridcraft_formula::adjust::rename_sheet(e, &old, &name));
             }
         }
         crate::cmd::edit::rewrite_python_refs(&mut cx.wb, &|_, e| gridcraft_formula::adjust::rename_sheet(e, &old, &name))?;

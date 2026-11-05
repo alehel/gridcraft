@@ -276,7 +276,7 @@ pub fn rename_sheets(e: Expr, renamed: &dyn Fn(&str) -> Option<String>) -> Expr 
         }
         // Sheet-qualified defined name `Old!MyName` is stored as one string, with the bare sheet name as the parser
         // stores it (the printer adds the quotes).
-        Expr::Name(n) => match n.split_once('!') {
+        Expr::Name(n) => match n.rsplit_once('!') {
             Some((sheet, rest)) => match renamed(sheet) {
                 Some(new) => Expr::Name(format!("{new}!{rest}")),
                 None => Expr::Name(n),
