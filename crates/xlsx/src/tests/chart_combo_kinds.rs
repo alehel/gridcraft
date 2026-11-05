@@ -98,7 +98,8 @@ fn combo_series_keep_their_kinds_and_order() {
     }
     // Groups that can't share one pair of axes are drawn in the first one's kind: a pie beside
     // columns as columns, its axes all present. (A combination's bars are drawn as columns.)
-    for (kinds, want) in [(vec![ChartKind::Pie, ChartKind::ColumnClustered], ChartKind::ColumnClustered)] {
+    {
+        let (kinds, want) = (vec![ChartKind::Pie, ChartKind::ColumnClustered], ChartKind::ColumnClustered);
         let series: Vec<Series> = kinds.iter().map(|k| Series { values: "Sheet1!$B$1:$B$3".into(), kind: Some(*k), ..Series::default() }).collect();
         let chart = Chart { kind: ChartKind::Combo, series, ..base.clone() };
         let xml = crate::chart::write_chart(&Workbook::new(), 0, &chart, "Book1");
