@@ -359,6 +359,17 @@ pub struct Alignment {
     pub indent: u8,
     /// Degrees -90..=90, or 255 for vertical stacked text.
     pub rotation: i16,
+    /// Space between the cell's edges and its text, left, right, top, bottom, in hundredths
+    /// of a point; `None` where the file stated none (the application's own). An OpenDocument
+    /// cell's padding; Excel has none.
+    #[serde(default, skip_serializing_if = "Alignment::no_padding")]
+    pub padding: [Option<u16>; 4],
+}
+
+impl Alignment {
+    fn no_padding(p: &[Option<u16>; 4]) -> bool {
+        p.iter().all(Option::is_none)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -261,6 +261,7 @@ fn read_alignment(a: &El) -> Alignment {
         shrink: a.flag("shrinkToFit", false),
         indent: a.attr_u32("indent").unwrap_or(0).min(250) as u8,
         rotation: 0,
+        padding: [None; 4],
     };
     if let Some(r) = a.attr_i64("textRotation") {
         al.rotation = match r {

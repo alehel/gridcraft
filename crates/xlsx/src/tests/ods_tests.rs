@@ -1193,3 +1193,20 @@ fn ods_fit_to_pages_reads_the_extension_spelling() {
     let xml = String::from_utf8(crate::write_fods(&wb, None).unwrap()).unwrap();
     assert!(xml.contains(r#"style:scale-to-X="1" style:scale-to-Y="2""#), "{xml}");
 }
+
+/// Cell padding is kept, all sides at once or one by one: LibreOffice lays rows out with it,
+/// so without it every row of a padded style came back shorter.
+#[test]
+fn ods_cell_padding_round_trips() {
+    let styles = r#"<style:style style:name="ce1" style:family="table-cell"><style:table-cell-properties fo:padding="2pt"/></style:style><style:style style:name="ce2" style:family="table-cell"><style:table-cell-properties fo:padding="1pt" fo:padding-left="3pt"/></style:style>"#;
+    let (wb, _) = read_ods(&styled_ods(
+        styles,
+        r#"<table:table table:name="Data"><table:table-row><table:table-cell table:style-name="ce1" office:value-type="string"><text:p>a</text:p></table:table-cell><table:table-cell table:style-name="ce2" office:value-type="string"><text:p>b</text:p></table:table-cell></table:table-row></table:table>"#,
+    ))
+    .unwrap();
+    let pad = |wb: &gridcraft_model::Workbook, col: u32| wb.styles.get(wb.sheets[0].style_id(CellRef::new(0, col))).align.padding;
+    assert_eq!(pad(&wb, 0), [Some(200); 4]);
+    assert_eq!(pad(&wb, 1), [Some(300), Some(100), Some(100), Some(100)]);
+    let (again, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
+    assert_eq!((pad(&again, 0), pad(&again, 1)), (pad(&wb, 0), pad(&wb, 1)));
+}

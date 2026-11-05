@@ -63,6 +63,8 @@ pub(crate) struct Props {
     pub rotation: Option<i16>,
     pub protection: Option<Protection>,
     pub data_style: Option<String>,
+    /// Left, right, top, bottom padding in hundredths of a point.
+    pub padding: [Option<u16>; 4],
 }
 
 /// A named or automatic table-cell style as read.
@@ -185,6 +187,16 @@ pub(crate) fn read_props(e: &Elem, fonts: &HashMap<String, String>) -> Props {
 
 /// `style:table-cell-properties`: fill, borders, wrapping, alignment, rotation, protection.
 fn cell_props(tc: &Elem, p: &mut Props) {
+    // Padding: one length for every side, then any side's own.
+    let pad = |n: &str| tc.attr(Ns::Fo, n).and_then(length_pt).filter(|v| v.is_finite()).map(|v| (v * 100.0).round().clamp(0.0, 65535.0) as u16);
+    if let Some(all) = pad("padding") {
+        p.padding = [Some(all); 4];
+    }
+    for (slot, n) in p.padding.iter_mut().zip(["padding-left", "padding-right", "padding-top", "padding-bottom"]) {
+        if let Some(v) = pad(n) {
+            *slot = Some(v);
+        }
+    }
     if let Some(bg) = tc.attr(Ns::Fo, "background-color") {
         p.background = Some(if bg == "transparent" { None } else { color(bg) });
     }
@@ -404,6 +416,11 @@ pub(crate) fn merge(base: &Props, over: &Props) -> Props {
             *o = *b;
         }
     }
+    for (o, b) in out.padding.iter_mut().zip(over.padding.iter()) {
+        if b.is_some() {
+            *o = *b;
+        }
+    }
     out
 }
 
@@ -431,6 +448,11 @@ pub(crate) fn to_style(p: &Props, base: &Style, num_fmt: Option<String>) -> Styl
     for (slot, b) in slots.into_iter().zip(p.borders.iter()) {
         if let Some(b) = b {
             *slot = *b;
+        }
+    }
+    for (slot, v) in s.align.padding.iter_mut().zip(p.padding.iter()) {
+        if v.is_some() {
+            *slot = *v;
         }
     }
     if let Some(code) = num_fmt {
@@ -469,6 +491,26 @@ fn border_text(b: &BorderLine, theme: &gridcraft_model::Theme) -> String {
     format!("{w} {kind} {c}")
 }
 
+/// Padding attributes of `pad` where it differs from `base`: one length when every side has it.
+fn write_padding(tc: &mut String, pad: [Option<u16>; 4], base: [Option<u16>; 4]) {
+    if pad == base {
+        return;
+    }
+    let pt = |v: u16| format!("{}pt", f64::from(v) / 100.0);
+    match pad {
+        [Some(a), Some(b), Some(c), Some(d)] if a == b && b == c && c == d => {
+            let _ = write!(tc, " fo:padding=\"{}\"", pt(a));
+        }
+        _ => {
+            for ((side, v), was) in ["left", "right", "top", "bottom"].into_iter().zip(pad).zip(base) {
+                if let Some(v) = v.filter(|v| Some(*v) != was) {
+                    let _ = write!(tc, " fo:padding-{side}=\"{}\"", pt(v));
+                }
+            }
+        }
+    }
+}
+
 /// The property elements of `s` (everything that differs from `base`), for a `style:style`.
 pub(crate) fn write_props(s: &Style, base: &Style, theme: &gridcraft_model::Theme) -> String {
     let mut tc = String::new();
@@ -487,6 +529,7 @@ pub(crate) fn write_props(s: &Style, base: &Style, theme: &gridcraft_model::Them
             }
         }
     }
+    write_padding(&mut tc, s.align.padding, base.align.padding);
     let sides = [("left", s.borders.left), ("right", s.borders.right), ("top", s.borders.top), ("bottom", s.borders.bottom)];
     if s.borders != base.borders {
         for (side, b) in sides {
