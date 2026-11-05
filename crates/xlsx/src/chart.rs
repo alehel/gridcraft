@@ -244,9 +244,10 @@ pub fn read_chart(root: &El) -> Option<Chart> {
     // the right or top), else the first group's; groups on other axes are secondary.
     let val_pos = |id: &str| plot.kids("valAx").find(|a| a.child_val("axId") == Some(id)).and_then(|a| a.child_val("axPos"));
     let pairs: Vec<Vec<String>> = groups.iter().map(|(g, _)| axis_ids(g)).collect();
+    // A pair's value axis is its second (for scatter, the y axis): the one whose side tells.
     let primary_axes = pairs
         .iter()
-        .find(|ids| ids.iter().any(|id| matches!(val_pos(id), Some("l" | "b"))))
+        .find(|ids| ids.get(1).is_some_and(|id| matches!(val_pos(id), Some("l" | "b"))))
         .or_else(|| pairs.iter().find(|ids| !ids.is_empty()))
         .cloned()
         .unwrap_or_default();
@@ -857,7 +858,6 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
     // they first appear (a line's markers and a scatter's lines are the series' own).
     let stock = ch.kind == ChartKind::Stock;
     let group_of = |i: usize| match group_for(ch.series_kind(i)) {
-        G::Stock if !(3..=4).contains(&ch.series.len()) => G::Line { stacked: false, markers: false },
         G::Line { stacked, .. } => G::Line { stacked, markers: false },
         G::Scatter { .. } => G::Scatter { lines: true },
         g => g,
@@ -876,6 +876,9 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
         let family = out.iter().map(|(g, _)| axes_of(*g)).find(|a| *a != Axes::None).unwrap_or(Axes::None);
         let mut fitted: Vec<(G, Vec<(usize, &Series)>)> = Vec::new();
         for (g, members) in out {
+            // A stock group holds 3 or 4 series (high-low-close, open-high-low-close); others are
+            // lines.
+            let g = if g == G::Stock && !(3..=4).contains(&members.len()) { G::Line { stacked: false, markers: false } } else { g };
             let g = fit_axes(g, family);
             match fitted.iter_mut().find(|(k, _)| *k == g) {
                 Some((_, m)) => m.extend(members),

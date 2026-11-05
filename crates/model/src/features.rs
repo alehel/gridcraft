@@ -619,6 +619,10 @@ pub fn same_family(a: ChartKind, b: ChartKind) -> bool {
 /// The kind a combo chart's series `i` with its own kind `own` is drawn as.
 fn combo_series_kind(own: Option<ChartKind>, i: usize) -> ChartKind {
     match own {
+        // A combination chart's bars stand upright: its categories run across.
+        Some(ChartKind::BarClustered) => ChartKind::ColumnClustered,
+        Some(ChartKind::BarStacked) => ChartKind::ColumnStacked,
+        Some(ChartKind::BarStacked100) => ChartKind::ColumnStacked100,
         Some(k) if k != ChartKind::Combo => k,
         _ if i == 0 => ChartKind::ColumnClustered,
         _ => ChartKind::Line,
