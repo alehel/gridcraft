@@ -1058,3 +1058,20 @@ fn ods_shape_text_is_counted() {
     assert!(text <= 256 * 1024 * 1024, "{text}");
     assert!(report.warnings.iter().any(|w| w.contains("beyond the import limit")), "{:?}", report.warnings);
 }
+
+/// A header's height holds its spacing to the body: a 0.3 in header with 0.1 in spacing under
+/// a 0.5 in page margin puts the body 0.8 in down, not 0.9 in, and is written back that way.
+#[test]
+fn ods_header_spacing_lies_inside_its_height() {
+    let flat = r#"<?xml version="1.0"?><office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:mimetype="application/vnd.oasis.opendocument.spreadsheet"><office:automatic-styles><style:page-layout style:name="pm1"><style:page-layout-properties fo:page-width="8.5in" fo:page-height="11in" fo:margin-top="0.5in" fo:margin-bottom="0.5in"/><style:header-style><style:header-footer-properties fo:min-height="0.3in" fo:margin-bottom="0.1in"/></style:header-style><style:footer-style><style:header-footer-properties fo:min-height="0.25in" fo:margin-top="0.1in"/></style:footer-style></style:page-layout><style:style style:name="ta1" style:family="table" style:master-page-name="Default"/></office:automatic-styles><office:master-styles><style:master-page style:name="Default" style:page-layout-name="pm1"><style:header><text:p>Top</text:p></style:header><style:footer><text:p>Bottom</text:p></style:footer></style:master-page></office:master-styles><office:body><office:spreadsheet><table:table table:name="S" table:style-name="ta1"><table:table-row><table:table-cell/></table:table-row></table:table></office:spreadsheet></office:body></office:document>"#;
+    let (wb, _) = crate::read_fods(flat.as_bytes()).unwrap();
+    let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+    let m = wb.sheets[0].print.margins;
+    assert!(close(m[2], 0.8) && close(m[4], 0.5), "{m:?}");
+    assert!(close(m[3], 0.75) && close(m[5], 0.5), "{m:?}");
+    let saved = crate::write_fods(&wb, None).unwrap();
+    let xml = String::from_utf8_lossy(&saved);
+    assert!(xml.contains(r#"fo:min-height="0.3in" fo:margin-bottom="0.0984in""#), "{xml}");
+    let (again, _) = crate::read_fods(&saved).unwrap();
+    assert_eq!(again.sheets[0].print.margins.map(|v| (v * 1e4).round()), m.map(|v| (v * 1e4).round()));
+}
