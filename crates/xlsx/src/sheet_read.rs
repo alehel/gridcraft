@@ -146,6 +146,7 @@ fn read_sheet_format(e: &El, sheet: &mut Sheet) {
             sheet.default_row_height = px;
         }
     }
+    sheet.default_row_custom = e.flag("customHeight", false);
     if let Some(w) = e.attr_f64("defaultColWidth") {
         let px = col_width_to_px(w);
         if px > 0.0 {

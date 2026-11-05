@@ -1196,8 +1196,11 @@ impl Import {
         // holds the sheet's default; without one (a file of 65536 rows), the height most rows
         // have; else a line of the default font, 1.28 times its size.
         let font_h = pt_to_px(f64::from(self.wb.styles.get(StyleId::DEFAULT).font.size) * 1.28);
-        let default_h = tail.and_then(|r| r.size).or_else(|| most_common_size(&st.rows)).unwrap_or(font_h);
+        // A default set by hand stays so: LibreOffice would fit an optimal one to the text.
+        let (default_h, default_custom) =
+            tail.and_then(|r| r.size.map(|s| (s, !r.optimal))).or_else(|| most_common_size(&st.rows)).unwrap_or((font_h, false));
         st.sheet.default_row_height = default_h;
+        st.sheet.default_row_custom = default_custom;
         let last = st.last_content_row;
         for r in &st.rows {
             if r.page_break && r.start > 0 {
@@ -1211,7 +1214,7 @@ impl Import {
                 }
                 continue;
             }
-            let size = r.size.filter(|h| !same_size(*h, default_h));
+            let size = r.size.filter(|h| !same_size(*h, default_h) || r.optimal == default_custom);
             if let Some(info) = r.info(size) {
                 capped |= !store_run(&mut st.sheet.rows, r, MAX_ROWS, info, &mut budget);
             }
@@ -2149,19 +2152,19 @@ fn merge_ranges(mut ranges: Vec<RangeRef>) -> Vec<RangeRef> {
 }
 
 /// Whether two row heights or column widths (in pixels) are the same size.
-/// The size the most lines of `runs` have (hidden ones aside), if any has one.
-fn most_common_size(runs: &[LineRun]) -> Option<f32> {
-    let mut counts: Vec<(f32, u64)> = Vec::new();
+/// The size the most lines of `runs` have (hidden ones aside), and whether it was set by hand.
+fn most_common_size(runs: &[LineRun]) -> Option<(f32, bool)> {
+    let mut counts: Vec<(f32, bool, u64)> = Vec::new();
     for r in runs.iter().filter(|r| !r.hidden) {
         let Some(size) = r.size else { continue };
-        if let Some((_, n)) = counts.iter_mut().find(|(s, _)| same_size(*s, size)) {
+        if let Some((.., n)) = counts.iter_mut().find(|(s, custom, _)| same_size(*s, size) && *custom != r.optimal) {
             *n += u64::from(r.count);
         } else if counts.len() < 64 {
             // Few distinct sizes are kept: a sheet of many is sized line by line anyway.
-            counts.push((size, u64::from(r.count)));
+            counts.push((size, !r.optimal, u64::from(r.count)));
         }
     }
-    counts.into_iter().max_by_key(|(_, n)| *n).map(|(s, _)| s)
+    counts.into_iter().max_by_key(|(.., n)| *n).map(|(s, custom, _)| (s, custom))
 }
 
 fn same_size(a: f32, b: f32) -> bool {

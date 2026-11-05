@@ -719,7 +719,7 @@ impl<'a> Writer<'a> {
             if row > max_row {
                 // The rest of the sheet: empty rows of the default height, in no outline group.
                 outline.close_to(out, 0);
-                let name = self.row_style(default_h, true);
+                let name = self.row_style(default_h, !sh.default_row_custom);
                 let _ = write!(
                     out,
                     "<table:table-row table:style-name=\"{name}\" table:number-rows-repeated=\"{}\"><table:table-cell table:number-columns-repeated=\"{MAX_COLS}\"/></table:table-row>",
@@ -743,7 +743,8 @@ impl<'a> Writer<'a> {
                 }
             }
             let height = info.size.unwrap_or(default_h);
-            let name = self.row_style(height, !info.custom);
+            // A row of the default height is optimal unless the default was set by hand.
+            let name = self.row_style(height, !(info.custom || info.size.is_none() && sh.default_row_custom));
             let _ = write!(out, "<table:table-row table:style-name=\"{name}\"");
             if repeat > 1 {
                 let _ = write!(out, " table:number-rows-repeated=\"{repeat}\"");

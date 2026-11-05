@@ -1254,3 +1254,18 @@ fn outlined_text_round_trips() {
     assert!(outlined(&read_ods(&write_ods(&wb).unwrap()).unwrap().0));
     assert!(outlined(&read_xlsx(&write_xlsx(&wb).unwrap()).unwrap().0));
 }
+
+/// A sheet whose rows were all set by hand to a small height keeps them set by hand: written as
+/// optimal, LibreOffice grew every one of them to fit its text.
+#[test]
+fn ods_hand_set_default_row_height_stays_hand_set() {
+    let styles = r#"<style:style style:name="ro1" style:family="table-row"><style:table-row-properties style:row-height="0.08in" style:use-optimal-row-height="false"/></style:style><style:style style:name="ro2" style:family="table-row"><style:table-row-properties style:row-height="0.2in" style:use-optimal-row-height="true"/></style:style>"#;
+    let rows = r#"<table:table table:name="Data"><table:table-row table:style-name="ro1"><table:table-cell office:value-type="string"><text:p>squeezed</text:p></table:table-cell></table:table-row><table:table-row table:style-name="ro2"><table:table-cell office:value-type="string"><text:p>fits</text:p></table:table-cell></table:table-row><table:table-row table:style-name="ro1" table:number-rows-repeated="1048574"><table:table-cell/></table:table-row></table:table>"#;
+    let (wb, _) = read_ods(&styled_ods(styles, rows)).unwrap();
+    assert!(wb.sheets[0].default_row_custom);
+    let xml = String::from_utf8(crate::write_fods(&wb, None).unwrap()).unwrap();
+    assert!(xml.contains(r#"style:row-height="0.0800in" fo:break-before="auto" style:use-optimal-row-height="false""#), "{xml}");
+    assert!(!xml.contains(r#"style:row-height="0.0800in" fo:break-before="auto" style:use-optimal-row-height="true""#), "{xml}");
+    assert!(xml.contains(r#"style:row-height="0.2000in" fo:break-before="auto" style:use-optimal-row-height="true""#), "{xml}");
+    assert!(read_xlsx(&write_xlsx(&wb).unwrap()).unwrap().0.sheets[0].default_row_custom);
+}
