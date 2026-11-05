@@ -82,6 +82,10 @@ fn hf_code(e: &Elem) -> String {
     out
 }
 
+/// The spacing between a header or footer and the body LibreOffice gives a new page style
+/// (0.25 cm), written inside the header's height.
+const HF_SPACING_IN: f32 = 0.0984;
+
 /// Applies master page `name` (and its page layout) to the sheet's print settings.
 pub(crate) fn apply(sheet: &mut Sheet, name: &str, masters: &HashMap<String, Elem>, layouts: &HashMap<String, Elem>) {
     let Some(master) = masters.get(name) else { return };
@@ -106,10 +110,12 @@ pub(crate) fn apply(sheet: &mut Sheet, name: &str, masters: &HashMap<String, Ele
             }
         }
         let m = |n: &str| inches(props, Ns::Fo, n).or_else(|| inches(props, Ns::Fo, "margin"));
+        // The header's height holds its spacing to the body (LibreOffice draws the body that
+        // far below the page margin, observed), so the spacing is not added to it again.
         let extra = |hf: Option<&Elem>, side: &str| -> Option<f32> {
             let hf = hf?;
             let h = inches(hf, Ns::Fo, "min-height").or_else(|| inches(hf, Ns::Svg, "height")).unwrap_or(0.0);
-            Some(h + inches(hf, Ns::Fo, side).unwrap_or(0.0))
+            Some(h.max(inches(hf, Ns::Fo, side).unwrap_or(0.0)))
         };
         if let Some(v) = m("margin-left") {
             p.margins[0] = v;
@@ -332,7 +338,12 @@ pub(crate) fn write(i: usize, p: &PrintSettings) -> (String, String) {
         _ => "none",
     };
     let _ = write!(layout, " style:table-centering=\"{centering}\" style:writing-mode=\"lr-tb\"/>");
-    let hf = |extra: f32, side: &str| format!("<style:header-footer-properties fo:min-height=\"{extra}in\" fo:margin-{side}=\"0in\"/>");
+    // The spacing to the body lies inside the height: LibreOffice's usual 0.25 cm, or the
+    // whole height when it is less, so the body starts where the model's margin puts it.
+    let hf = |extra: f32, side: &str| {
+        let spacing = extra.min(HF_SPACING_IN);
+        format!("<style:header-footer-properties fo:min-height=\"{extra}in\" fo:margin-{side}=\"{spacing}in\"/>")
+    };
     let _ = write!(
         layout,
         "<style:header-style>{}</style:header-style><style:footer-style>{}</style:footer-style></style:page-layout>",
