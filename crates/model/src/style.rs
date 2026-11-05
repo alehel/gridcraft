@@ -197,6 +197,9 @@ pub struct Font {
     /// theme's minor font. Fonts derived from it (bold, a colour, a size) keep the link.
     #[serde(default = "default_minor")]
     pub minor: bool,
+    /// Outlined (hollow) letters: an ODF `style:text-outline`, an XLSX `<outline/>`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outline: bool,
 }
 
 fn default_minor() -> bool {
@@ -208,7 +211,7 @@ impl Hash for Font {
     fn hash<H: Hasher>(&self, h: &mut H) {
         self.name.hash(h);
         self.size.to_bits().hash(h);
-        (self.bold, self.italic, self.underline, self.strike, self.color, self.vert, self.charset, self.family, self.minor).hash(h);
+        (self.bold, self.italic, self.underline, self.strike, self.color, self.vert, self.charset, self.family, self.minor, self.outline).hash(h);
     }
 }
 
@@ -226,6 +229,7 @@ impl Default for Font {
             charset: None,
             family: None,
             minor: true,
+            outline: false,
         }
     }
 }

@@ -50,6 +50,7 @@ pub(crate) struct Props {
     pub italic: Option<bool>,
     pub underline: Option<Underline>,
     pub strike: Option<bool>,
+    pub outline: Option<bool>,
     pub color: Option<Color>,
     pub vert: Option<VertAlign>,
     pub background: Option<Option<Color>>,
@@ -379,6 +380,9 @@ fn text_props(tp: &Elem, fonts: &HashMap<String, String>, p: &mut Props) {
             Underline::Single
         });
     }
+    if let Some(o) = tp.attr(Ns::Style, "text-outline") {
+        p.outline = Some(o == "true");
+    }
     if let Some(s) = tp.attr(Ns::Style, "text-line-through-style") {
         p.strike = Some(s != "none");
     }
@@ -409,7 +413,8 @@ pub(crate) fn merge(base: &Props, over: &Props) -> Props {
         ($($f:ident),*) => { $( if over.$f.is_some() { out.$f = over.$f.clone(); } )* };
     }
     take!(
-        font_name, font_size, bold, italic, underline, strike, color, vert, background, h, v, wrap, shrink, indent, rotation, protection, data_style
+        font_name, font_size, bold, italic, underline, strike, outline, color, vert, background, h, v, wrap, shrink, indent, rotation, protection,
+        data_style
     );
     for (o, b) in out.borders.iter_mut().zip(over.borders.iter()) {
         if b.is_some() {
@@ -432,7 +437,7 @@ pub(crate) fn to_style(p: &Props, base: &Style, num_fmt: Option<String>) -> Styl
         ($($prop:ident => $($field:ident).+),* $(,)?) => { $( if let Some(v) = &p.$prop { s.$($field).+ = v.clone(); } )* };
     }
     apply!(
-        font_size => font.size, bold => font.bold, italic => font.italic, underline => font.underline, strike => font.strike,
+        font_size => font.size, bold => font.bold, italic => font.italic, underline => font.underline, strike => font.strike, outline => font.outline,
         color => font.color, vert => font.vert, h => align.h, v => align.v, wrap => align.wrap, shrink => align.shrink,
         indent => align.indent, rotation => align.rotation, protection => protection,
     );
@@ -655,6 +660,9 @@ pub(crate) fn write_font(tp: &mut String, f: &Font, g: &Font, theme: &gridcraft_
                 " style:text-underline-style=\"solid\" style:text-underline-type=\"double\" style:text-underline-width=\"auto\" style:text-underline-color=\"font-color\"",
             ),
         }
+    }
+    if f.outline != g.outline {
+        let _ = write!(tp, " style:text-outline=\"{}\"", f.outline);
     }
     if f.strike != g.strike {
         tp.push_str(if f.strike {
