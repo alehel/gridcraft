@@ -239,21 +239,31 @@ pub fn read_chart(root: &El) -> Option<Chart> {
     let chart = root.child("chart")?;
     let plot = chart.child("plotArea")?;
     let groups: Vec<(&El, ChartKind)> = plot.children.iter().filter_map(|g| group_kind(g).map(|k| (g, k))).collect();
-    let (first, first_kind) = *groups.first()?;
-    let first_axes = axis_ids(first);
+    let (_, first_kind) = *groups.first()?;
+    // The primary axes are the pair whose value axis sits left or bottom (a secondary pair is on
+    // the right or top), else the first group's; groups on other axes are secondary.
+    let val_pos = |id: &str| plot.kids("valAx").find(|a| a.child_val("axId") == Some(id)).and_then(|a| a.child_val("axPos"));
+    let pairs: Vec<Vec<String>> = groups.iter().map(|(g, _)| axis_ids(g)).collect();
+    let primary_axes = pairs
+        .iter()
+        .find(|ids| ids.iter().any(|id| matches!(val_pos(id), Some("l" | "b"))))
+        .or_else(|| pairs.iter().find(|ids| !ids.is_empty()))
+        .cloned()
+        .unwrap_or_default();
+    // Groups of kinds drawn alike (columns on both axes, lines with and without markers) are one
+    // chart; groups of other kinds make a combination chart.
+    let combo = groups.iter().any(|(_, k)| !gridcraft_model::same_family(*k, first_kind));
     let mut series = vec![];
-    for (gi, (g, k)) in groups.iter().enumerate() {
+    for ((g, k), ids) in groups.iter().zip(&pairs) {
         for s in g.kids("ser") {
             let mut ser = read_series(s);
             // Every series of a combo chart keeps its own kind; elsewhere a series states one
             // only where it differs from its chart's.
             let own = series_kind_in(g, *k, s);
-            if groups.len() > 1 || own != *k {
+            if combo || own != first_kind {
                 ser.kind = Some(own);
             }
-            if gi > 0 {
-                ser.secondary = axis_ids(g) != first_axes;
-            }
+            ser.secondary = !ids.is_empty() && *ids != primary_axes;
             series.push(ser);
         }
     }
@@ -265,7 +275,7 @@ pub fn read_chart(root: &El) -> Option<Chart> {
         keyed.sort_by_key(|(o, _)| *o);
         series = keyed.into_iter().map(|(_, s)| s).collect();
     }
-    let kind = if groups.len() > 1 { ChartKind::Combo } else { first_kind };
+    let kind = if combo { ChartKind::Combo } else { first_kind };
     let show_val = |e: &El| e.child("dLbls").is_some_and(|d| bool_val(d, "showVal"));
     let data_labels = groups.iter().any(|(g, _)| show_val(g) || g.kids("ser").any(show_val));
     let val_axes: Vec<&El> = plot.kids("valAx").collect();
@@ -324,6 +334,45 @@ enum G {
     Bubble,
     Radar,
     Stock,
+}
+
+/// The kind of axes a group is drawn on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axes {
+    /// None: pie and doughnut.
+    None,
+    /// Categories across, values up: columns, lines, areas, stock, radar.
+    Category,
+    /// Categories down, values across: horizontal bars.
+    Horizontal,
+    /// Values both ways: scatter and bubble.
+    Values,
+}
+
+fn axes_of(g: G) -> Axes {
+    match g {
+        G::Pie | G::Doughnut => Axes::None,
+        G::Bar { bar: true, .. } => Axes::Horizontal,
+        G::Scatter { .. } | G::Bubble => Axes::Values,
+        _ => Axes::Category,
+    }
+}
+
+/// Group `g` drawn on axes of kind `family`: itself where it fits, else the nearest group that
+/// does (a line-like series as lines, others as columns, bars or scatter).
+fn fit_axes(g: G, family: Axes) -> G {
+    let own = axes_of(g);
+    if own == family || family == Axes::None {
+        return g;
+    }
+    let line_like = matches!(g, G::Line { .. } | G::Area { .. } | G::Radar | G::Scatter { .. });
+    match family {
+        Axes::None => g,
+        Axes::Category if line_like => G::Line { stacked: false, markers: false },
+        Axes::Category => G::Bar { bar: false, grouping: "clustered" },
+        Axes::Horizontal => G::Bar { bar: true, grouping: "clustered" },
+        Axes::Values => G::Scatter { lines: true },
+    }
 }
 
 fn group_for(k: ChartKind) -> G {
@@ -803,120 +852,90 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
     }
     s.push_str("<c:plotArea><c:layout/>");
     let all: Vec<(usize, &Series)> = ch.series.iter().enumerate().collect();
-    let primary_g;
-    let mut secondary: Option<G> = None;
-    if ch.kind == ChartKind::Combo {
-        // One group per kind the series are drawn as, on each axis, in the order they first
-        // appear (a line's markers and a scatter's lines are the series' own, not the group's).
-        let group_of = |i: usize| match group_for(ch.series_kind(i)) {
-            G::Line { stacked, .. } => G::Line { stacked, markers: false },
-            G::Scatter { .. } => G::Scatter { lines: true },
-            g => g,
-        };
-        let groups = |secondary: bool| {
-            let mut out: Vec<(G, Vec<(usize, &Series)>)> = Vec::new();
-            for &(i, x) in all.iter().filter(|(_, x)| x.secondary == secondary) {
-                let g = group_of(i);
-                match out.iter_mut().find(|(k, _)| *k == g) {
-                    Some((_, members)) => members.push((i, x)),
-                    None => out.push((g, vec![(i, x)])),
-                }
+    // A stock chart is one group of its 3 or 4 series (high-low-close, open-high-low-close);
+    // other charts get one group per kind their series are drawn as, on each axis, in the order
+    // they first appear (a line's markers and a scatter's lines are the series' own).
+    let stock = ch.kind == ChartKind::Stock;
+    let group_of = |i: usize| match group_for(ch.series_kind(i)) {
+        G::Stock if !(3..=4).contains(&ch.series.len()) => G::Line { stacked: false, markers: false },
+        G::Line { stacked, .. } => G::Line { stacked, markers: false },
+        G::Scatter { .. } => G::Scatter { lines: true },
+        g => g,
+    };
+    let groups = |secondary: bool| {
+        let mut out: Vec<(G, Vec<(usize, &Series)>)> = Vec::new();
+        for &(i, x) in all.iter().filter(|(_, x)| stock || x.secondary == secondary) {
+            let g = group_of(i);
+            match out.iter_mut().find(|(k, _)| *k == g) {
+                Some((_, members)) => members.push((i, x)),
+                None => out.push((g, vec![(i, x)])),
             }
-            out
-        };
-        let (mut primary, mut sec) = (groups(false), groups(true));
-        // With every series on the secondary axis, that axis is the only one.
-        if primary.is_empty() {
-            std::mem::swap(&mut primary, &mut sec);
         }
-        primary_g = primary.first().map_or(G::Bar { bar: false, grouping: "clustered" }, |(g, _)| *g);
-        for (g, members) in &primary {
-            s.push_str(&group_xml(*g, members, ch, (1, 2), wb, si));
+        // The groups on one pair of axes share its kind of axes; one that can't (a pie beside
+        // columns, a scatter beside lines) is drawn in the nearest group that can.
+        let family = out.iter().map(|(g, _)| axes_of(*g)).find(|a| *a != Axes::None).unwrap_or(Axes::None);
+        let mut fitted: Vec<(G, Vec<(usize, &Series)>)> = Vec::new();
+        for (g, members) in out {
+            let g = fit_axes(g, family);
+            match fitted.iter_mut().find(|(k, _)| *k == g) {
+                Some((_, m)) => m.extend(members),
+                None => fitted.push((g, members)),
+            }
         }
-        for (g, members) in &sec {
-            s.push_str(&group_xml(*g, members, ch, (3, 4), wb, si));
-        }
-        secondary = sec.first().map(|(g, _)| *g);
-    } else {
-        primary_g = match group_for(ch.kind) {
-            // A stock chart has 3 or 4 series (high-low-close, open-high-low-close).
-            G::Stock if !(3..=4).contains(&ch.series.len()) => G::Line { stacked: false, markers: false },
-            g => g,
-        };
-        s.push_str(&group_xml(primary_g, &all, ch, (1, 2), wb, si));
+        fitted
+    };
+    let (mut primary, mut sec) = if stock { (groups(false), Vec::new()) } else { (groups(false), groups(true)) };
+    // With every series on the secondary axis, that axis is the only one.
+    if primary.is_empty() {
+        std::mem::swap(&mut primary, &mut sec);
     }
-    match primary_g {
-        G::Pie | G::Doughnut => {}
-        G::Scatter { .. } | G::Bubble => {
-            s.push_str(&axis_xml(&Ax {
-                cat: false,
-                id: 1,
-                cross: 2,
-                pos: "b",
-                delete: false,
-                grid: false,
-                title: ch.x_title.as_deref(),
-                crosses_max: false,
-            }));
-            s.push_str(&axis_xml(&Ax {
-                cat: false,
-                id: 2,
-                cross: 1,
-                pos: "l",
-                delete: false,
-                grid: ch.gridlines,
-                title: ch.y_title.as_deref(),
-                crosses_max: false,
-            }));
-        }
-        G::Bar { bar: true, .. } => {
-            s.push_str(&axis_xml(&Ax {
-                cat: true,
-                id: 1,
-                cross: 2,
-                pos: "l",
-                delete: false,
-                grid: false,
-                title: ch.x_title.as_deref(),
-                crosses_max: false,
-            }));
-            s.push_str(&axis_xml(&Ax {
-                cat: false,
-                id: 2,
-                cross: 1,
-                pos: "b",
-                delete: false,
-                grid: ch.gridlines,
-                title: ch.y_title.as_deref(),
-                crosses_max: false,
-            }));
-        }
-        _ => {
-            s.push_str(&axis_xml(&Ax {
-                cat: true,
-                id: 1,
-                cross: 2,
-                pos: "b",
-                delete: false,
-                grid: false,
-                title: ch.x_title.as_deref(),
-                crosses_max: false,
-            }));
-            s.push_str(&axis_xml(&Ax {
-                cat: false,
-                id: 2,
-                cross: 1,
-                pos: "l",
-                delete: false,
-                grid: ch.gridlines,
-                title: ch.y_title.as_deref(),
-                crosses_max: false,
-            }));
-        }
+    for (g, members) in &primary {
+        s.push_str(&group_xml(*g, members, ch, (1, 2), wb, si));
     }
-    if secondary.is_some() {
-        s.push_str(&axis_xml(&Ax { cat: true, id: 3, cross: 4, pos: "b", delete: true, grid: false, title: None, crosses_max: false }));
-        s.push_str(&axis_xml(&Ax { cat: false, id: 4, cross: 3, pos: "r", delete: false, grid: false, title: None, crosses_max: true }));
+    for (g, members) in &sec {
+        s.push_str(&group_xml(*g, members, ch, (3, 4), wb, si));
+    }
+    let family = |gs: &[(G, Vec<(usize, &Series)>)]| gs.iter().map(|(g, _)| axes_of(*g)).find(|a| *a != Axes::None).unwrap_or(Axes::None);
+    let primary_axes = family(&primary);
+    // The primary axes, placed by their kind.
+    let (cat, cat_pos, val_pos) = match primary_axes {
+        Axes::None => (true, "", ""),
+        Axes::Values => (false, "b", "l"),
+        Axes::Horizontal => (true, "l", "b"),
+        Axes::Category => (true, "b", "l"),
+    };
+    if primary_axes != Axes::None {
+        s.push_str(&axis_xml(&Ax {
+            cat,
+            id: 1,
+            cross: 2,
+            pos: cat_pos,
+            delete: false,
+            grid: false,
+            title: ch.x_title.as_deref(),
+            crosses_max: false,
+        }));
+        s.push_str(&axis_xml(&Ax {
+            cat: false,
+            id: 2,
+            cross: 1,
+            pos: val_pos,
+            delete: false,
+            grid: ch.gridlines,
+            title: ch.y_title.as_deref(),
+            crosses_max: false,
+        }));
+    }
+    // The secondary axes: their categories (or x values) hidden, their values on the far side.
+    let (cat, cat_pos, val_pos) = match family(&sec) {
+        Axes::None => (true, "", ""),
+        Axes::Values => (false, "b", "r"),
+        Axes::Horizontal => (true, "l", "t"),
+        Axes::Category => (true, "b", "r"),
+    };
+    if !cat_pos.is_empty() {
+        s.push_str(&axis_xml(&Ax { cat, id: 3, cross: 4, pos: cat_pos, delete: true, grid: false, title: None, crosses_max: false }));
+        s.push_str(&axis_xml(&Ax { cat: false, id: 4, cross: 3, pos: val_pos, delete: false, grid: false, title: None, crosses_max: true }));
     }
     if let Some(t) = &ch.data_table {
         let _ = write!(

@@ -314,7 +314,7 @@ pub(crate) fn write(c: &Chart, theme: &Theme) -> ChartDoc {
         );
         // A bubble series' values are its sizes; its y values are always a domain, before the
         // x. With no sizes stated, the y values size the bubbles too, as ODF has them nowhere else.
-        let bubble = c.kind == ChartKind::Bubble;
+        let bubble = kind == ChartKind::Bubble;
         let sizes = if bubble { Some(s.bubble_sizes.as_deref().and_then(odf_range).unwrap_or_else(|| values.clone())) } else { None };
         let _ = write!(
             series,
@@ -334,7 +334,7 @@ pub(crate) fn write(c: &Chart, theme: &Theme) -> ChartDoc {
         if sizes.is_some() {
             let _ = write!(series, "<chart:domain table:cell-range-address=\"{}\"/>", esc_attr(&values));
         }
-        if matches!(c.kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble)
+        if matches!(kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble)
             && let Some(x) = s.categories.as_deref().and_then(odf_range)
         {
             let _ = write!(series, "<chart:domain table:cell-range-address=\"{}\"/>", esc_attr(&x));

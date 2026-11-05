@@ -84,7 +84,6 @@ fn combo_series_keep_their_kinds_and_order() {
     for kinds in [
         vec![ChartKind::ColumnClustered, ChartKind::Area],
         vec![ChartKind::ColumnStacked, ChartKind::LineMarkers],
-        vec![ChartKind::BarClustered, ChartKind::Line],
         vec![ChartKind::LineMarkers, ChartKind::ColumnClustered],
     ] {
         let series: Vec<Series> = kinds
@@ -97,4 +96,38 @@ fn combo_series_keep_their_kinds_and_order() {
         let drawn = |c: &Chart| (0..c.series.len()).map(|i| (c.series_kind(i), c.series[i].values.clone())).collect::<Vec<_>>();
         assert_eq!(drawn(&back), drawn(&chart), "{kinds:?}");
     }
+    // Groups that can't share one pair of axes (a horizontal bar beside a line) are drawn in
+    // the first one's kind; a pie beside columns as columns, its axes all present.
+    for (kinds, want) in [
+        (vec![ChartKind::BarClustered, ChartKind::Line], ChartKind::BarClustered),
+        (vec![ChartKind::Pie, ChartKind::ColumnClustered], ChartKind::ColumnClustered),
+    ] {
+        let series: Vec<Series> = kinds.iter().map(|k| Series { values: "Sheet1!$B$1:$B$3".into(), kind: Some(*k), ..Series::default() }).collect();
+        let chart = Chart { kind: ChartKind::Combo, series, ..base.clone() };
+        let xml = crate::chart::write_chart(&Workbook::new(), 0, &chart, "Book1");
+        let back = read_chart(&parse(xml.as_bytes()).unwrap()).unwrap();
+        assert!((0..2).all(|i| back.series_kind(i) == want), "{kinds:?}: {xml}");
+        assert!(back.series.iter().all(|s| !s.secondary), "{kinds:?}");
+        assert!(xml.contains("<c:valAx>"), "{kinds:?}: {xml}");
+    }
+}
+
+/// A chart of one kind with a series on the secondary axis keeps it, and reads back as that
+/// kind, not a combination.
+#[test]
+fn one_kind_on_two_axes_stays_one_kind() {
+    use gridcraft_model::{Chart, Series, Workbook};
+    let xml = format!(
+        "<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart><c:plotArea>{}</c:plotArea></c:chart></c:chartSpace>",
+        bar(&ser(0))
+    );
+    let base = read_chart(&parse(xml.as_bytes()).unwrap()).unwrap();
+    let series = vec![
+        Series { values: "Sheet1!$B$1:$B$3".into(), ..Series::default() },
+        Series { values: "Sheet1!$C$1:$C$3".into(), secondary: true, ..Series::default() },
+    ];
+    let chart = Chart { kind: ChartKind::ColumnClustered, series, ..base };
+    let back = read_chart(&parse(crate::chart::write_chart(&Workbook::new(), 0, &chart, "Book1").as_bytes()).unwrap()).unwrap();
+    assert_eq!(back.kind, ChartKind::ColumnClustered);
+    assert_eq!(back.series.iter().map(|s| (s.kind, s.secondary)).collect::<Vec<_>>(), vec![(None, false), (None, true)]);
 }
