@@ -22,6 +22,9 @@ pub enum PasswordHash {
     /// An OpenDocument protection key: the base64 SHA-256 digest of the password's UTF-8 bytes,
     /// unsalted (ODF 1.3 part 3 §19.699, `table:protection-key`).
     Sha256Digest(String),
+    /// A password set in GridCraft, kept in the form each file format stores: Excel's hash
+    /// (which verifies it) and OpenDocument's key.
+    Both { excel: Box<PasswordHash>, odf: String },
 }
 
 impl PasswordHash {
@@ -41,11 +44,38 @@ impl PasswordHash {
         PasswordHash::Sha256Digest(crate::b64::encode(&sha2::Sha256::digest(password.as_bytes())))
     }
 
+    /// A new password in every form a file keeps: Excel's (SHA-512, salted) and OpenDocument's
+    /// key, so it survives saving in either format.
+    pub fn new_for_files(password: &str, salt: &[u8]) -> PasswordHash {
+        PasswordHash::Both {
+            excel: Box::new(PasswordHash::new_sha512(password, salt)),
+            odf: crate::b64::encode(&sha2::Sha256::digest(password.as_bytes())),
+        }
+    }
+
+    /// The hash as Excel stores it, if it has that form.
+    pub fn excel(&self) -> Option<&PasswordHash> {
+        match self {
+            PasswordHash::Legacy(_) | PasswordHash::Iterated { .. } => Some(self),
+            PasswordHash::Sha256Digest(_) => None,
+            PasswordHash::Both { excel, .. } => excel.excel(),
+        }
+    }
+
+    /// The OpenDocument key (base64 SHA-256), if it has that form.
+    pub fn odf_key(&self) -> Option<&str> {
+        match self {
+            PasswordHash::Sha256Digest(k) | PasswordHash::Both { odf: k, .. } => Some(k),
+            _ => None,
+        }
+    }
+
     /// Whether `password` matches. `Err` when the hash can't be checked (unsupported algorithm,
     /// broken base64, spin count over [`MAX_SPIN_COUNT`]).
     pub fn verify(&self, password: &str) -> Result<bool, String> {
         match self {
             PasswordHash::Legacy(h) => Ok(legacy_hash(password) == *h),
+            PasswordHash::Both { excel, .. } => excel.verify(password),
             PasswordHash::Sha256Digest(hash) => {
                 let want = crate::b64::decode(hash).ok_or_else(|| "the stored password hash is damaged".to_string())?;
                 Ok(sha2::Sha256::digest(password.as_bytes()).as_slice() == want.as_slice())

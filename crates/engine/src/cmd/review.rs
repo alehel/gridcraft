@@ -187,20 +187,24 @@ fn unprotect_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     })
 }
 
-/// A new hash of a sheet's or the workbook's protection password, in the form the document's
-/// format keeps: OpenDocument's SHA-256 key for an ODS workbook, else Excel's.
+/// A new hash of a sheet's or the workbook's protection password, in every form a file keeps
+/// (Excel's and OpenDocument's), so it survives saving in either format.
 fn new_protection_hash(d: &DocState, what: &str, pw: &str) -> PasswordHash {
-    if matches!(d.workbook_format(), "ods" | "fods") { PasswordHash::new_sha256_digest(pw) } else { new_password_hash(d, what, pw) }
+    PasswordHash::new_for_files(pw, &new_salt(d, what))
 }
 
-/// A new Excel-compatible (SHA-512, salted) hash of `pw` (edit ranges keep only this form). The
-/// salt mixes `what` is protected with the document, a counter and the clock, so equal
-/// passwords get different hashes.
+/// A new Excel-compatible (SHA-512, salted) hash of `pw`: edit ranges only have this form.
 fn new_password_hash(d: &DocState, what: &str, pw: &str) -> PasswordHash {
+    PasswordHash::new_sha512(pw, &new_salt(d, what))
+}
+
+/// A salt mixing `what` is protected with the document, a counter and the clock, so equal
+/// passwords get different hashes.
+fn new_salt(d: &DocState, what: &str) -> [u8; 16] {
     static SALT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SALT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let seed = format!("{what}\u{0}{n}\u{0}{}\u{0}{}", d.uid, gridcraft_calc::now_serial().to_bits());
-    PasswordHash::new_sha512(pw, &gridcraft_model::password::salt_from(seed.as_bytes()))
+    gridcraft_model::password::salt_from(seed.as_bytes())
 }
 
 fn range_text(r: &EditRange) -> String {
@@ -436,7 +440,10 @@ mod tests {
         let mut s = book();
         s.execute("review.protectSheet", json!({"password": "pa55"})).unwrap();
         let prot = s.doc().unwrap().wb.active().unwrap().protection.clone().unwrap();
-        assert!(matches!(&prot.password, Some(PasswordHash::Iterated { algorithm, .. }) if algorithm == "SHA-512"));
+        // Kept in both forms: Excel's salted SHA-512 and OpenDocument's key.
+        let password = prot.password.as_ref().unwrap();
+        assert!(matches!(password.excel(), Some(PasswordHash::Iterated { algorithm, .. }) if algorithm == "SHA-512"));
+        assert!(password.odf_key().is_some());
         assert!(s.execute("review.unprotectSheet", json!({})).is_err());
         assert!(s.execute("review.unprotectSheet", json!({"password": "pass"})).is_err());
         // Protecting again can't swap the password out from under it.

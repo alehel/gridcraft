@@ -1138,14 +1138,14 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// A password as `table:protection-key` attributes: only an OpenDocument key has a form here
-/// (Excel's salted hashes can't be turned into one), so others protect without a password.
+/// A password as `table:protection-key` attributes: only one with an OpenDocument key has a form
+/// here (Excel's salted hashes can't be turned into one), so others protect without a password.
 fn protection_key(p: Option<&gridcraft_model::PasswordHash>) -> String {
-    match p {
-        Some(gridcraft_model::PasswordHash::Sha256Digest(hash)) => {
+    match p.and_then(|p| p.odf_key()) {
+        Some(hash) => {
             format!(" table:protection-key=\"{}\" table:protection-key-digest-algorithm=\"http://www.w3.org/2000/09/xmldsig#sha256\"", esc_attr(hash))
         }
-        _ => String::new(),
+        None => String::new(),
     }
 }
 

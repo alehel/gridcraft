@@ -5775,20 +5775,22 @@ fn paper_size_commands_agree() {
     assert_eq!(s.doc().unwrap().wb.sheets[0].print.paper, "B6");
 }
 
-/// A password set on an OpenDocument workbook is kept in the form ODF stores, so it survives
-/// saving the workbook as the ODS it is.
+/// A password set in GridCraft is kept in every form a file stores, so it survives saving as
+/// XLSX or ODS, whichever format the workbook came from.
 #[test]
-fn ods_workbook_passwords_survive_saving() {
-    let mut s = s();
-    let ods = s.execute("file.saveBytes", json!({"format": "ods"})).unwrap();
-    s.execute("file.open", json!({"name": "book.ods", "base64": ods["base64"]})).unwrap();
-    s.execute("review.protectSheet", json!({"password": "pa55"})).unwrap();
-    let saved = s.execute("file.saveBytes", json!({"format": "ods"})).unwrap();
-    let mut t = super::tests::s();
-    t.execute("file.open", json!({"name": "book.ods", "base64": saved["base64"]})).unwrap();
-    assert!(t.execute("review.unprotectSheet", json!({})).is_err());
-    assert!(t.execute("review.unprotectSheet", json!({"password": "nope"})).is_err());
-    t.execute("review.unprotectSheet", json!({"password": "pa55"})).unwrap();
+fn passwords_survive_saving_in_either_format() {
+    for (from, to) in [("xlsx", "ods"), ("ods", "xlsx"), ("ods", "ods"), ("xlsx", "xlsx")] {
+        let mut s = s();
+        let book = s.execute("file.saveBytes", json!({"format": from})).unwrap();
+        s.execute("file.open", json!({"name": format!("book.{from}"), "base64": book["base64"]})).unwrap();
+        s.execute("review.protectSheet", json!({"password": "pa55"})).unwrap();
+        let saved = s.execute("file.saveBytes", json!({"format": to})).unwrap();
+        let mut t = super::tests::s();
+        t.execute("file.open", json!({"name": format!("book.{to}"), "base64": saved["base64"]})).unwrap();
+        assert!(t.execute("review.unprotectSheet", json!({})).is_err(), "{from} → {to}");
+        assert!(t.execute("review.unprotectSheet", json!({"password": "nope"})).is_err(), "{from} → {to}");
+        t.execute("review.unprotectSheet", json!({"password": "pa55"})).unwrap();
+    }
 }
 
 /// A spilled formula reopens from ODS spilling again, not blocked by its own cached results.
@@ -5800,4 +5802,41 @@ fn ods_spill_reopens_spilling() {
     let mut t = super::tests::s();
     t.execute("file.open", json!({"name": "book.ods", "base64": ods["base64"]})).unwrap();
     assert_eq!((v(&t, "A1"), v(&t, "A2"), v(&t, "A3")), (Value::Number(1.0), Value::Number(2.0), Value::Number(3.0)));
+}
+
+/// A PivotTable saved to ODS reopens reading the same source, columns and items as before: a
+/// table's totals row stays out, a sheet-scoped name resolves, a repeated header keeps its
+/// numbered name, and several dates chosen in a page field stay chosen.
+#[test]
+fn ods_pivots_read_their_source_as_the_report_does() {
+    let mut s = s();
+    let rows = json!([["Region", "Day", "Amount", "Amount"], ["East", 45000, 1, 10], ["West", 45017, 2, 20], ["East", 45031, 3, 30]]);
+    s.execute("range.setValues", json!({"range": "A1:D4", "values": rows})).unwrap();
+    s.execute("home.numberFormat", json!({"range": "B2:B4", "format": "yyyy-mm-dd"})).unwrap();
+    let reopen = |s: &mut Session| {
+        let ods = s.execute("file.saveBytes", json!({"format": "ods"})).unwrap();
+        let mut t = super::tests::s();
+        t.execute("file.open", json!({"name": "book.ods", "base64": ods["base64"]})).unwrap();
+        t
+    };
+    // A table with a totals row as the source.
+    s.execute("insert.table", json!({"range": "A1:D4"})).unwrap();
+    s.execute("table.totalRow", json!({"on": true})).unwrap();
+    let table = s.doc().unwrap().wb.sheets[0].tables[0].name.clone();
+    s.execute(
+        "insert.pivotTable",
+        json!({"source": table, "destination": "Sheet1!H3", "rows": ["Region"], "values": ["Amount2"], "filters": ["Day"]}),
+    )
+    .unwrap();
+    s.execute("pivot.filter", json!({"field": "Day", "selected": ["2023-03-15", "2023-04-15"]})).unwrap();
+    let before = v(&s, "I6");
+    let t = reopen(&mut s);
+    let pt = t.doc().unwrap().wb.sheets[0].pivots.first().cloned().unwrap();
+    assert_eq!(pt.source, "Sheet1!$A$1:$D$4");
+    assert_eq!(pt.filters.first().map(|f| f.source_col.as_str()), Some("Day"));
+    assert_eq!(pt.filters.first().and_then(|f| f.selected.clone()), Some(vec!["2023-03-15".to_string(), "2023-04-15".to_string()]));
+    assert_eq!(pt.values.first().map(|v| v.source_col.as_str()), Some("Amount2"));
+    let mut t = t;
+    t.execute("pivot.refresh", json!({})).unwrap();
+    assert_eq!(v(&t, "I6"), before);
 }
