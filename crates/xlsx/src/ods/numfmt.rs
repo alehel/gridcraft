@@ -827,24 +827,24 @@ pub(crate) fn write_style(name: &str, code: &str) -> Option<String> {
     let Plan { mut arms, rest, text } = plan(parse_code(code));
     let general =
         |minus: bool| Section { parts: if minus { vec![Part::Lit("-".into()), Part::General] } else { vec![Part::General] }, ..Section::default() };
+    // The numbers no arm takes: the rest, else General (under a lone `>=0` only negatives
+    // reach it, so their sign is spelled; the reader takes a bare General as no section).
     let lone_ge0 = arms.len() == 1 && arms.first().is_some_and(|(c, _)| c == ">=0");
-    let main = match (text, rest) {
-        (None, Some(r)) => r,
-        // Only negatives reach it: their sign is spelled.
-        (None, None) if lone_ge0 => general(true),
-        // Read back as the "other values" after explicit arms.
-        (None, None) => general(false),
-        (Some(t), Some(r)) => {
+    let rest = rest.unwrap_or_else(|| general(lone_ge0));
+    let main = match text {
+        None => rest,
+        // With a text section the main style is the text's; the rest is an arm for what the
+        // others leave.
+        Some(t) => {
             let cover = match arms.as_slice() {
                 [] => ANY.to_string(),
                 [(c, _)] => complement(c).unwrap_or_else(|| ANY.into()),
                 [(a, _), (b, _)] if a == ">0" && b == "<0" => "=0".into(),
                 _ => ANY.into(),
             };
-            arms.push((cover, r));
+            arms.push((cover, rest));
             t
         }
-        (Some(t), None) => t,
     };
     let mut out = String::new();
     let mut maps = String::new();
@@ -941,9 +941,25 @@ pub(crate) fn code(styles: &HashMap<String, DataStyle>, name: &str) -> Option<St
         _ => false,
     };
     let mut sections: Vec<Section> = mapped.into_iter().map(|(cond, s)| Section { cond: if implicit { None } else { cond }, ..s }).collect();
-    // A bare General main under explicit conditions is the "other values" the writer adds.
+    // The rest the writer states: a bare General is no section (the other values show so),
+    // as the main style without text, or as the last arm, covering what the others leave,
+    // before a text one.
     let general = Section { parts: vec![Part::General], ..Section::default() };
-    if !sections.iter().all(|s| s.cond.is_some()) || *own != general {
+    if text_main
+        && !implicit
+        && let Some(last) = sections.last()
+    {
+        let first = sections.first().and_then(|s| s.cond.as_deref()).and_then(complement);
+        let covers = last.cond.as_deref() == Some(ANY) || (sections.len() == 2 && last.cond.is_some() && last.cond == first);
+        if covers && (Section { cond: None, ..last.clone() }) == general {
+            sections.pop();
+        } else if last.cond.as_deref() == Some(ANY)
+            && let Some(last) = sections.last_mut()
+        {
+            last.cond = None;
+        }
+    }
+    if text_main || !sections.iter().all(|s| s.cond.is_some()) || *own != general {
         sections.push(own.clone());
     }
     Some(print_code(&sections))
@@ -1246,8 +1262,8 @@ mod tests {
             // Round four: a lone `>=0` keeps its negatives' sign.
             ("[>=0]0", "0;-General"),
             // Round five: the same with a text section, and text shown as text.
-            ("[>=0]0.00;@", "[>=0]0.00;@"),
-            ("[>=0]\"p\";@", "[>=0]\"p\";@"),
+            ("[>=0]0.00;@", "0.00;-General;@"),
+            ("[>=0]\"p\";@", "\"p\";-General;@"),
             ("@;@", "@;@"),
             // Round six: a negative section of the user's own is kept.
             ("[>=0]0;[Red]0", "0;[Red]0"),
@@ -1288,6 +1304,12 @@ mod tests {
             ("[>=0]0;General", "0;General"),
             ("[>5]0;0.0;@", "[>5]0;[<=5]0.0;@"),
             ("0;-0;0;@", "0;-0;0;@"),
+            // The other values before a text section are stated (LibreOffice picks any arm
+            // for them otherwise), and read back as no section.
+            ("[>5]0;@", "[>5]0;@"),
+            ("[>5]0;[<-5]0.0;@", "[>5]0;[<-5]0.0;@"),
+            ("[>=0]0;[<0]0;\"z\";@", "[>=0]0;[<0]0;\"z\";@"),
+            ("[=1]0;[=2]0.0;0.00;@", "[=1]0;[=2]0.0;0.00;@"),
         ] {
             assert_eq!(round_trip(code), back, "{code}");
             // A second save writes what the first read.

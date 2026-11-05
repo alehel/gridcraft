@@ -15,9 +15,9 @@ pub enum Swatch {
     Marker,
 }
 
-/// The kind a series is drawn as (per-series kinds only apply to combo charts).
-pub(super) fn plot_kind(chart: &Chart, s: &SeriesData) -> ChartKind {
-    if chart.kind == ChartKind::Combo { if s.kind == ChartKind::Combo { ChartKind::Line } else { s.kind } } else { chart.kind }
+/// The kind a series is drawn as: [`Chart::series_kind`], which resolving put in `s.kind`.
+pub(super) fn plot_kind(s: &SeriesData) -> ChartKind {
+    if s.kind == ChartKind::Combo { ChartKind::Line } else { s.kind }
 }
 
 /// Colour of point `j` for charts that colour by point (pie, doughnut, treemap, sunburst).
@@ -59,7 +59,7 @@ pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swa
             let mut out: Vec<(String, Rgba, Swatch)> = series
                 .clone()
                 .map(|s| {
-                    let sw = match plot_kind(chart, s) {
+                    let sw = match plot_kind(s) {
                         ChartKind::Line | ChartKind::LineStacked | ChartKind::Radar | ChartKind::ScatterLines => Swatch::Line,
                         ChartKind::LineMarkers => Swatch::LineMarker,
                         ChartKind::Scatter | ChartKind::Bubble => Swatch::Marker,
@@ -69,7 +69,7 @@ pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swa
                 })
                 .collect();
             // Trendlines follow the series, named "Linear (Sales)" unless given a name.
-            for s in series.filter(|s| supports_trendline(plot_kind(chart, s))) {
+            for s in series.filter(|s| supports_trendline(plot_kind(s))) {
                 for t in s.trendlines.iter().take(MAX_TRENDLINES) {
                     out.push((t.spec.name.clone().unwrap_or_else(|| auto_name(t.spec.kind, &s.name)), t.color, Swatch::Line));
                 }

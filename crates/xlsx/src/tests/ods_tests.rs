@@ -1033,3 +1033,28 @@ fn ods_matrix_after_an_ended_one_still_holds_its_cells() {
         assert_eq!(sh.value(CellRef::new(r, c)), Value::Empty, "{r},{c}");
     }
 }
+
+/// Two sheets the file names alike: the second is renamed, and references keep meaning the
+/// first, which the file means by that name.
+#[test]
+fn ods_duplicate_sheet_names_keep_references_on_the_first() {
+    let content = r#"<table:table table:name="Data"><table:table-row><table:table-cell office:value-type="float" office:value="5"><text:p>5</text:p></table:table-cell><table:table-cell table:formula="of:=[$Data.A1]*2" office:value-type="float" office:value="10"><text:p>10</text:p></table:table-cell></table:table-row></table:table><table:table table:name="Data"><table:table-row><table:table-cell office:value-type="float" office:value="7"><text:p>7</text:p></table:table-cell></table:table-row></table:table>"#;
+    let (wb, _) = read_ods(&styled_ods("", content)).unwrap();
+    assert_eq!((wb.sheets[0].name.as_str(), wb.sheets[1].name.as_str()), ("Data", "Data (2)"));
+    let f = wb.sheets[0].cells.get(CellRef::new(0, 1)).and_then(|c| c.formula.clone()).unwrap();
+    assert_eq!(f.text, "Data!A1*2");
+}
+
+/// Shapes' text counts as it is decoded: a cell holding many shapes whose text expands is cut
+/// at the limit, not held whole.
+#[test]
+fn ods_shape_text_is_counted() {
+    let shape = r#"<draw:rect svg:width="1cm" svg:height="1cm"><text:p>a<text:s text:c="1048576"/>b</text:p></draw:rect>"#.repeat(400);
+    let content = format!(
+        r#"<table:table table:name="S" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0"><table:table-row><table:table-cell>{shape}</table:table-cell></table:table-row></table:table>"#
+    );
+    let (wb, report) = read_ods(&styled_ods("", &content)).unwrap();
+    let text: usize = wb.sheets[0].shapes.iter().map(|s| s.text.len()).sum();
+    assert!(text <= 256 * 1024 * 1024, "{text}");
+    assert!(report.warnings.iter().any(|w| w.contains("beyond the import limit")), "{:?}", report.warnings);
+}

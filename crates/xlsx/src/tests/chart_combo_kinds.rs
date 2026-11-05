@@ -44,3 +44,28 @@ fn line_first_group_stays_a_line() {
     assert!(matches!(k[0], Some(ChartKind::Line | ChartKind::LineMarkers)));
     assert_eq!(k[1], Some(ChartKind::ColumnClustered));
 }
+
+/// Outside a combo, a series keeps its own markers or lines where they differ from its chart's,
+/// read and written. The chart's kind is its first series'.
+#[test]
+fn series_keep_their_own_markers_and_lines() {
+    use gridcraft_model::{Chart, Series, Workbook};
+    let no_marker = "<c:ser><c:idx val=\"0\"/><c:order val=\"0\"/><c:marker><c:symbol val=\"none\"/></c:marker><c:val><c:numRef><c:f>Data!$A$1:$A$5</c:f></c:numRef></c:val></c:ser>";
+    let xml = format!(
+        "<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart><c:plotArea>{}</c:plotArea></c:chart></c:chartSpace>",
+        line(&(no_marker.to_string() + &ser(1)))
+    );
+    let ch = read_chart(&parse(xml.as_bytes()).unwrap()).unwrap();
+    assert_eq!((ch.kind, ch.series.iter().map(|s| s.kind).collect::<Vec<_>>()), (ChartKind::Line, vec![None, Some(ChartKind::LineMarkers)]));
+    let series = |kind| Series { values: "Sheet1!$A$1:$A$3".into(), kind, ..Series::default() };
+    for (kind, kinds) in
+        [(ChartKind::Line, vec![None, Some(ChartKind::LineMarkers)]), (ChartKind::ScatterLines, vec![Some(ChartKind::Scatter), None])]
+    {
+        let chart = Chart { kind, series: kinds.iter().map(|k| series(*k)).collect(), ..ch.clone() };
+        let written = crate::chart::write_chart(&Workbook::new(), 0, &chart, "Book1");
+        let back = read_chart(&parse(written.as_bytes()).unwrap()).unwrap();
+        // XLSX has no chart-wide kind besides its series': each series is drawn as it was.
+        let drawn = |c: &Chart| (0..c.series.len()).map(|i| c.series_kind(i)).collect::<Vec<_>>();
+        assert_eq!(drawn(&back), drawn(&chart), "{kind:?}");
+    }
+}

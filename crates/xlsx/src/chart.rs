@@ -32,9 +32,13 @@ fn group_kind(g: &El) -> Option<ChartKind> {
             if stacked || pct {
                 ChartKind::LineStacked
             } else {
-                let group_markers = g.child_val("marker").is_none_or(|v| v == "1" || v == "true");
-                let all_none = g.kids("ser").all(|s| s.path(&["marker", "symbol"]).and_then(|m| m.attr("val")) == Some("none"));
-                if !group_markers || (all_none && g.kids("ser").next().is_some()) { ChartKind::Line } else { ChartKind::LineMarkers }
+                // The group's kind is its first series' (each series may differ; see
+                // `series_kind_in`).
+                match g.kids("ser").next() {
+                    Some(first) => series_kind_in(g, ChartKind::LineMarkers, first),
+                    None if g.child_val("marker").is_some_and(|v| v == "0" || v == "false") => ChartKind::Line,
+                    None => ChartKind::LineMarkers,
+                }
             }
         }
         "pieChart" | "pie3DChart" | "ofPieChart" => ChartKind::Pie,
@@ -48,14 +52,11 @@ fn group_kind(g: &El) -> Option<ChartKind> {
                 ChartKind::Area
             }
         }
-        "scatterChart" => {
-            let no_lines = g.kids("ser").all(|s| s.path(&["spPr", "ln"]).is_some_and(|l| l.child("noFill").is_some()));
-            if g.child_val("scatterStyle") == Some("marker") || (no_lines && g.kids("ser").next().is_some()) {
-                ChartKind::Scatter
-            } else {
-                ChartKind::ScatterLines
-            }
-        }
+        "scatterChart" => match g.kids("ser").next() {
+            _ if g.child_val("scatterStyle") == Some("marker") => ChartKind::Scatter,
+            Some(first) => series_kind_in(g, ChartKind::ScatterLines, first),
+            None => ChartKind::ScatterLines,
+        },
         "bubbleChart" => ChartKind::Bubble,
         "radarChart" => ChartKind::Radar,
         "stockChart" => ChartKind::Stock,
@@ -214,6 +215,22 @@ fn rich_title(t: &El) -> Option<String> {
     None
 }
 
+/// The kind series `s` of group `g` (of kind `k`) is drawn as: in a line group its own markers
+/// (none when it says so), in a scatter group its own lines; otherwise the group's.
+fn series_kind_in(g: &El, k: ChartKind, s: &El) -> ChartKind {
+    match k {
+        ChartKind::Line | ChartKind::LineMarkers => {
+            let group_markers = g.child_val("marker").is_none_or(|v| v == "1" || v == "true");
+            let none = s.path(&["marker", "symbol"]).and_then(|m| m.attr("val")) == Some("none");
+            if group_markers && !none { ChartKind::LineMarkers } else { ChartKind::Line }
+        }
+        ChartKind::Scatter | ChartKind::ScatterLines if g.child_val("scatterStyle") != Some("marker") => {
+            if s.path(&["spPr", "ln"]).is_some_and(|l| l.child("noFill").is_some()) { ChartKind::Scatter } else { ChartKind::ScatterLines }
+        }
+        k => k,
+    }
+}
+
 fn axis_ids(g: &El) -> Vec<String> {
     g.kids("axId").filter_map(|a| a.attr("val")).map(str::to_string).collect()
 }
@@ -228,9 +245,11 @@ pub fn read_chart(root: &El) -> Option<Chart> {
     for (gi, (g, k)) in groups.iter().enumerate() {
         for s in g.kids("ser") {
             let mut ser = read_series(s);
-            if groups.len() > 1 {
-                // Every series of a combo chart keeps its own group's kind, the first group's included.
-                ser.kind = Some(*k);
+            // Every series of a combo chart keeps its own kind; elsewhere a series states one
+            // only where it differs from its chart's.
+            let own = series_kind_in(g, *k, s);
+            if groups.len() > 1 || own != *k {
+                ser.kind = Some(own);
             }
             if gi > 0 {
                 ser.secondary = axis_ids(g) != first_axes;
@@ -530,7 +549,14 @@ fn multi_level_cat(f: &str, values: &str, wb: &Workbook, si: usize) -> Option<St
     Some(s)
 }
 
-fn series_xml(s: &Series, idx: usize, g: G, wb: &Workbook, si: usize) -> String {
+/// Series `s` in group `g`, drawn as kind `own`: a line or scatter series keeps its own markers
+/// or lines within its group.
+fn series_xml(s: &Series, idx: usize, g: G, own: ChartKind, wb: &Workbook, si: usize) -> String {
+    let g = match (g, group_for(own)) {
+        (G::Line { stacked, .. }, G::Line { markers, .. }) => G::Line { stacked, markers },
+        (G::Scatter { .. }, mine @ G::Scatter { .. }) => mine,
+        _ => g,
+    };
     let mut x = format!("<c:ser><c:idx val=\"{idx}\"/><c:order val=\"{idx}\"/>");
     if let Some(n) = &s.name {
         if is_ref(n) || is_defined_name(wb, si, n) {
@@ -663,7 +689,7 @@ fn dlbls(show: bool) -> String {
 }
 
 fn group_xml(g: G, series: &[(usize, &Series)], ch: &Chart, axes: (u32, u32), wb: &Workbook, si: usize) -> String {
-    let sers: String = series.iter().map(|(i, s)| series_xml(s, *i, g, wb, si)).collect();
+    let sers: String = series.iter().map(|(i, s)| series_xml(s, *i, g, ch.series_kind(*i), wb, si)).collect();
     let dl = dlbls(ch.data_labels);
     let ax = format!("<c:axId val=\"{}\"/><c:axId val=\"{}\"/>", axes.0, axes.1);
     match g {
@@ -772,11 +798,10 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
     let primary_g;
     let mut secondary: Option<G> = None;
     if ch.kind == ChartKind::Combo {
-        // Series without a kind of their own: the first is a column, the others lines (as drawn).
-        let kind = |i: usize, x: &Series| x.kind.filter(|k| *k != ChartKind::Combo).or((i > 0).then_some(ChartKind::Line));
-        let is_line = |k: Option<ChartKind>| matches!(k.map(group_for), Some(G::Line { .. } | G::Area { .. } | G::Radar | G::Scatter { .. }));
-        let bars: Vec<(usize, &Series)> = all.iter().filter(|(i, x)| !x.secondary && !is_line(kind(*i, x))).copied().collect();
-        let lines: Vec<(usize, &Series)> = all.iter().filter(|(i, x)| !x.secondary && is_line(kind(*i, x))).copied().collect();
+        // Each series as it is drawn (a series without a kind: the first a column, the others lines).
+        let is_line = |i: usize| matches!(group_for(ch.series_kind(i)), G::Line { .. } | G::Area { .. } | G::Radar | G::Scatter { .. });
+        let bars: Vec<(usize, &Series)> = all.iter().filter(|(i, x)| !x.secondary && !is_line(*i)).copied().collect();
+        let lines: Vec<(usize, &Series)> = all.iter().filter(|(i, x)| !x.secondary && is_line(*i)).copied().collect();
         let sec: Vec<(usize, &Series)> = all.iter().filter(|(_, x)| x.secondary).copied().collect();
         primary_g = G::Bar { bar: false, grouping: "clustered" };
         if !bars.is_empty() || (lines.is_empty() && sec.is_empty()) {

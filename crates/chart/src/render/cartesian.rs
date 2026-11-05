@@ -187,7 +187,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
     if ncat == 0 {
         return;
     }
-    let kinds: Vec<ChartKind> = data.series.iter().map(|s| if horizontal { chart.kind } else { plot_kind(chart, s) }).collect();
+    let kinds: Vec<ChartKind> = data.series.iter().map(|s| if horizontal { chart.kind } else { plot_kind(s) }).collect();
     let fams: Vec<Fam> = kinds.iter().map(|k| family(*k)).collect();
     let any_primary = data.series.iter().any(|s| !s.secondary);
     let sec: Vec<bool> = data.series.iter().map(|s| s.secondary && any_primary && !horizontal).collect();
@@ -425,7 +425,7 @@ pub(super) fn scatter(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx) 
                 ctx.out.push(Prim::Circle { cx: p[0], cy: p[1], r, fill: Some(fill), stroke: Some((WHITE, 0.75)) });
             }
         } else {
-            let lines = chart.kind == ChartKind::ScatterLines || s.kind == ChartKind::ScatterLines;
+            let lines = s.kind == ChartKind::ScatterLines;
             if lines {
                 draw_runs(ctx, &px, s.color, 2.0, s.smooth.then_some(plot));
             }

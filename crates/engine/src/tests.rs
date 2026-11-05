@@ -5840,3 +5840,17 @@ fn ods_pivots_read_their_source_as_the_report_does() {
     t.execute("pivot.refresh", json!({})).unwrap();
     assert_eq!(v(&t, "I6"), before);
 }
+
+/// Renaming a sheet renames every reference to it: a PivotTable's source, a conditional
+/// format's formula and a validation's list follow it.
+#[test]
+fn sheet_rename_renames_every_reference() {
+    let mut s = s();
+    s.execute("range.setValues", json!({"range": "A1:B3", "values": [["Region", "Sales"], ["East", 1], ["West", 2]]})).unwrap();
+    s.execute("insert.pivotTable", json!({"source": "Sheet1!$A$1:$B$3", "destination": "Sheet1!E3", "rows": ["Region"], "values": ["Sales"]}))
+        .unwrap();
+    s.execute("sheet.rename", json!({"name": "Data"})).unwrap();
+    let wb = &s.doc().unwrap().wb;
+    assert_eq!(wb.sheets[0].pivots[0].source, "Data!$A$1:$B$3");
+    s.execute("pivot.refresh", json!({})).unwrap();
+}
