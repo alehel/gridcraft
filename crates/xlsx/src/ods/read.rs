@@ -955,9 +955,7 @@ impl Import {
     fn element_extras(&mut self, el: &Elem, range: RangeRef) -> Extras {
         let validation = el.attr(Ns::Table, "content-validation-name").map(str::to_string);
         let mapped = el.attr(Ns::Table, "style-name").filter(|n| self.style_def(n).is_some_and(|d| !d.maps.is_empty())).map(str::to_string);
-        let mut frames = Vec::new();
-        drawings(el, Some(range.start), &self.draw, &mut frames);
-        self.add_frames(frames);
+        self.read_drawings(el, Some(range.start));
         if let Some(st) = self.sheet.as_mut() {
             if let Some(m) = mapped {
                 st.mapped.entry(m).or_default().push(range);
@@ -972,8 +970,8 @@ impl Import {
             }
         }
         Extras {
-            // A note's text counts as it is decoded; past the limit the note is left out.
-            comment: el.child(Ns::Office, "annotation").map(read_annotation).filter(|n| self.take_text(n.text.len() + n.author.len())),
+            // Each position's copy of the note counts as it is stored (see `place`).
+            comment: el.child(Ns::Office, "annotation").map(read_annotation),
             link: cell_link(el).and_then(|a| Some(hyperlink(a.attr(Ns::XLink, "href")?, a.attr(Ns::Office, "title")))),
         }
     }
@@ -1279,89 +1277,30 @@ impl Import {
     /// renames the references to it, all at once, once the file is read.
     fn rename_sheets(&mut self) {
         let mut names = crate::read::SheetNames::default();
+        // Each name the file uses, folded as sheet names compare, to the final name of the
+        // first sheet it calls so: the one its references mean.
         let mut renamed: HashMap<String, String> = HashMap::new();
+        let mut any = false;
         for i in 0..self.wb.sheets.len() {
             let Some(old) = self.wb.sheets.get(i).map(|s| s.name.clone()) else { continue };
             let mut new = names.unique(&old, i);
             if new.eq_ignore_ascii_case("History") || new.starts_with('\'') || new.ends_with('\'') {
                 new = names.unique(&format!("Sheet{}", i + 1), i);
             }
+            renamed.entry(old.to_ascii_lowercase()).or_insert_with(|| new.clone());
             if new != old {
-                // The first sheet the file calls so is the one its references mean.
-                renamed.entry(old.to_lowercase()).or_insert_with(|| new.clone());
+                any = true;
                 if let Some(sh) = self.wb.sheets.get_mut(i) {
                     Arc::make_mut(sh).name = new;
                 }
             }
         }
-        if renamed.is_empty() {
+        if !any {
             return;
         }
         self.report.warn("Some ODS sheet names were shortened or renamed to valid, unique sheet names.");
-        let map = |n: &str| renamed.get(&n.to_lowercase()).cloned();
-        let expr = |e: gridcraft_formula::Expr| gridcraft_formula::adjust::rename_sheets(e, &map);
-        // Formula text with its references renamed; text that isn't a formula stays.
-        let text = |t: &mut String| {
-            if let Ok(e) = gridcraft_formula::parse(t.trim_start_matches('=')) {
-                let before = gridcraft_formula::print(&e);
-                let new = gridcraft_formula::print(&expr(e));
-                if new != before {
-                    *t = if t.starts_with('=') { format!("={new}") } else { new };
-                }
-            }
-        };
-        for n in &mut self.wb.names {
-            text(&mut n.formula);
-        }
-        for sh in &mut self.wb.sheets {
-            let sh = Arc::make_mut(sh);
-            let formulas: Vec<_> = sh.cells.iter().filter_map(|(c, cell)| cell.formula.as_ref().map(|f| (c, f.clone()))).collect();
-            for (c, f) in formulas {
-                let Some(e) = f.expr() else { continue };
-                let new = Formula::from_expr(expr(e));
-                if new.text != f.text
-                    && let Some(cell) = sh.cells.get_mut(c)
-                {
-                    let array = f.array;
-                    cell.formula = Some(Arc::new(Formula { array, ..new }));
-                }
-            }
-            for cf in &mut sh.cond_formats {
-                match &mut cf.rule {
-                    CfRule::CellIs { a, b, .. } => {
-                        text(a);
-                        if let Some(b) = b {
-                            text(b);
-                        }
-                    }
-                    CfRule::Expression { formula, .. } => text(formula),
-                    _ => {}
-                }
-            }
-            for v in &mut sh.validations {
-                text(&mut v.f1);
-                if let Some(f2) = &mut v.f2 {
-                    text(f2);
-                }
-            }
-            for l in sh.hyperlinks.values_mut().filter(|l| !l.external) {
-                text(&mut l.target);
-            }
-            for ch in &mut sh.charts {
-                for se in &mut ch.series {
-                    text(&mut se.values);
-                    for t in [&mut se.categories, &mut se.name, &mut se.bubble_sizes].into_iter().flatten() {
-                        text(t);
-                    }
-                }
-                if let Some(src) = &mut ch.source {
-                    text(src);
-                }
-            }
-            for pt in &mut sh.pivots {
-                text(&mut pt.source);
-            }
-        }
+        let map = |n: &str| renamed.get(&n.to_ascii_lowercase()).cloned();
+        self.wb.rewrite_references(&|e| gridcraft_formula::adjust::rename_sheets(e, &map));
     }
 
     /// The pivot tables of a `table:data-pilot-tables`, placed on their sheets, numbered over
@@ -1639,15 +1578,16 @@ impl Import {
         Ok(())
     }
 
-    /// Charges `n` bytes of copied text to the import's text budget; false (with a warning)
-    /// once it is spent.
+    /// Charges `n` bytes of text that may be left out to the import's text budget: false (with
+    /// a warning, and nothing charged) when they don't fit, so the import goes on without them.
     fn take_text(&mut self, n: usize) -> bool {
-        self.text = self.text.saturating_add(n as u64);
-        let ok = self.text <= MAX_TEXT;
-        if !ok {
-            self.report.warn("Some ODS notes, conditional formatting or data validation beyond the import limit were not imported.");
+        let total = self.text.saturating_add(n as u64);
+        if total > MAX_TEXT {
+            self.report.warn("Some ODS pictures' text, conditional formatting or data validation beyond the import limit were not imported.");
+            return false;
         }
-        ok
+        self.text = total;
+        true
     }
 
     fn take_cf_ranges(&mut self, n: usize) -> bool {
@@ -1748,9 +1688,22 @@ impl Import {
     }
 
     fn frames_in(&mut self, shapes: &Elem) {
-        let mut out = Vec::new();
-        drawings(shapes, None, &self.draw, &mut out);
-        self.add_frames(out);
+        self.read_drawings(shapes, None);
+    }
+
+    /// Reads the drawings under `parent` (anchored to `cell`, or the sheet), within the limits:
+    /// no more than [`MAX_FRAMES`] are read at all, and their text counts as it is decoded.
+    fn read_drawings(&mut self, parent: &Elem, cell: Option<CellRef>) {
+        let room = MAX_FRAMES.saturating_sub(self.frames);
+        let mut text_left = usize::try_from(MAX_TEXT.saturating_sub(self.text)).unwrap_or(usize::MAX);
+        let before = text_left;
+        let mut frames = Vec::new();
+        let full = drawings(parent, cell, &self.draw, &mut frames, room, &mut text_left);
+        self.text = self.text.saturating_add((before - text_left) as u64);
+        if full {
+            self.report.warn("Some ODS pictures, charts and shapes, or their text, beyond the import limit were not imported.");
+        }
+        self.add_frames(frames);
     }
 
     /// Adds pictures, charts and shapes to the sheet, up to the workbook's [`MAX_FRAMES`].
@@ -2036,10 +1989,22 @@ fn read_frame(f: &Elem, cell: Option<CellRef>) -> Option<Frame> {
 }
 
 /// Pictures, charts and shapes among `parent`'s children, groups flattened.
-fn drawings(parent: &Elem, cell: Option<CellRef>, styles: &super::shape::DrawStyles, out: &mut Vec<Frame>) {
+/// The drawings under `parent`, at most `room` of them, their shapes' text taken from
+/// `text_left` as it is decoded. Whether a limit cut them short.
+fn drawings(
+    parent: &Elem,
+    cell: Option<CellRef>,
+    styles: &super::shape::DrawStyles,
+    out: &mut Vec<Frame>,
+    room: usize,
+    text_left: &mut usize,
+) -> bool {
     let mut stack: Vec<(&Elem, usize)> = parent.elems().filter(|e| e.ns == Ns::Draw).map(|e| (e, 0)).collect();
     stack.reverse();
     while let Some((e, depth)) = stack.pop() {
+        if out.len() >= room || *text_left == 0 {
+            return true;
+        }
         if e.name == "g" {
             if depth < 16 {
                 stack.extend(e.elems().filter(|k| k.ns == Ns::Draw).map(|k| (k, depth + 1)).collect::<Vec<_>>().into_iter().rev());
@@ -2052,10 +2017,12 @@ fn drawings(parent: &Elem, cell: Option<CellRef>, styles: &super::shape::DrawSty
             out.push(f);
             continue;
         }
-        if let Some(d) = super::shape::read(e, styles) {
+        if let Some(d) = super::shape::read(e, styles, (*text_left).min(dom::MAX_CELL_TEXT)) {
+            *text_left = text_left.saturating_sub(d.text.len());
             out.push(Frame { cell, x: d.x, y: d.y, width: d.width, height: d.height, shape: Some(d), ..Frame::default() });
         }
     }
+    false
 }
 
 fn read_annotation(a: &Elem) -> Comment {

@@ -61,7 +61,8 @@ fn graphic_prop<'a>(styles: &'a HashMap<String, &Elem>, e: &Elem, ns: Ns, name: 
 }
 
 fn title_text(e: Option<&Elem>) -> Option<String> {
-    e.map(Elem::paragraphs_text).filter(|t| !t.is_empty())
+    // A title is a line or two: one longer than this is cut, not held whole for every chart.
+    e.map(|t| t.paragraphs_text_within(MAX_TITLE)).filter(|t| !t.is_empty())
 }
 
 /// The kind a chart class (`chart:bar`) and its properties name.
@@ -91,6 +92,9 @@ fn kind_of(class: &str, vertical: bool, stacked: bool, percent: bool, markers: b
         _ => ChartKind::ColumnClustered,
     }
 }
+
+/// The most text a chart or axis title keeps.
+const MAX_TITLE: usize = 4096;
 
 /// Reads an embedded chart object's `content.xml` tree.
 pub(crate) fn read(root: &Elem) -> Option<ChartDraft> {

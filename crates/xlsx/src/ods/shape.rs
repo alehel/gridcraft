@@ -87,16 +87,17 @@ fn kind_of(e: &Elem) -> Option<ShapeKind> {
 }
 
 /// The paragraphs of a shape (directly or in its text box), and the first run's text style.
-fn text_of(e: &Elem) -> (String, Option<String>, Option<String>) {
+fn text_of(e: &Elem, cap: usize) -> (String, Option<String>, Option<String>) {
     let holder = e.child(Ns::Draw, "text-box").unwrap_or(e);
     let first_p = holder.children(Ns::Text, "p").next();
     let p_style = first_p.and_then(|p| p.attr(Ns::Text, "style-name")).map(str::to_string);
     let span_style = first_p.and_then(|p| p.child(Ns::Text, "span")).and_then(|s| s.attr(Ns::Text, "style-name")).map(str::to_string);
-    (holder.paragraphs_text(), p_style, span_style)
+    (holder.paragraphs_text_within(cap), p_style, span_style)
 }
 
-/// Reads a drawing element; groups are read by the caller.
-pub(crate) fn read(e: &Elem, styles: &DrawStyles) -> Option<ShapeDraft> {
+/// Reads a drawing element, keeping at most `cap` bytes of its text; groups are read by the
+/// caller.
+pub(crate) fn read(e: &Elem, styles: &DrawStyles, cap: usize) -> Option<ShapeDraft> {
     let mut kind = kind_of(e)?;
     let len = |n: &str| e.attr(Ns::Svg, n).and_then(length_pt).unwrap_or(0.0);
     let (mut x, mut y, mut width, mut height) = (len("x"), len("y"), len("width"), len("height"));
@@ -129,7 +130,7 @@ pub(crate) fn read(e: &Elem, styles: &DrawStyles) -> Option<ShapeDraft> {
         // LibreOffice's default outline, when the file states no default.
         None => Color::Rgb(0x3465a4),
     };
-    let (text, p_style, span_style) = text_of(e);
+    let (text, p_style, span_style) = text_of(e, cap);
     let mut format = ShapeFormat { no_line: stroke == Some("none") || (kind == ShapeKind::TextBox && stroke.is_none()), ..ShapeFormat::default() };
     if let Some(tp) = styles.text_props(span_style.as_deref()).or_else(|| styles.text_props(p_style.as_deref())).or_else(|| styles.shape_text(e)) {
         format.font_size = tp.attr(Ns::Fo, "font-size").and_then(length_pt).map(|v| v as f32);
@@ -299,7 +300,7 @@ mod tests {
             let mut styles = DrawStyles::default();
             styles.add(tree.child(Ns::Office, "automatic-styles").unwrap());
             let el = tree.elems().nth(1).unwrap();
-            let d = read(el, &styles).unwrap();
+            let d = read(el, &styles, usize::MAX).unwrap();
             assert_eq!(d.kind, kind);
             assert_eq!((d.x, d.y), (10.0, 20.0));
             assert_eq!((d.width, d.height), (90.0, 45.0));
@@ -320,7 +321,7 @@ mod tests {
         let tree = parse_tree(doc.as_bytes()).unwrap();
         let mut styles = DrawStyles::default();
         styles.add(tree.child(Ns::Office, "styles").unwrap());
-        let d = read(tree.child(Ns::Draw, "rect").unwrap(), &styles).unwrap();
+        let d = read(tree.child(Ns::Draw, "rect").unwrap(), &styles, usize::MAX).unwrap();
         assert_eq!(d.fill, Color::Rgb(0xff0000));
         assert_eq!(d.line, Color::Rgb(0x00ff00));
         assert_eq!(d.format.anchor, Some(ShapeTextAnchor::Top));

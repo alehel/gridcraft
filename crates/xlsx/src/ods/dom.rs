@@ -141,6 +141,11 @@ impl Elem {
     /// to one space and leading whitespace of a paragraph is dropped, while `text:s`, `text:tab`
     /// and `text:line-break` expand to what they stand for.
     pub fn paragraphs_text(&self) -> String {
+        self.paragraphs_text_within(MAX_CELL_TEXT)
+    }
+
+    /// [`Elem::paragraphs_text`], at most `cap` bytes of it.
+    pub fn paragraphs_text_within(&self, cap: usize) -> String {
         let mut out = String::new();
         let mut first = true;
         for p in self.elems().filter(|e| e.ns == Ns::Text && (e.name == "p" || e.name == "h")) {
@@ -148,7 +153,10 @@ impl Elem {
                 out.push('\n');
             }
             first = false;
-            paragraph_text(p, &mut out);
+            walk_paragraph(p, &mut out, cap, &mut Plain);
+        }
+        if out.len() > cap {
+            out.truncate(out.floor_char_boundary(cap));
         }
         out
     }
@@ -156,12 +164,6 @@ impl Elem {
 
 /// A cell holds at most 1 MiB of text; the rest of a longer text is dropped.
 pub(crate) const MAX_CELL_TEXT: usize = 1024 * 1024;
-
-/// Appends a paragraph's text to `out` (see [`Elem::paragraphs_text`]), keeping `out` within
-/// [`MAX_CELL_TEXT`].
-pub(crate) fn paragraph_text(p: &Elem, out: &mut String) {
-    walk_paragraph(p, out, MAX_CELL_TEXT, &mut Plain);
-}
 
 /// What [`walk_paragraph`] makes of a paragraph's text and of its fields.
 pub(crate) trait ParagraphText {
