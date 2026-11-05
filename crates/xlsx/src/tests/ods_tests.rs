@@ -1222,3 +1222,20 @@ fn ods_cell_text_keeps_its_end_spaces() {
     let (again, _) = read_ods(&write_ods(&wb).unwrap()).unwrap();
     assert_eq!(again.sheets[0].value(CellRef::new(0, 0)), text(" padded label "));
 }
+
+/// A data bar's automatic bounds stay automatic through ODS and XLSX saves: read as the lowest
+/// and highest values, the smallest value's bar disappeared in LibreOffice.
+#[test]
+fn data_bar_automatic_bounds_round_trip() {
+    use gridcraft_model::{CfRule, CfValueKind};
+    let body = r##"<table:table table:name="Data" xmlns:calcext="urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0"><table:table-row><table:table-cell office:value-type="float" office:value="10"/></table:table-row><table:table-row><table:table-cell office:value-type="float" office:value="30"/></table:table-row><calcext:conditional-formats><calcext:conditional-format calcext:target-range-address="Data.A1:Data.A2"><calcext:data-bar calcext:positive-color="#638ec6"><calcext:formatting-entry calcext:value="0" calcext:type="auto-minimum"/><calcext:formatting-entry calcext:value="0" calcext:type="auto-maximum"/></calcext:data-bar></calcext:conditional-format></calcext:conditional-formats></table:table>"##;
+    let (wb, _) = read_ods(&ods(body)).unwrap();
+    let bounds = |wb: &gridcraft_model::Workbook| match wb.sheets[0].cond_formats.first().map(|c| &c.rule) {
+        Some(CfRule::DataBar { min, max, .. }) => Some((min.clone(), max.clone())),
+        _ => None,
+    };
+    let auto = Some((CfValueKind::AutoMin, CfValueKind::AutoMax));
+    assert_eq!(bounds(&wb), auto);
+    assert_eq!(bounds(&read_ods(&write_ods(&wb).unwrap()).unwrap().0), auto);
+    assert_eq!(bounds(&read_xlsx(&write_xlsx(&wb).unwrap()).unwrap().0), auto);
+}

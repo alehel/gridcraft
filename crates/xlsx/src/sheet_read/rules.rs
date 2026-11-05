@@ -20,8 +20,10 @@ fn cfvo(e: &El) -> CfValueKind {
     let val = e.attr("val").unwrap_or("");
     let n = val.trim().parse::<f64>().ok().filter(|v| v.is_finite());
     match e.attr("type").unwrap_or("num") {
-        "min" | "autoMin" => CfValueKind::Min,
-        "max" | "autoMax" => CfValueKind::Max,
+        "min" => CfValueKind::Min,
+        "max" => CfValueKind::Max,
+        "autoMin" => CfValueKind::AutoMin,
+        "autoMax" => CfValueKind::AutoMax,
         "percent" => n.map(CfValueKind::Percent).unwrap_or_else(|| CfValueKind::Formula(from_file(val))),
         "percentile" => n.map(CfValueKind::Percentile).unwrap_or_else(|| CfValueKind::Formula(from_file(val))),
         "formula" => CfValueKind::Formula(from_file(val)),

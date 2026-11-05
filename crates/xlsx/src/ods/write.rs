@@ -1045,6 +1045,8 @@ impl<'a> Writer<'a> {
                     CfValueKind::Max if icons => ("100".into(), "percent"),
                     CfValueKind::Min => ("0".into(), "minimum"),
                     CfValueKind::Max => ("0".into(), "maximum"),
+                    CfValueKind::AutoMin => ("0".into(), "auto-minimum"),
+                    CfValueKind::AutoMax => ("0".into(), "auto-maximum"),
                     CfValueKind::Number(n) => (crate::xml::num(*n), "number"),
                     CfValueKind::Percent(n) => (crate::xml::num(*n), "percent"),
                     CfValueKind::Percentile(n) => (crate::xml::num(*n), "percentile"),

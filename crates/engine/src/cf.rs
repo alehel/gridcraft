@@ -118,6 +118,8 @@ fn threshold(wb: &Workbook, sheet: usize, at: CellRef, st: &RuleStats, k: &CfVal
     match k {
         CfValueKind::Min => min,
         CfValueKind::Max => max,
+        CfValueKind::AutoMin => min.min(0.0),
+        CfValueKind::AutoMax => max.max(0.0),
         CfValueKind::Number(n) => *n,
         CfValueKind::Percent(p) => min + (max - min) * p / 100.0,
         CfValueKind::Percentile(p) => percentile(&st.sorted, *p),

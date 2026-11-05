@@ -1645,8 +1645,10 @@ impl Import {
             let v = e.attr(Ns::CalcExt, "value").unwrap_or("0");
             let n = v.parse::<f64>().unwrap_or(0.0);
             match e.attr(Ns::CalcExt, "type") {
-                Some("minimum" | "auto-minimum") => CfValueKind::Min,
-                Some("maximum" | "auto-maximum") => CfValueKind::Max,
+                Some("minimum") => CfValueKind::Min,
+                Some("maximum") => CfValueKind::Max,
+                Some("auto-minimum") => CfValueKind::AutoMin,
+                Some("auto-maximum") => CfValueKind::AutoMax,
                 Some("percent") => CfValueKind::Percent(n),
                 Some("percentile") => CfValueKind::Percentile(n),
                 Some("formula") => CfValueKind::Formula(formula::from_odf(v).unwrap_or_else(|| v.to_string())),
