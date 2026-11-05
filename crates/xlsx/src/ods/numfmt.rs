@@ -763,66 +763,97 @@ fn section_xml(out: &mut String, name: &str, s: &Section, volatile: bool, maps: 
     let _ = write!(out, "{maps}</number:{kind}>");
 }
 
-/// The data style elements for `code`, the main one named `name`. `None` for General.
+/// LibreOffice's condition for "any number".
+const ANY: &str = "<=1.7976931348623157E+308";
+
+/// The condition true exactly where `c` is false (`>5` → `<=5`).
+fn complement(c: &str) -> Option<String> {
+    let op_len = c.chars().take_while(|c| matches!(c, '<' | '>' | '=')).count();
+    let (op, num) = c.split_at(op_len);
+    let neg = match op {
+        ">" => "<=",
+        ">=" => "<",
+        "<" => ">=",
+        "<=" => ">",
+        "=" => "<>",
+        "<>" => "=",
+        _ => return None,
+    };
+    Some(format!("{neg}{num}"))
+}
+
+/// How Excel picks a code's section for a value: the conditioned arms tried in order, then the
+/// rest (`None`: General, with its sign), and the text section. Writer and reader both follow
+/// it, so a code's sections keep their meaning whatever shape it has.
+struct Plan {
+    arms: Vec<(String, Section)>,
+    rest: Option<Section>,
+    text: Option<Section>,
+}
+
+/// The [`Plan`] of a code's sections: up to three for numbers, then text (a fourth section, or
+/// a last one holding `@`). Unconditioned sections take Excel's implicit positive (and zero,
+/// with two), negative and zero conditions; a conditioned one keeps its own.
+fn plan(mut s: Vec<Section>) -> Plan {
+    let text = if s.len() >= 4 || (s.len() > 1 && s.last().is_some_and(|l| l.parts.contains(&Part::Text))) { s.pop() } else { None };
+    s.truncate(3);
+    let mut it = s.into_iter();
+    let (Some(mut s0), s1, s2) = (it.next(), it.next(), it.next()) else { return Plan { arms: vec![], rest: None, text } };
+    let c0 = s0.cond.take();
+    let (c1, s1) = match s1 {
+        Some(mut x) => (x.cond.take(), Some(x)),
+        None => (None, None),
+    };
+    let s2 = s2.map(|x| Section { cond: None, ..x });
+    let (arms, rest) = match (c0, c1, s1) {
+        (None, None, None) => (vec![], Some(s0)),
+        (None, None, Some(s1)) => match s2 {
+            None => (vec![(">=0".into(), s0)], Some(s1)),
+            Some(s2) => (vec![(">0".into(), s0), ("<0".into(), s1)], Some(s2)),
+        },
+        (Some(c0), Some(c1), Some(s1)) => (vec![(c0, s0), (c1, s1)], s2),
+        (Some(c0), None, None) => (vec![(c0, s0)], None),
+        (Some(c0), None, Some(s1)) => (vec![(c0, s0)], Some(s1)),
+        (None, Some(c1), Some(s1)) => (vec![(c1, s1)], Some(s0)),
+        (_, Some(_), None) => (vec![], None),
+    };
+    Plan { arms, rest, text }
+}
+
 pub(crate) fn write_style(name: &str, code: &str) -> Option<String> {
     if code.eq_ignore_ascii_case("general") || code.is_empty() {
         return None;
     }
-    let mut sections = parse_code(code);
-    // The last section is the main style; the others are mapped from it by their conditions:
-    // stated ones, or Excel's implicit positive;negative;zero;text.
-    let explicit = sections.iter().any(|s| s.cond.is_some());
-    if sections.len() < MAX_SECTIONS && sections.last().is_some_and(|s| s.cond.is_some()) {
-        // Every section has its condition: other values show as General, the main style.
-        sections.push(Section { parts: vec![Part::General], ..Section::default() });
-    }
-    // Stated conditions that read back as Excel's implicit ones keep their meaning, except a
-    // lone `>=0` before the other values (General) or text: read implicitly, its negatives
-    // would take the first section without their sign. They are stated as the General they
-    // show (`[>=0]0`, `[>=0]0;@`). A section of the user's own for them stays as it is.
-    let general = Section { parts: vec![Part::General], ..Section::default() };
-    if let [first, rest] = sections.as_slice()
-        && first.cond.as_deref() == Some(">=0")
-        && (*rest == general || rest.parts.contains(&Part::Text))
-    {
-        sections.insert(1, Section { cond: Some("<0".into()), parts: vec![Part::Lit("-".into()), Part::General], ..Section::default() });
-    }
-    let n = sections.len();
-    // A last text section (`0.00;@`) takes text only: the sections before it share the numbers
-    // as if it weren't there, a lone one showing negatives with a minus.
-    let text_last = !explicit && (2..4).contains(&n) && sections.last().is_some_and(|s| s.parts.contains(&Part::Text));
-    // (A date or time has no negative form: only its number of days turns it negative; a text
-    // section shows a number as it is.)
-    if text_last
-        && n == 2
-        && let Some(first) = sections.first().cloned()
-        && !matches!(kind(&first), "date-style" | "time-style" | "text-style")
-    {
-        let mut parts = vec![Part::Lit("-".into())];
-        parts.extend(first.parts.iter().cloned());
-        sections.insert(1, Section { parts, ..first });
-    }
-    let n = sections.len();
+    let Plan { mut arms, rest, text } = plan(parse_code(code));
+    let general =
+        |minus: bool| Section { parts: if minus { vec![Part::Lit("-".into()), Part::General] } else { vec![Part::General] }, ..Section::default() };
+    let lone_ge0 = arms.len() == 1 && arms.first().is_some_and(|(c, _)| c == ">=0");
+    let main = match (text, rest) {
+        (None, Some(r)) => r,
+        // Only negatives reach it: their sign is spelled.
+        (None, None) if lone_ge0 => general(true),
+        // Read back as the "other values" after explicit arms.
+        (None, None) => general(false),
+        (Some(t), Some(r)) => {
+            let cover = match arms.as_slice() {
+                [] => ANY.to_string(),
+                [(c, _)] => complement(c).unwrap_or_else(|| ANY.into()),
+                [(a, _), (b, _)] if a == ">0" && b == "<0" => "=0".into(),
+                _ => ANY.into(),
+            };
+            arms.push((cover, r));
+            t
+        }
+        (Some(t), None) => t,
+    };
     let mut out = String::new();
     let mut maps = String::new();
-    for (i, s) in sections.iter().take(n - 1).enumerate() {
+    for (i, (cond, s)) in arms.iter().enumerate() {
         let part = format!("{name}P{i}");
-        let mut mapped = s.clone();
-        let condition = match mapped.cond.take() {
-            // ODF writes Excel's `<>` as `!=`.
-            Some(c) => c.replacen("<>", "!=", 1),
-            None if explicit => ">=0".into(),
-            None => match (n, i, text_last) {
-                (2, ..) | (3, 0, true) => ">=0".into(),
-                (_, 0, _) => ">0".into(),
-                (_, 1, _) => "<0".into(),
-                _ => "=0".into(),
-            },
-        };
-        section_xml(&mut out, &part, &mapped, true, "");
+        let condition = cond.replacen("<>", "!=", 1);
+        section_xml(&mut out, &part, s, true, "");
         let _ = write!(maps, "<style:map style:condition=\"value(){}\" style:apply-style-name=\"{}\"/>", esc_attr(&condition), esc_attr(&part));
     }
-    let main = sections.last().cloned().unwrap_or_default();
     section_xml(&mut out, name, &Section { cond: None, ..main }, false, &maps);
     Some(out)
 }
@@ -899,8 +930,13 @@ pub(crate) fn code(styles: &HashMap<String, DataStyle>, name: &str) -> Option<St
     // Excel's implicit sections (positive;negative[;zero[;text]]) need no conditions.
     // (with a text section last, positive-and-zero;negative;text).
     let text_main = own.parts.contains(&Part::Text);
+    // The inverse of what the writer's plan states: positive-and-zero;negative and
+    // positive;negative;zero for numbers, and with a text section last a catch-all, or
+    // positive-and-zero;negative, or positive;negative;zero.
     let implicit = match conds.as_slice() {
-        [">=0"] | [">0", "<0"] | [">0", "<0", "=0"] => true,
+        [">=0"] | [">0", "<0"] => !text_main,
+        [">0", "<0", "=0"] => true,
+        [c] if *c == ANY => text_main,
         [">=0", "<0"] => text_main,
         _ => false,
     };
@@ -920,7 +956,11 @@ fn condition(c: &str) -> Option<String> {
     let op = rest.get(..op_len)?;
     let num = rest.get(op_len..)?.trim();
     // As a code's own conditions: a number, LibreOffice's past-the-largest bound included.
-    num.parse::<f64>().ok().filter(|v| !v.is_nan())?;
+    let n = num.parse::<f64>().ok().filter(|v| !v.is_nan())?;
+    // "Any number", however its bound is spelled (older writers round it past the largest).
+    if op == "<=" && n >= f64::MAX {
+        return Some(ANY.into());
+    }
     let op = match op {
         "==" => "=",
         "!=" => "<>",
@@ -1123,6 +1163,20 @@ mod tests {
         code(&styles, "N1").unwrap_or_default()
     }
 
+    /// LibreOffice states "any number" for the numbers of a code with a text section, in either
+    /// spelling of its bound.
+    #[test]
+    fn libreoffice_any_number_reads_as_the_implicit_code() {
+        for bound in ["1.7976931348623157E+308", "1.79769313486232E+308"] {
+            let doc = format!(
+                r#"<office:styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0"><number:number-style style:name="N1P0"><number:number number:decimal-places="2" number:min-integer-digits="1"/></number:number-style><number:text-style style:name="N1"><number:text-content/><style:map style:condition="value()&lt;={bound}" style:apply-style-name="N1P0"/></number:text-style></office:styles>"#
+            );
+            let mut styles = HashMap::new();
+            read_styles(&parse_tree(doc.as_bytes()).unwrap(), &mut styles);
+            assert_eq!(code(&styles, "N1").as_deref(), Some("0.00;@"), "{bound}");
+        }
+    }
+
     #[test]
     fn codes_survive_a_round_trip() {
         for code in [
@@ -1190,10 +1244,10 @@ mod tests {
             ("General;[Red]-General", "General;[Red]-General"),
             ("[>0]0", "[>0]0"),
             // Round four: a lone `>=0` keeps its negatives' sign.
-            ("[>=0]0", "[>=0]0;[<0]-General"),
+            ("[>=0]0", "0;-General"),
             // Round five: the same with a text section, and text shown as text.
-            ("[>=0]0.00;@", "0.00;-General;@"),
-            ("[>=0]\"p\";@", "\"p\";-General;@"),
+            ("[>=0]0.00;@", "[>=0]0.00;@"),
+            ("[>=0]\"p\";@", "[>=0]\"p\";@"),
             ("@;@", "@;@"),
             // Round six: a negative section of the user's own is kept.
             ("[>=0]0;[Red]0", "0;[Red]0"),
@@ -1223,12 +1277,21 @@ mod tests {
             ("###-####", "#-####"),
             ("(###) ###-####", "(#) ###-####"),
             ("0\" and \"?/?", "0 ?/?"),
-            ("0.00;@", "0.00;-0.00;@"),
+            ("0.00;@", "0.00;@"),
             ("0;-0;@", "0;-0;@"),
             ("[<>0]0;\"zero\"", "[<>0]0;\"zero\""),
             ("[>abc]0", "0"),
+            // One plan of sections for writer and reader: a text-last code needs no made-up
+            // negative copy, and a General of the user's own keeps its place.
+            ("0;@", "0;@"),
+            ("\"a\";@", "\"a\";@"),
+            ("[>=0]0;General", "0;General"),
+            ("[>5]0;0.0;@", "[>5]0;[<=5]0.0;@"),
+            ("0;-0;0;@", "0;-0;0;@"),
         ] {
             assert_eq!(round_trip(code), back, "{code}");
+            // A second save writes what the first read.
+            assert_eq!(round_trip(back), back, "{code} saved twice");
         }
         // A quote in text reads back as the same text.
         let sections = parse_code(&round_trip("0\"a\"\\\"\"b\""));
