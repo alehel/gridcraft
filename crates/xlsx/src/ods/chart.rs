@@ -110,8 +110,6 @@ pub(crate) fn read(root: &Elem) -> Option<ChartDraft> {
     let mut series = Vec::new();
     // Each series' class, and whether it shows markers and lines.
     let mut classes = Vec::new();
-    let mut any_markers = false;
-    let mut any_lines = false;
     for s in plot.children(Ns::Chart, "series") {
         let Some(values) = s.attr(Ns::Chart, "values-cell-range-address").and_then(range_text) else { continue };
         let own_class = s.attr(Ns::Chart, "class").unwrap_or(class);
@@ -119,8 +117,6 @@ pub(crate) fn read(root: &Elem) -> Option<ChartDraft> {
         let markers = symbol.is_some_and(|t| t != "none");
         let stroke = graphic_prop(&styles, s, Ns::Draw, "stroke");
         let lines = stroke != Some("none");
-        any_markers |= markers;
-        any_lines |= lines;
         classes.push((own_class.to_string(), markers, lines));
         if chart_prop(&styles, s, "data-label-number").is_some_and(|v| v != "none") || chart_prop(&styles, s, "data-label-text") == Some("true") {
             data_labels = true;
@@ -149,12 +145,17 @@ pub(crate) fn read(root: &Elem) -> Option<ChartDraft> {
             ..Series::default()
         });
     }
-    let base = kind_of(class, vertical, stacked, percent, any_markers, any_lines);
-    // Series of another class than the chart's make it a combination chart.
+    // The chart's markers are the plot's, else its first series'; its lines its first series'.
+    let first = classes.first().map_or((true, true), |(_, m, l)| (*m, *l));
+    let markers = chart_prop(&styles, plot, "symbol-type").map_or(first.0, |t| t != "none");
+    let base = kind_of(class, vertical, stacked, percent, markers, first.1);
+    // Series of another class than the chart's make it a combination chart, where each states
+    // its kind; elsewhere a series states one only where it differs from the chart's.
     let combo = classes.iter().any(|(c, ..)| c.as_str() != class);
-    if combo {
-        for (s, (c, markers, lines)) in series.iter_mut().zip(&classes) {
-            s.kind = Some(kind_of(c, vertical, stacked, percent, *markers, *lines));
+    for (s, (c, markers, lines)) in series.iter_mut().zip(&classes) {
+        let own = kind_of(c, vertical, stacked, percent, *markers, *lines);
+        if combo || own != base {
+            s.kind = Some(own);
         }
     }
     let legend = match chart.child(Ns::Chart, "legend").and_then(|l| l.attr(Ns::Chart, "legend-position")) {
@@ -461,6 +462,13 @@ mod tests {
         assert_eq!(kinds(&chart), (ChartKind::Combo, vec![Some(ChartKind::ColumnClustered), Some(ChartKind::Line)]));
         chart.series = vec![series(Some(ChartKind::LineMarkers)), series(Some(ChartKind::Line)), series(Some(ChartKind::ColumnClustered))];
         assert_eq!(kinds(&chart), (ChartKind::Combo, vec![Some(ChartKind::LineMarkers), Some(ChartKind::Line), Some(ChartKind::ColumnClustered)]));
+        // In a line chart, one series with markers keeps them to itself.
+        chart.kind = ChartKind::Line;
+        chart.series = vec![series(None), series(Some(ChartKind::LineMarkers))];
+        assert_eq!(kinds(&chart), (ChartKind::Line, vec![None, Some(ChartKind::LineMarkers)]));
+        chart.kind = ChartKind::LineMarkers;
+        chart.series = vec![series(None), series(None)];
+        assert_eq!(kinds(&chart), (ChartKind::LineMarkers, vec![None, None]));
     }
 
     #[test]

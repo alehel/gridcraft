@@ -52,7 +52,7 @@ pub(crate) fn parse_odf(src: &str) -> Option<Expr> {
     }
     let e = match syntax(src)? {
         Syntax::Excel(body) => gridcraft_formula::parse(body).ok()?,
-        Syntax::Open(body) => gridcraft_formula::parse_tokens(tokens(body)?).ok()?,
+        Syntax::Open(body) => add_default_true(gridcraft_formula::parse_tokens(tokens(body)?).ok()?),
     };
     Some(e)
 }
@@ -66,33 +66,19 @@ pub(crate) fn from_odf(src: &str) -> Option<String> {
 /// become requires it: name and the full argument count.
 const TRUE_BY_DEFAULT: [(&str, usize); 6] = [("CHISQDIST", 3), ("EXPONDIST", 3), ("FDIST", 4), ("GAMMADIST", 4), ("NORMDIST", 4), ("POISSON", 3)];
 
-/// Adds the defaulted `TRUE` to the call whose `Func` token is at `func`, when it was given one
-/// argument fewer than `full`.
-fn add_default_true(toks: &mut Vec<Token>, func: usize, full: usize) {
-    let (mut depth, mut commas, mut any) = (1usize, 0usize, false);
-    let mut close = None;
-    for (k, t) in toks.iter().enumerate().skip(func + 1) {
-        match t.tok {
-            Tok::LParen | Tok::Func(_) | Tok::LBrace => depth += 1,
-            Tok::RParen | Tok::RBrace => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(k);
-                    break;
-                }
+/// Adds the defaulted `TRUE` to each call of a [`TRUE_BY_DEFAULT`] function given one argument
+/// fewer than Excel requires. On the parsed formula, whose depth the parser bounds.
+fn add_default_true(e: Expr) -> Expr {
+    e.map(&mut |x| match x {
+        Expr::Call(name, mut args) => {
+            let full = TRUE_BY_DEFAULT.iter().find(|(odf, _)| odf_to_excel(odf).eq_ignore_ascii_case(&name)).map(|(_, n)| *n);
+            if full.is_some_and(|n| args.len() + 1 == n) {
+                args.push(Expr::Bool(true));
             }
-            Tok::Comma if depth == 1 => commas += 1,
-            _ => {}
+            Expr::Call(name, args)
         }
-        any = true;
-    }
-    let Some(close) = close else { return };
-    let given = if any { commas + 1 } else { 0 };
-    if given + 1 == full {
-        let at = toks.get(close).map_or(0, |t| t.start);
-        let tok = |tok| Token { tok, start: at, end: at };
-        toks.splice(close..close, [tok(Tok::Comma), tok(Tok::Bool(true))]);
-    }
+        other => other,
+    })
 }
 
 /// OpenFormula text as the formula parser's tokens; `None` for text it can't be.
@@ -101,7 +87,6 @@ fn tokens(body: &str) -> Option<Vec<Token>> {
     let at = |i: usize| chars.get(i).map(|c| c.1);
     let pos = |i: usize| chars.get(i).map_or(body.len(), |c| c.0);
     let mut out = Vec::new();
-    let mut defaults: Vec<(usize, usize)> = Vec::new();
     let mut braces = 0usize;
     let mut i = 0usize;
     while let Some(c) = at(i) {
@@ -246,7 +231,7 @@ fn tokens(body: &str) -> Option<Vec<Token>> {
                 Tok::Number(n)
             }
             c if c.is_alphabetic() || c == '_' || c == '\\' => {
-                let (tok, next) = name_token(&chars, i, out.len(), &mut defaults)?;
+                let (tok, next) = name_token(&chars, i)?;
                 i = next;
                 tok
             }
@@ -254,22 +239,12 @@ fn tokens(body: &str) -> Option<Vec<Token>> {
         };
         out.push(Token { tok, start: pos(start), end: pos(i) });
     }
-    // More tokens than the parser takes: refused here, before the defaults (each a scan of the
-    // call) cost more than the tokens themselves.
-    if out.len() > gridcraft_formula::MAX_FORMULA_LEN {
-        return None;
-    }
-    // Later calls first, so earlier indices stay put.
-    for (func, full) in defaults.into_iter().rev() {
-        add_default_true(&mut out, func, full);
-    }
     Some(out)
 }
 
-/// The name starting at `i`: a function (its `(` taken, its index noted in `defaults` when an
-/// argument defaults to TRUE), the constants `TRUE()`/`FALSE()` or `TRUE`/`FALSE`, or a defined
-/// name; and the index after it.
-fn name_token(chars: &[(usize, char)], i: usize, index: usize, defaults: &mut Vec<(usize, usize)>) -> Option<(Tok, usize)> {
+/// The name starting at `i`: a function (its `(` taken), the constants `TRUE()`/`FALSE()` or
+/// `TRUE`/`FALSE`, or a defined name; and the index after it.
+fn name_token(chars: &[(usize, char)], i: usize) -> Option<(Tok, usize)> {
     let at = |k: usize| chars.get(k).map(|c| c.1);
     let (w, j) = word(chars, i)?;
     let skip_spaces = |mut k: usize| {
@@ -291,9 +266,6 @@ fn name_token(chars: &[(usize, char)], i: usize, index: usize, defaults: &mut Ve
     let close = skip_spaces(open + 1);
     if let Some(b) = constant.filter(|_| at(close) == Some(')')) {
         return Some((Tok::Bool(b), close + 1));
-    }
-    if let Some((_, full)) = TRUE_BY_DEFAULT.iter().find(|(n, _)| n.eq_ignore_ascii_case(&w)) {
-        defaults.push((index, *full));
     }
     Some((Tok::Func(odf_to_excel(&w)), open + 1))
 }
@@ -787,6 +759,10 @@ mod tests {
         // Cumulative defaults to TRUE in OpenFormula; Excel requires it.
         assert_eq!(from_odf("of:=CHISQDIST(1;2)").as_deref(), Some("CHISQ.DIST(1,2,TRUE)"));
         assert_eq!(from_odf("of:=NORMDIST(1;0;1)").as_deref(), Some("NORMDIST(1,0,1,TRUE)"));
+        assert_eq!(from_odf("of:=NORMDIST(NORMDIST(1;0;1);0;1)").as_deref(), Some("NORMDIST(NORMDIST(1,0,1,TRUE),0,1,TRUE)"));
+        // Nested past the parser's depth: refused, after one pass over the text.
+        let deep = format!("of:={}1{}", "NORMDIST(".repeat(1400), ";0;1)".repeat(1400));
+        assert_eq!(from_odf(&deep), None);
         assert_eq!(from_odf("of:=POISSON(1;2;FALSE())").as_deref(), Some("POISSON(1,2,FALSE)"));
         // Some writers separate arguments with `,`; a bare word that spells a cell reads as that
         // cell, as LibreOffice reads it.
