@@ -1647,6 +1647,56 @@ fn open_grows_default_height_rows_to_their_font() {
     assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(0), default_h, "11pt row stays default");
 }
 
+/// A file whose default row height isn't the standard one, saved without
+/// `sheetFormatPr customHeight` (Excel's 14.4 pt), is saved back with `customHeight="1"` as the
+/// spec defines it (set by hand, or different from the default). The flag that reads back must not
+/// stop rows fitting their content: a 20pt cell still grows its row after save and reopen.
+#[test]
+fn non_standard_default_row_height_keeps_auto_fitting_after_save() {
+    let bytes = {
+        let mut wb = gridcraft_xlsx::read_xlsx(&big_font_workbook(None, true)).unwrap().0;
+        wb.sheet_mut(0).unwrap().rows.clear();
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.default_row_height = 19.2; // 14.4 pt
+        let written = gridcraft_xlsx::write_xlsx(&wb).unwrap();
+        // Rewritten without customHeight, as such a file comes from elsewhere.
+        let mut zin = zip::ZipArchive::new(std::io::Cursor::new(written)).unwrap();
+        let mut zout = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for i in 0..zin.len() {
+            let mut f = zin.by_index(i).unwrap();
+            let name = f.name().to_string();
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut f, &mut data).unwrap();
+            if name == "xl/worksheets/sheet1.xml" {
+                let xml = String::from_utf8(data).unwrap();
+                assert!(xml.contains("defaultRowHeight=\"14.4\" customHeight=\"1\""), "{xml}");
+                data = xml.replace("defaultRowHeight=\"14.4\" customHeight=\"1\"", "defaultRowHeight=\"14.4\"").into_bytes();
+            }
+            zout.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut zout, &data).unwrap();
+        }
+        zout.finish().unwrap().into_inner()
+    };
+    let mut s = Session::new();
+    s.execute("file.open", json!({"name": "excel144.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(!sh.default_row_custom, "no customHeight in the file");
+    assert!(sh.row_height(4) >= 30.0, "the 20pt row fits on open, got {}", sh.row_height(4));
+    let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    let saved = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
+    let mut s = Session::new();
+    s.execute("file.open", json!({"name": "resaved.xlsx", "base64": crate::io::base64_encode(&saved)})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(sh.default_row_custom, "the save writes customHeight for a non-standard default");
+    assert!(sh.row_height(4) >= 30.0, "the 20pt row still fits after save and reopen, got {}", sh.row_height(4));
+    assert_eq!(sh.row_height(0), 19.2, "11pt rows keep the 14.4 pt default");
+    // Editing still fits rows at the default height.
+    s.execute("home.fontSize", json!({"range": "C2", "size": 20})).unwrap();
+    s.execute("cell.set", json!({"cell": "C2", "input": "big"})).unwrap();
+    let h = s.doc().unwrap().wb.active().unwrap().row_height(1);
+    assert!(h >= 30.0, "a cell edited to 20pt grows its default-height row, got {h}");
+}
+
 #[test]
 fn line_breaks_grow_a_row_only_when_the_cell_wraps() {
     // Excel: a cell holding "a\nb" with Wrap Text off displays on one line and AutoFit gives a
