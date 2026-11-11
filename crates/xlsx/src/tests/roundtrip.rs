@@ -1397,6 +1397,53 @@ fn data_bar_automatic_bounds_round_trip() {
     }
 }
 
+/// `autoMin`/`autoMax` are data-bar bounds: in a (non-conforming) 2006 colour scale or icon set
+/// they read as the lowest and highest values, so the colours don't shift towards zero.
+#[test]
+fn automatic_bounds_outside_data_bars_read_as_lowest_and_highest() {
+    use std::io::Write;
+    let mut wb = Workbook::new();
+    let s = wb.sheet_mut(0).unwrap();
+    s.set_value(at("A1"), Value::Number(10.0));
+    s.set_value(at("A2"), Value::Number(30.0));
+    let rules = [
+        CfRule::ColorScale { stops: vec![(CfValueKind::Min, Color::Rgb(0xF8696B)), (CfValueKind::Max, Color::Rgb(0x63BE7B))] },
+        CfRule::IconSet { set: "3Arrows".into(), thresholds: vec![CfValueKind::Min, CfValueKind::Percent(50.0)], reverse: false, show_value: true },
+        CfRule::DataBar { min: CfValueKind::Min, max: CfValueKind::Max, color: Color::Rgb(0x638EC6), gradient: true, show_value: true },
+    ];
+    for (i, rule) in rules.into_iter().enumerate() {
+        s.cond_formats.push(CondFormat { ranges: vec![rr("A1:A2")], rule, priority: i as u32 + 1, stop_if_true: false });
+    }
+    // Rewrite every 2006 min/max bound as automatic.
+    let bytes = write_xlsx(&wb).unwrap();
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(&bytes[..])).unwrap();
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for i in 0..z.len() {
+        let mut f = z.by_index(i).unwrap();
+        let mut data = Vec::new();
+        f.read_to_end(&mut data).unwrap();
+        if f.name() == "xl/worksheets/sheet1.xml" {
+            let xml = String::from_utf8(data).unwrap();
+            assert!(xml.contains("<cfvo type=\"min\"/>"), "{xml}");
+            data = xml
+                .replace("<cfvo type=\"min\"/>", "<cfvo type=\"autoMin\"/>")
+                .replace("<cfvo type=\"max\"/>", "<cfvo type=\"autoMax\"/>")
+                .into_bytes();
+        }
+        out.start_file(f.name(), zip::write::SimpleFileOptions::default()).unwrap();
+        out.write_all(&data).unwrap();
+    }
+    let bytes = out.finish().unwrap().into_inner();
+    let (back, _) = read_xlsx(&bytes).unwrap();
+    let got: Vec<_> = back.sheets[0].cond_formats.iter().map(|c| c.rule.clone()).collect();
+    assert!(matches!(&got[0], CfRule::ColorScale { stops } if stops[0].0 == CfValueKind::Min && stops[1].0 == CfValueKind::Max), "{got:?}");
+    assert!(
+        matches!(&got[1], CfRule::IconSet { thresholds, .. } if thresholds.contains(&CfValueKind::Min) && !thresholds.contains(&CfValueKind::AutoMin)),
+        "{got:?}"
+    );
+    assert!(matches!(&got[2], CfRule::DataBar { min: CfValueKind::AutoMin, max: CfValueKind::AutoMax, .. }), "{got:?}");
+}
+
 #[test]
 fn doc_props_keep_boundary_whitespace() {
     let mut wb = Workbook::new();
