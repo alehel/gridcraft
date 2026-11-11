@@ -110,8 +110,8 @@ pub struct Sheet {
     /// Default column width and row height in pixels at 96 dpi (a file stores row heights in points).
     pub default_col_width: f32,
     pub default_row_height: f32,
-    /// The default row height was set by hand (XLSX `sheetFormatPr customHeight`), so rows at
-    /// the default height don't grow to fit their text; AutoFit Row Height still fits them.
+    /// The default row height was marked as set by hand (XLSX `sheetFormatPr customHeight`).
+    /// Kept so a save writes it back; row auto-fit doesn't depend on it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default_row_custom: bool,
     pub merges: Vec<RangeRef>,

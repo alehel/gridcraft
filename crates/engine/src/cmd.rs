@@ -599,22 +599,11 @@ fn wrapped_line_count(line: &str, width: f32, size: f32, bold: bool) -> f32 {
 }
 
 /// Recomputes an automatic row height from its content: the largest font, and wrapped text.
-/// Rows with a user-set height keep it, and so do rows at a sheet's hand-set default height
-/// (`Sheet::default_row_custom`).
+/// Rows with a user-set height keep it.
 ///
 /// Line breaks in a cell's text count only when the cell wraps, as in Excel: with Wrap Text off
 /// a multi-line value shows on one line and AutoFit gives a one-line row.
 pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
-    let Some(sh) = wb.sheet(si) else { return };
-    if sh.default_row_custom && sh.rows.get(&row).is_none_or(|i| i.size.is_none()) {
-        return;
-    }
-    fit_row_height(wb, si, row);
-}
-
-/// AutoFit Row Height: fits a row to its content even at a hand-set default height. Rows with
-/// a user-set height keep it (the AutoFit command clears that first).
-pub fn fit_row_height(wb: &mut Workbook, si: usize, row: u32) {
     let Some(sh) = wb.sheet(si) else { return };
     if sh.rows.get(&row).is_some_and(|i| i.custom) {
         return;

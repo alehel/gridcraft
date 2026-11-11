@@ -214,11 +214,6 @@ pub(super) fn autofit_rows(s: &mut Session, p: &Json) -> Result<Json> {
                     }
                 }
             }
-            // Fitted here rather than through `fit_rows`, which skips rows at a hand-set
-            // default height: AutoFit is asked for, so those rows fit too.
-            for r in a..=b {
-                crate::cmd::fit_row_height(&mut cx.wb, si, r);
-            }
             cx.fit_rows.extend((a..=b).map(|r| (si, r)));
         }
         cx.structural = true; // autofit reveals hidden rows: SUBTOTAL(10x) depends on it
