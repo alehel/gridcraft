@@ -15,8 +15,9 @@ fn cf_op_name(op: CfOperator) -> &'static str {
 
 fn cfvo_xml(v: &CfValueKind) -> String {
     match v {
-        CfValueKind::Min => "<cfvo type=\"min\"/>".into(),
-        CfValueKind::Max => "<cfvo type=\"max\"/>".into(),
+        // The 2006 schema has no automatic bounds: the x14 rule holds them.
+        CfValueKind::Min | CfValueKind::AutoMin => "<cfvo type=\"min\"/>".into(),
+        CfValueKind::Max | CfValueKind::AutoMax => "<cfvo type=\"max\"/>".into(),
         CfValueKind::Number(n) => format!("<cfvo type=\"num\" val=\"{}\"/>", num(*n)),
         CfValueKind::Percent(n) => format!("<cfvo type=\"percent\" val=\"{}\"/>", num(*n)),
         CfValueKind::Percentile(n) => format!("<cfvo type=\"percentile\" val=\"{}\"/>", num(*n)),
@@ -26,6 +27,12 @@ fn cfvo_xml(v: &CfValueKind) -> String {
 
 fn quote(t: &str) -> String {
     format!("\"{}\"", t.replace('"', "\"\""))
+}
+
+/// Whether a data bar needs its Excel 2010 rule: a solid one, or one with automatic bounds.
+pub(super) fn bar_needs_x14(rule: &CfRule) -> bool {
+    matches!(rule, CfRule::DataBar { gradient: false, .. })
+        || matches!(rule, CfRule::DataBar { min, max, .. } if [min, max].iter().any(|k| matches!(k, CfValueKind::AutoMin | CfValueKind::AutoMax)))
 }
 
 /// The id linking a solid data bar's `cfRule` to its x14 extension; unique per sheet because priorities are.
@@ -44,6 +51,8 @@ pub(super) fn x14_cfvo(v: &CfValueKind) -> String {
     let (ty, val) = match v {
         CfValueKind::Min => return "<x14:cfvo type=\"min\"/>".into(),
         CfValueKind::Max => return "<x14:cfvo type=\"max\"/>".into(),
+        CfValueKind::AutoMin => return "<x14:cfvo type=\"autoMin\"/>".into(),
+        CfValueKind::AutoMax => return "<x14:cfvo type=\"autoMax\"/>".into(),
         CfValueKind::Number(n) => ("num", num(*n)),
         CfValueKind::Percent(n) => ("percent", num(*n)),
         CfValueKind::Percentile(n) => ("percentile", num(*n)),
@@ -149,13 +158,13 @@ pub(super) fn cf_rule_xml(cf: &CondFormat, priority: u32, out: &mut Out) -> Stri
             b.push_str("</colorScale>");
             format!("<cfRule type=\"colorScale\" priority=\"{priority}\"{stop}>{b}</cfRule>")
         }
-        CfRule::DataBar { min, max, color, show_value, gradient } => format!(
+        CfRule::DataBar { min, max, color, show_value, .. } => format!(
             "<cfRule type=\"dataBar\" priority=\"{priority}\"{stop}><dataBar{}>{}{}<color {}/></dataBar>{}</cfRule>",
             if *show_value { "" } else { " showValue=\"0\"" },
             cfvo_xml(min),
             cfvo_xml(max),
             if *color == Color::Auto { "rgb=\"FF638EC6\"".to_string() } else { color_attrs(color) },
-            if *gradient { String::new() } else { solid_bar_ext(priority) }
+            if bar_needs_x14(&cf.rule) { solid_bar_ext(priority) } else { String::new() }
         ),
         CfRule::IconSet { set, thresholds, reverse, show_value } => {
             let mut b = format!("<iconSet iconSet=\"{}\"", esc_attr(set));

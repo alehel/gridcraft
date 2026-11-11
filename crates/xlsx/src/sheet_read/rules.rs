@@ -20,13 +20,27 @@ fn cfvo(e: &El) -> CfValueKind {
     let val = e.attr("val").unwrap_or("");
     let n = val.trim().parse::<f64>().ok().filter(|v| v.is_finite());
     match e.attr("type").unwrap_or("num") {
-        "min" | "autoMin" => CfValueKind::Min,
-        "max" | "autoMax" => CfValueKind::Max,
+        "min" => CfValueKind::Min,
+        "max" => CfValueKind::Max,
+        "autoMin" => CfValueKind::AutoMin,
+        "autoMax" => CfValueKind::AutoMax,
         "percent" => n.map(CfValueKind::Percent).unwrap_or_else(|| CfValueKind::Formula(from_file(val))),
         "percentile" => n.map(CfValueKind::Percentile).unwrap_or_else(|| CfValueKind::Formula(from_file(val))),
         "formula" => CfValueKind::Formula(from_file(val)),
         _ => n.map(CfValueKind::Number).unwrap_or_else(|| CfValueKind::Formula(from_file(val))),
     }
+}
+
+/// Automatic bounds belong to data bars only: in a colour scale or an icon set they read as the
+/// lowest and highest values, as before they were modelled.
+fn without_auto(v: Vec<CfValueKind>) -> Vec<CfValueKind> {
+    v.into_iter()
+        .map(|k| match k {
+            CfValueKind::AutoMin => CfValueKind::Min,
+            CfValueKind::AutoMax => CfValueKind::Max,
+            k => k,
+        })
+        .collect()
 }
 
 /// `cfvo` elements: plain children, or x14 ones with the value in an `xm:f` child.
@@ -84,7 +98,7 @@ pub(super) fn read_cf(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet) {
             "colorScale" => {
                 let Some(cs) = r.child("colorScale") else { continue };
                 let colors = cs.kids("color").map(|c| read_color(c, &cx.palette));
-                CfRule::ColorScale { stops: cfvos(cs).into_iter().zip(colors).collect() }
+                CfRule::ColorScale { stops: without_auto(cfvos(cs)).into_iter().zip(colors).collect() }
             }
             "dataBar" => {
                 let Some(db) = r.child("dataBar") else { continue };
@@ -101,7 +115,7 @@ pub(super) fn read_cf(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet) {
                 let Some(is) = r.child("iconSet") else { continue };
                 CfRule::IconSet {
                     set: is.attr("iconSet").unwrap_or("3TrafficLights1").to_string(),
-                    thresholds: cfvos(is),
+                    thresholds: without_auto(cfvos(is)),
                     reverse: is.flag("reverse", false),
                     show_value: is.flag("showValue", true),
                 }
