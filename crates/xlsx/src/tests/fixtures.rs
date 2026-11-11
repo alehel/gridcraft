@@ -705,8 +705,8 @@ fn custom_widths_equal_to_the_default_round_trip() {
 }
 
 /// `sheetFormatPr customHeight="1"` marks the default row height as set by hand even when it is
-/// the standard height: it is read into `Sheet::default_row_custom` and written back, so rows at
-/// the default height still don't grow to fit their text after a save.
+/// the standard height: it is read into `Sheet::default_row_custom` and written back, so a save
+/// keeps the attribute (row auto-fit doesn't depend on it).
 #[test]
 fn hand_set_standard_default_row_height_round_trips() {
     let body = r#"<sheetFormatPr defaultRowHeight="15" customHeight="1"/><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
