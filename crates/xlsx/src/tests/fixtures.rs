@@ -704,6 +704,30 @@ fn custom_widths_equal_to_the_default_round_trip() {
     assert_eq!(cols, [(Some(4), Some(7), true)]);
 }
 
+/// `sheetFormatPr customHeight="1"` marks the default row height as set by hand even when it is
+/// the standard height: it is read into `Sheet::default_row_custom` and written back, so rows at
+/// the default height still don't grow to fit their text after a save.
+#[test]
+fn hand_set_standard_default_row_height_round_trips() {
+    let body = r#"<sheetFormatPr defaultRowHeight="15" customHeight="1"/><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let (wb, _) = read_xlsx(&minimal(body, &[], "", "")).unwrap();
+    let s = wb.sheet(0).unwrap();
+    assert_eq!(s.default_row_height, gridcraft_model::DEFAULT_ROW_HEIGHT, "15pt is the standard height");
+    assert!(s.default_row_custom, "customHeight is read");
+    let bytes = crate::write_xlsx(&wb).unwrap();
+    let mut pkg = crate::package::Package::open(&bytes).unwrap();
+    let sheet = pkg.read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
+    assert!(sheet.child("sheetFormatPr").unwrap().flag("customHeight", false), "customHeight is written back");
+    assert!(read_xlsx(&bytes).unwrap().0.sheets[0].default_row_custom, "and survives a second open");
+    // Without the attribute the flag stays off and isn't written.
+    let (plain, _) = read_xlsx(&minimal(r#"<sheetFormatPr defaultRowHeight="15"/><sheetData/>"#, &[], "", "")).unwrap();
+    assert!(!plain.sheets[0].default_row_custom);
+    let plain_bytes = crate::write_xlsx(&plain).unwrap();
+    let mut pkg = crate::package::Package::open(&plain_bytes).unwrap();
+    let sheet = pkg.read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
+    assert!(!sheet.child("sheetFormatPr").unwrap().flag("customHeight", false));
+}
+
 #[test]
 fn every_skipped_drawing_object_is_reported() {
     let frame = |row: u32, rid: &str| {

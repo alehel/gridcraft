@@ -1647,6 +1647,32 @@ fn open_grows_default_height_rows_to_their_font() {
     assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(0), default_h, "11pt row stays default");
 }
 
+/// A sheet whose default row height was set by hand (`sheetFormatPr customHeight="1"`) keeps
+/// its default-height rows at that height: opening and editing don't grow them to their font,
+/// but AutoFit Row Height, asked for, still fits them.
+#[test]
+fn hand_set_default_row_height_rows_dont_auto_fit() {
+    let mut wb = gridcraft_xlsx::read_xlsx(&big_font_workbook(None, true)).unwrap().0;
+    wb.sheet_mut(0).unwrap().default_row_custom = true;
+    let bytes = gridcraft_xlsx::write_xlsx(&wb).unwrap();
+    let default_h = gridcraft_model::Workbook::new().active().unwrap().row_height(0);
+    let mut s = Session::new();
+    s.execute("file.open", json!({"name": "fixed.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(sh.default_row_custom, "the flag survives open");
+    assert_eq!(sh.row_height(4), default_h, "a 20pt cell doesn't grow a hand-set default-height row on open");
+    // Editing a cell doesn't fit the row either.
+    s.execute("cell.set", json!({"cell": "B5", "input": "more"})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(4), default_h, "editing leaves the row at the default");
+    // AutoFit Row Height is asked for: the row fits its font.
+    s.execute("home.autofitRowHeight", json!({"rows": "5:5"})).unwrap();
+    let h = s.doc().unwrap().wb.active().unwrap().row_height(4);
+    assert!(h >= 30.0, "AutoFit grows the row to its 20pt text, got {h}");
+    // Once fitted the row is automatic again: it follows its content.
+    s.execute("home.fontSize", json!({"range": "A5", "size": 11})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(4), default_h, "back to the default when the big font goes");
+}
+
 #[test]
 fn line_breaks_grow_a_row_only_when_the_cell_wraps() {
     // Excel: a cell holding "a\nb" with Wrap Text off displays on one line and AutoFit gives a
