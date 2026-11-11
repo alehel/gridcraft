@@ -139,6 +139,10 @@ pub enum CfOperator {
 pub enum CfValueKind {
     Min,
     Max,
+    /// A data bar's automatic bounds: the lowest value or zero, whichever is less, and the
+    /// highest value or zero, whichever is more (XLSX `autoMin`/`autoMax`, ODF `auto-minimum`).
+    AutoMin,
+    AutoMax,
     Number(f64),
     Percent(f64),
     Percentile(f64),

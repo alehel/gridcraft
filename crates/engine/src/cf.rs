@@ -118,6 +118,8 @@ fn threshold(wb: &Workbook, sheet: usize, at: CellRef, st: &RuleStats, k: &CfVal
     match k {
         CfValueKind::Min => min,
         CfValueKind::Max => max,
+        CfValueKind::AutoMin => min.min(0.0),
+        CfValueKind::AutoMax => max.max(0.0),
         CfValueKind::Number(n) => *n,
         CfValueKind::Percent(p) => min + (max - min) * p / 100.0,
         CfValueKind::Percentile(p) => percentile(&st.sorted, *p),
@@ -596,5 +598,30 @@ mod tests {
         assert_eq!([look("C1"), look("C2"), look("C3")], [false, true, false]);
         // Does not contain "a": #N/A and xyz, not abc.
         assert_eq!([look("D1"), look("D2"), look("D3")], [true, false, true]);
+    }
+
+    /// Automatic bounds reach zero: the lowest value or zero, whichever is less, and the highest
+    /// value or zero, whichever is more. All-negative values then fill up to zero.
+    #[test]
+    fn data_bar_automatic_bounds_reach_zero() {
+        let mut wb = Workbook::new();
+        let Some(sh) = wb.sheet_mut(0) else { return };
+        sh.set_value(CellRef::new(0, 0), Value::Number(-20.0));
+        sh.set_value(CellRef::new(1, 0), Value::Number(-10.0));
+        let bar = |max| CfRule::DataBar { min: CfValueKind::AutoMin, max, color: Color::Rgb(0x638EC6), gradient: true, show_value: true };
+        let frac = |wb: &Workbook| CfCache::new().look(wb, 0, CellRef::new(1, 0)).and_then(|l| l.bar).map(|b| b.0);
+        let rr = RangeRef::parse("A1:A2").unwrap();
+        let set = |wb: &mut Workbook, max| {
+            if let Some(sh) = wb.sheet_mut(0) {
+                sh.cond_formats = vec![CondFormat { ranges: vec![rr], rule: bar(max), priority: 1, stop_if_true: false }];
+            }
+        };
+        // Highest value: -10 is the top of a -20..-10 bar, so it is full.
+        set(&mut wb, CfValueKind::Max);
+        assert_eq!(frac(&wb), Some(1.0));
+        // Automatic highest: the bar runs -20..0, so -10 is half of it (0.1 + 0.5 * 0.9).
+        set(&mut wb, CfValueKind::AutoMax);
+        let f = frac(&wb).unwrap();
+        assert!((f - 0.55).abs() < 1e-6, "{f}");
     }
 }

@@ -745,8 +745,16 @@ fn read_ext(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet) {
                     for r in c.kids("conditionalFormatting").flat_map(|f| f.kids("cfRule")) {
                         let idx = r.attr("id").and_then(|id| cx.cf_ext_ids.iter().find(|(i, _)| i == id)).map(|(_, n)| *n);
                         match (idx.and_then(|n| sheet.cond_formats.get_mut(n)), r.child("dataBar")) {
-                            (Some(CondFormat { rule: CfRule::DataBar { gradient, .. }, .. }), Some(db)) => {
+                            (Some(CondFormat { rule: CfRule::DataBar { gradient, min, max, .. }, .. }), Some(db)) => {
                                 *gradient = db.flag("gradient", true);
+                                // Automatic bounds exist only here; the 2006 rule says min and max.
+                                let mut bounds = db.kids("cfvo");
+                                if bounds.next().and_then(|v| v.attr("type")) == Some("autoMin") {
+                                    *min = gridcraft_model::CfValueKind::AutoMin;
+                                }
+                                if bounds.next().and_then(|v| v.attr("type")) == Some("autoMax") {
+                                    *max = gridcraft_model::CfValueKind::AutoMax;
+                                }
                                 // Only the fill style is modelled; borders, lengths, axis or negative colours are lost.
                                 skipped |= db.attrs.iter().any(|(k, _)| k != "gradient") || db.children.iter().any(|k| k.name != "cfvo");
                             }

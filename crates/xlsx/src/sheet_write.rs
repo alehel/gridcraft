@@ -23,7 +23,7 @@ mod rules;
 
 pub(crate) use parts::password_attrs;
 use parts::{autofilter_xml, comments_xml, protected_ranges_xml, table_columns, table_name, table_xml, thread_ids, threaded_xml, vml_xml};
-use rules::{cf_rule_xml, solid_bar_id, validation_xml, x14_cfvo};
+use rules::{bar_needs_x14, cf_rule_xml, solid_bar_id, validation_xml, x14_cfvo};
 
 fn sqref(ranges: &[RangeRef]) -> String {
     ranges.iter().map(|r| r.a1()).collect::<Vec<_>>().join(" ")
@@ -234,7 +234,7 @@ fn write_sheet_extensions(s: &mut String, sheet: &Sheet, prio: &[u32]) {
         .cond_formats
         .iter()
         .enumerate()
-        .filter(|(_, cf)| !cf.ranges.is_empty() && matches!(cf.rule, CfRule::DataBar { gradient: false, .. }))
+        .filter(|(_, cf)| !cf.ranges.is_empty() && bar_needs_x14(&cf.rule))
         .map(|(i, cf)| (cf, prio.get(i).copied().unwrap_or(1)))
         .collect();
     if !solid_bars.is_empty() || !sheet.sparklines.is_empty() {
@@ -246,9 +246,10 @@ fn write_sheet_extensions(s: &mut String, sheet: &Sheet, prio: &[u32]) {
             "<ext uri=\"{{78C0D931-6437-407d-A8A1-0F90B4350D7D}}\" xmlns:x14=\"{X14_NS}\" xmlns:xm=\"{XM_NS}\"><x14:conditionalFormattings>"
         );
         for (cf, p) in &solid_bars {
-            if let CfRule::DataBar { min, max, .. } = &cf.rule {
+            if let CfRule::DataBar { min, max, gradient, .. } = &cf.rule {
                 let (id, lo, hi) = (solid_bar_id(*p), x14_cfvo(min), x14_cfvo(max));
-                let _ = write!(s, "<x14:conditionalFormatting><x14:cfRule type=\"dataBar\" id=\"{id}\"><x14:dataBar gradient=\"0\">{lo}{hi}");
+                let solid = if *gradient { "" } else { " gradient=\"0\"" };
+                let _ = write!(s, "<x14:conditionalFormatting><x14:cfRule type=\"dataBar\" id=\"{id}\"><x14:dataBar{solid}>{lo}{hi}");
                 let _ = write!(s, "</x14:dataBar></x14:cfRule><xm:sqref>{}</xm:sqref></x14:conditionalFormatting>", sqref(&cf.ranges));
             }
         }

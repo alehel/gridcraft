@@ -1374,6 +1374,29 @@ fn solid_data_bar_survives_with_sparklines_and_gradient_neighbours() {
     assert_eq!(b.sparklines.len(), 1);
 }
 
+/// A data bar's automatic bounds stay automatic through an XLSX save: read as the lowest and
+/// highest values, the smallest value's bar disappeared in LibreOffice. The 2006 rule says
+/// min/max; the Excel 2010 rule holds autoMin/autoMax.
+#[test]
+fn data_bar_automatic_bounds_round_trip() {
+    for gradient in [true, false] {
+        let mut wb = Workbook::new();
+        let s = wb.sheet_mut(0).unwrap();
+        s.set_value(at("A1"), Value::Number(10.0));
+        s.set_value(at("A2"), Value::Number(30.0));
+        let rule = CfRule::DataBar { min: CfValueKind::AutoMin, max: CfValueKind::AutoMax, color: Color::Rgb(0x638EC6), gradient, show_value: true };
+        s.cond_formats.push(CondFormat { ranges: vec![rr("A1:A2")], rule, priority: 1, stop_if_true: false });
+        let bytes = write_xlsx(&wb).unwrap();
+        let (xml, _) = sheet1_xml(&bytes);
+        assert!(xml.contains("<dataBar><cfvo type=\"min\"/><cfvo type=\"max\"/>"), "{xml}");
+        assert!(xml.contains("<x14:cfvo type=\"autoMin\"/><x14:cfvo type=\"autoMax\"/>"), "{xml}");
+        assert_eq!(xml.contains("<x14:dataBar gradient=\"0\">"), !gradient, "{xml}");
+        let (back, rep) = read_xlsx(&bytes).unwrap();
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+        assert_eq!(back.sheets[0].cond_formats, wb.sheets[0].cond_formats);
+    }
+}
+
 #[test]
 fn doc_props_keep_boundary_whitespace() {
     let mut wb = Workbook::new();
