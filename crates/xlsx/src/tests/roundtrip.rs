@@ -1391,6 +1391,8 @@ fn data_bar_automatic_bounds_round_trip() {
         assert!(xml.contains("<dataBar><cfvo type=\"min\"/><cfvo type=\"max\"/>"), "{xml}");
         assert!(xml.contains("<x14:cfvo type=\"autoMin\"/><x14:cfvo type=\"autoMax\"/>"), "{xml}");
         assert_eq!(xml.contains("<x14:dataBar gradient=\"0\">"), !gradient, "{xml}");
+        // MS-XLSX requires these at their attributes' defaults.
+        assert!(xml.contains("<x14:negativeFillColor rgb=\"FFFF0000\"/><x14:axisColor rgb=\"FF000000\"/></x14:dataBar>"), "{xml}");
         let (back, rep) = read_xlsx(&bytes).unwrap();
         assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
         assert_eq!(back.sheets[0].cond_formats, wb.sheets[0].cond_formats);
@@ -1401,7 +1403,6 @@ fn data_bar_automatic_bounds_round_trip() {
 /// they read as the lowest and highest values, so the colours don't shift towards zero.
 #[test]
 fn automatic_bounds_outside_data_bars_read_as_lowest_and_highest() {
-    use std::io::Write;
     let mut wb = Workbook::new();
     let s = wb.sheet_mut(0).unwrap();
     s.set_value(at("A1"), Value::Number(10.0));
@@ -1415,25 +1416,10 @@ fn automatic_bounds_outside_data_bars_read_as_lowest_and_highest() {
         s.cond_formats.push(CondFormat { ranges: vec![rr("A1:A2")], rule, priority: i as u32 + 1, stop_if_true: false });
     }
     // Rewrite every 2006 min/max bound as automatic.
-    let bytes = write_xlsx(&wb).unwrap();
-    let mut z = zip::ZipArchive::new(std::io::Cursor::new(&bytes[..])).unwrap();
-    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    for i in 0..z.len() {
-        let mut f = z.by_index(i).unwrap();
-        let mut data = Vec::new();
-        f.read_to_end(&mut data).unwrap();
-        if f.name() == "xl/worksheets/sheet1.xml" {
-            let xml = String::from_utf8(data).unwrap();
-            assert!(xml.contains("<cfvo type=\"min\"/>"), "{xml}");
-            data = xml
-                .replace("<cfvo type=\"min\"/>", "<cfvo type=\"autoMin\"/>")
-                .replace("<cfvo type=\"max\"/>", "<cfvo type=\"autoMax\"/>")
-                .into_bytes();
-        }
-        out.start_file(f.name(), zip::write::SimpleFileOptions::default()).unwrap();
-        out.write_all(&data).unwrap();
-    }
-    let bytes = out.finish().unwrap().into_inner();
+    let bytes = patch_sheet1(
+        &write_xlsx(&wb).unwrap(),
+        &[("<cfvo type=\"min\"/>", "<cfvo type=\"autoMin\"/>"), ("<cfvo type=\"max\"/>", "<cfvo type=\"autoMax\"/>")],
+    );
     let (back, _) = read_xlsx(&bytes).unwrap();
     let got: Vec<_> = back.sheets[0].cond_formats.iter().map(|c| c.rule.clone()).collect();
     assert!(matches!(&got[0], CfRule::ColorScale { stops } if stops[0].0 == CfValueKind::Min && stops[1].0 == CfValueKind::Max), "{got:?}");
@@ -1442,6 +1428,96 @@ fn automatic_bounds_outside_data_bars_read_as_lowest_and_highest() {
         "{got:?}"
     );
     assert!(matches!(&got[2], CfRule::DataBar { min: CfValueKind::AutoMin, max: CfValueKind::AutoMax, .. }), "{got:?}");
+}
+
+/// `sheet1.xml` of a saved workbook with each `(from, to)` replaced; each `from` must be there.
+fn patch_sheet1(bytes: &[u8], edits: &[(&str, &str)]) -> Vec<u8> {
+    use std::io::Write;
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for i in 0..z.len() {
+        let mut f = z.by_index(i).unwrap();
+        let mut data = Vec::new();
+        f.read_to_end(&mut data).unwrap();
+        if f.name() == "xl/worksheets/sheet1.xml" {
+            let mut xml = String::from_utf8(data).unwrap();
+            for (from, to) in edits {
+                assert!(xml.contains(from), "{from} not in {xml}");
+                xml = xml.replace(from, to);
+            }
+            data = xml.into_bytes();
+        }
+        out.start_file(f.name(), zip::write::SimpleFileOptions::default()).unwrap();
+        out.write_all(&data).unwrap();
+    }
+    out.finish().unwrap().into_inner()
+}
+
+/// A saved workbook holding one data bar over A1:A2, with the given bounds.
+fn data_bar_book(min: CfValueKind, max: CfValueKind, gradient: bool) -> Workbook {
+    let mut wb = Workbook::new();
+    let s = wb.sheet_mut(0).unwrap();
+    s.set_value(at("A1"), Value::Number(10.0));
+    s.set_value(at("A2"), Value::Number(30.0));
+    let rule = CfRule::DataBar { min, max, color: Color::Rgb(0x638EC6), gradient, show_value: true };
+    s.cond_formats.push(CondFormat { ranges: vec![rr("A1:A2")], rule, priority: 1, stop_if_true: false });
+    wb
+}
+
+fn bar_bounds_of(wb: &Workbook) -> (CfValueKind, CfValueKind) {
+    match &wb.sheets[0].cond_formats[0].rule {
+        CfRule::DataBar { min, max, .. } => (min.clone(), max.clone()),
+        r => panic!("{r:?}"),
+    }
+}
+
+/// An automatic bound in the other slot (`autoMax` as the lowest) reads as a plain bound, so a
+/// second save writes what the first did instead of losing its x14 rule.
+#[test]
+fn data_bar_automatic_bound_in_the_wrong_slot_reads_stably() {
+    let wb = data_bar_book(CfValueKind::Min, CfValueKind::Max, true);
+    let swapped = "<cfvo type=\"autoMax\"/><cfvo type=\"autoMin\"/>";
+    let bytes = patch_sheet1(&write_xlsx(&wb).unwrap(), &[("<cfvo type=\"min\"/><cfvo type=\"max\"/>", swapped)]);
+    let (first, _) = read_xlsx(&bytes).unwrap();
+    assert_eq!(bar_bounds_of(&first), (CfValueKind::Max, CfValueKind::Min));
+    let again = write_xlsx(&first).unwrap();
+    let (second, _) = read_xlsx(&again).unwrap();
+    assert_eq!(second.sheets[0].cond_formats, first.sheets[0].cond_formats);
+    assert_eq!(sheet1_xml(&write_xlsx(&second).unwrap()).0, sheet1_xml(&again).0);
+}
+
+/// The x14 bounds replace the 2006 ones, whatever their type: MS-XLSX says to ignore the 2006
+/// `cfvo`s of a linked rule. A typeless x14 `cfvo` leaves the 2006 bound.
+#[test]
+fn data_bar_x14_bounds_replace_the_2006_ones() {
+    let wb = data_bar_book(CfValueKind::AutoMin, CfValueKind::AutoMax, true);
+    let bytes = write_xlsx(&wb).unwrap();
+    // A 2006 rule that says autoMin, with an x14 rule that says min and a number.
+    let patched = patch_sheet1(
+        &bytes,
+        &[
+            ("<dataBar><cfvo type=\"min\"/>", "<dataBar><cfvo type=\"autoMin\"/>"),
+            ("<x14:cfvo type=\"autoMin\"/><x14:cfvo type=\"autoMax\"/>", "<x14:cfvo type=\"min\"/><x14:cfvo type=\"num\"><xm:f>25</xm:f></x14:cfvo>"),
+        ],
+    );
+    let (back, rep) = read_xlsx(&patched).unwrap();
+    assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+    assert_eq!(bar_bounds_of(&back), (CfValueKind::Min, CfValueKind::Number(25.0)));
+    let typeless = patch_sheet1(&bytes, &[("<x14:cfvo type=\"autoMin\"/>", "<x14:cfvo/>")]);
+    let (back, _) = read_xlsx(&typeless).unwrap();
+    assert_eq!(bar_bounds_of(&back), (CfValueKind::Min, CfValueKind::AutoMax));
+}
+
+/// A negative fill or axis colour other than the defaults the writer adds is not modelled, so
+/// opening it still warns.
+#[test]
+fn data_bar_x14_colours_warn_only_when_not_the_defaults() {
+    let bytes = write_xlsx(&data_bar_book(CfValueKind::AutoMin, CfValueKind::AutoMax, false)).unwrap();
+    assert!(read_xlsx(&bytes).unwrap().1.warnings.is_empty());
+    let red = patch_sheet1(&bytes, &[("<x14:axisColor rgb=\"FF000000\"/>", "<x14:axisColor rgb=\"FF00FF00\"/>")]);
+    let (back, rep) = read_xlsx(&red).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.contains("Excel 2010 conditional format")), "{:?}", rep.warnings);
+    assert_eq!(bar_bounds_of(&back), (CfValueKind::AutoMin, CfValueKind::AutoMax));
 }
 
 #[test]

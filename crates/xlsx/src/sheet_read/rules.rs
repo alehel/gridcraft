@@ -31,6 +31,15 @@ fn cfvo(e: &El) -> CfValueKind {
     }
 }
 
+/// Whether an x14 `dataBar` child reads without loss: a bound, or a colour the writer adds at its
+/// default value.
+pub(super) fn x14_bar_child_kept(k: &El) -> bool {
+    k.name == "cfvo"
+        || crate::sheet_write::X14_BAR_COLORS.iter().any(|(name, rgb)| {
+            k.name == *name && k.children.is_empty() && k.attrs.len() == 1 && k.attr("rgb").is_some_and(|v| v.eq_ignore_ascii_case(rgb))
+        })
+}
+
 /// Automatic bounds belong to data bars only: in a colour scale or an icon set they read as the
 /// lowest and highest values, as before they were modelled.
 fn without_auto(v: Vec<CfValueKind>) -> Vec<CfValueKind> {
@@ -43,20 +52,32 @@ fn without_auto(v: Vec<CfValueKind>) -> Vec<CfValueKind> {
         .collect()
 }
 
+/// A `cfvo` element: a plain one, or an x14 one with the value in an `xm:f` child.
+fn cfvo_el(c: &El) -> CfValueKind {
+    if c.attr("val").is_none()
+        && let Some(f) = c.child("f")
+    {
+        let mut c2 = c.clone();
+        c2.attrs.push(("val".into(), f.text.clone()));
+        return cfvo(&c2);
+    }
+    cfvo(c)
+}
+
 /// `cfvo` elements: plain children, or x14 ones with the value in an `xm:f` child.
 fn cfvos(e: &El) -> Vec<CfValueKind> {
-    e.kids("cfvo")
-        .map(|c| {
-            if c.attr("val").is_none()
-                && let Some(f) = c.child("f")
-            {
-                let mut c2 = c.clone();
-                c2.attrs.push(("val".into(), f.text.clone()));
-                return cfvo(&c2);
-            }
-            cfvo(c)
-        })
-        .collect()
+    e.kids("cfvo").map(cfvo_el).collect()
+}
+
+/// A data bar's two bounds, the lowest then the highest, from its `cfvo` children (a 2006 or an
+/// x14 `dataBar`). In an x14 one, a `cfvo` without its required `type` gives no bound, so the 2006
+/// one stays. An automatic bound counts only in its own slot: `autoMax` as the lowest, or `autoMin`
+/// as the highest, reads as a plain highest or lowest value, which the writer saves as it reads.
+pub(super) fn bar_bounds(db: &El, x14: bool) -> [Option<CfValueKind>; 2] {
+    let mut v = db.kids("cfvo").map(|c| (!x14 || c.attr("type").is_some()).then(|| cfvo_el(c)));
+    let lo = v.next().flatten().map(|k| if k == CfValueKind::AutoMax { CfValueKind::Max } else { k });
+    let hi = v.next().flatten().map(|k| if k == CfValueKind::AutoMin { CfValueKind::Min } else { k });
+    [lo, hi]
 }
 
 pub(super) fn read_cf(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet) {
@@ -102,10 +123,10 @@ pub(super) fn read_cf(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet) {
             }
             "dataBar" => {
                 let Some(db) = r.child("dataBar") else { continue };
-                let v = cfvos(db);
+                let [lo, hi] = bar_bounds(db, false);
                 CfRule::DataBar {
-                    min: v.first().cloned().unwrap_or(CfValueKind::Min),
-                    max: v.get(1).cloned().unwrap_or(CfValueKind::Max),
+                    min: lo.unwrap_or(CfValueKind::Min),
+                    max: hi.unwrap_or(CfValueKind::Max),
                     color: db.child("color").map(|c| read_color(c, &cx.palette)).unwrap_or_default(),
                     gradient: true,
                     show_value: db.flag("showValue", true),

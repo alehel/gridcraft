@@ -747,16 +747,17 @@ fn read_ext(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet) {
                         match (idx.and_then(|n| sheet.cond_formats.get_mut(n)), r.child("dataBar")) {
                             (Some(CondFormat { rule: CfRule::DataBar { gradient, min, max, .. }, .. }), Some(db)) => {
                                 *gradient = db.flag("gradient", true);
-                                // Automatic bounds exist only here; the 2006 rule says min and max.
-                                let mut bounds = db.kids("cfvo");
-                                if bounds.next().and_then(|v| v.attr("type")) == Some("autoMin") {
-                                    *min = gridcraft_model::CfValueKind::AutoMin;
+                                // The x14 bounds replace the 2006 ones, which can't say autoMin/autoMax.
+                                let [lo, hi] = rules::bar_bounds(db, true);
+                                if let Some(lo) = lo {
+                                    *min = lo;
                                 }
-                                if bounds.next().and_then(|v| v.attr("type")) == Some("autoMax") {
-                                    *max = gridcraft_model::CfValueKind::AutoMax;
+                                if let Some(hi) = hi {
+                                    *max = hi;
                                 }
                                 // Only the fill style is modelled; borders, lengths, axis or negative colours are lost.
-                                skipped |= db.attrs.iter().any(|(k, _)| k != "gradient") || db.children.iter().any(|k| k.name != "cfvo");
+                                // The default negative fill and axis colours the writer adds lose nothing.
+                                skipped |= db.attrs.iter().any(|(k, _)| k != "gradient") || db.children.iter().any(|k| !rules::x14_bar_child_kept(k));
                             }
                             _ => skipped = true,
                         }

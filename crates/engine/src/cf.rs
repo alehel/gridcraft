@@ -601,7 +601,8 @@ mod tests {
     }
 
     /// Automatic bounds reach zero: the lowest value or zero, whichever is less, and the highest
-    /// value or zero, whichever is more. All-negative values then fill up to zero.
+    /// value or zero, whichever is more. This checks the bounds only; bars are drawn from the
+    /// lowest bound, as before, with no axis at zero for negative values.
     #[test]
     fn data_bar_automatic_bounds_reach_zero() {
         let mut wb = Workbook::new();
@@ -623,5 +624,15 @@ mod tests {
         set(&mut wb, CfValueKind::AutoMax);
         let f = frac(&wb).unwrap();
         assert!((f - 0.55).abs() < 1e-6, "{f}");
+        // Automatic lowest, seen through a colour scale (a data bar already starts positive values
+        // at zero): over 10 and 20 the scale runs 0..20, so 10 is half way from black to white.
+        if let Some(sh) = wb.sheet_mut(0) {
+            sh.set_value(CellRef::new(0, 0), Value::Number(20.0));
+            sh.set_value(CellRef::new(1, 0), Value::Number(10.0));
+            let stops = vec![(CfValueKind::AutoMin, Color::Rgb(0x000000)), (CfValueKind::Max, Color::Rgb(0xFFFFFF))];
+            sh.cond_formats = vec![CondFormat { ranges: vec![rr], rule: CfRule::ColorScale { stops }, priority: 1, stop_if_true: false }];
+        }
+        let fill = CfCache::new().look(&wb, 0, CellRef::new(1, 0)).and_then(|l| l.scale_fill);
+        assert!(fill.is_some_and(|[r, ..]| (126..=129).contains(&r)), "{fill:?}");
     }
 }

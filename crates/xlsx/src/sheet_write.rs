@@ -250,6 +250,9 @@ fn write_sheet_extensions(s: &mut String, sheet: &Sheet, prio: &[u32]) {
                 let (id, lo, hi) = (solid_bar_id(*p), x14_cfvo(min), x14_cfvo(max));
                 let solid = if *gradient { "" } else { " gradient=\"0\"" };
                 let _ = write!(s, "<x14:conditionalFormatting><x14:cfRule type=\"dataBar\" id=\"{id}\"><x14:dataBar{solid}>{lo}{hi}");
+                for (name, rgb) in X14_BAR_COLORS {
+                    let _ = write!(s, "<x14:{name} rgb=\"{rgb}\"/>");
+                }
                 let _ = write!(s, "</x14:dataBar></x14:cfRule><xm:sqref>{}</xm:sqref></x14:conditionalFormatting>", sqref(&cf.ranges));
             }
         }
@@ -825,6 +828,11 @@ fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_
 }
 
 const X14_NS: &str = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main";
+
+/// The x14 `dataBar` children MS-XLSX requires at their attributes' defaults (a negative fill
+/// colour unless negative bars share the positive one, an axis colour unless there is no axis),
+/// written as Excel's defaults: red negative bars, a black axis.
+pub(crate) const X14_BAR_COLORS: [(&str, &str); 2] = [("negativeFillColor", "FFFF0000"), ("axisColor", "FF000000")];
 const XM_NS: &str = "http://schemas.microsoft.com/office/excel/2006/main";
 
 /// The box a note made here gets: two columns right of its cell, four rows tall, 108 x 59.25 pt.
