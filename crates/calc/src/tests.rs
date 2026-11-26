@@ -368,6 +368,24 @@ fn iterative_calculation_of_text_and_errors() {
     assert_eq!(t.get("B1"), Value::Error(CellError::Div0));
 }
 
+/// `&`, CONCAT and TEXTJOIN turn a number into at most 15 significant digits, decimal unless that
+/// would need 16 integer digits or more than 21 characters below 1.
+#[test]
+fn text_joins_convert_numbers_to_15_significant_digits() {
+    let mut t = T::new();
+    for (formula, text) in [
+        ("=(1E15-0.5)&\"\"", "1E+15"),
+        ("=(999999999999999)&\"\"", "999999999999999"),
+        ("=1234567890123456&\"\"", "1.23456789012346E+15"),
+        ("=(9.99999999999999E-9)&\"\"", "9.99999999999999E-09"),
+        ("=CONCAT(1/3*1E-5)", "3.33333333333333E-06"),
+        ("=TEXTJOIN(\",\",TRUE,1/3*1E-4,0.1+0.2)", "0.0000333333333333333,0.3"),
+    ] {
+        t.set("A1", formula);
+        assert_eq!(t.get("A1"), Value::from(text), "{formula}");
+    }
+}
+
 #[test]
 fn circular_references_without_iterative_calculation() {
     let mut t = T::new();
@@ -704,6 +722,53 @@ fn spill_into_the_old_area_of_a_blocked_neighbour() {
     t.set("C8", "=SEQUENCE(2,2)");
     assert_eq!(t.get("C7"), Value::Error(CellError::Spill));
     assert_eq!([t.num("C8"), t.num("D8"), t.num("C9"), t.num("D9")], [1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn a_full_recalc_keeps_a_spill_from_an_array_that_grew_into_it() {
+    // Both arrays spill; in manual calculation F13 then grows over F14:G14, which C14's array
+    // fills. A full recalculation gives what an automatic one would: C14 keeps its cells and F13
+    // is #SPILL!, although F13 comes first in reading order.
+    let mut t = T::new();
+    t.set("J1", "1");
+    t.set("C14", "=SEQUENCE(1,7)");
+    t.set("F13", "=SEQUENCE(J1,2)");
+    assert_eq!([t.num("F13"), t.num("G13")], [1.0, 2.0]);
+    t.wb.calc.mode = gridcraft_model::CalcMode::Manual;
+    t.set("J1", "5");
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(t.get("F13"), Value::Error(CellError::Spill));
+    assert_eq!([t.num("C14"), t.num("F14"), t.num("G14"), t.num("I14")], [1.0, 4.0, 5.0, 7.0]);
+}
+
+#[test]
+fn a_full_recalc_lays_out_arrays_as_an_automatic_one_when_one_shrinks_for_another() {
+    // C1 grows into C3, which A3's array fills, and A3 grows into E3, which E1's array leaves.
+    // Automatic recalculation lays them out in reading order with each former area still filled:
+    // C1 is #SPILL! and A3 takes A3:E3. A full recalculation after the same edit in manual
+    // calculation gives the same sheet.
+    let build = |manual: bool| {
+        let mut t = T::new();
+        t.set("J1", "2");
+        t.set("C1", "=SEQUENCE(J1)");
+        t.set("A3", "=SEQUENCE(1,J1+1)");
+        t.set("E1", "=SEQUENCE(5-J1)");
+        assert_eq!([t.num("C2"), t.num("C3"), t.num("E3")], [2.0, 3.0, 3.0]);
+        if manual {
+            t.wb.calc.mode = gridcraft_model::CalcMode::Manual;
+        }
+        t.set("J1", "4");
+        if manual {
+            t.calc.recalc_all(&mut t.wb);
+        }
+        t
+    };
+    let (automatic, full) = (build(false), build(true));
+    assert_eq!(automatic.get("C1"), Value::Error(CellError::Spill));
+    assert_eq!([automatic.num("A3"), automatic.num("C3"), automatic.num("E3")], [1.0, 3.0, 5.0]);
+    for cell in ["A1", "C1", "C2", "C3", "C4", "E1", "E2", "A3", "B3", "C3", "D3", "E3"] {
+        assert_eq!(full.get(cell), automatic.get(cell), "{cell}");
+    }
 }
 
 #[test]
@@ -1968,6 +2033,65 @@ fn offset_extreme_arguments_return_ref() {
     ] {
         assert_eq!(crate::evaluate(&wb, 0, c("D1"), formula), Value::Number(expected), "{formula}");
     }
+}
+
+/// Sorting and ranking compare numbers exactly while `=` and COUNTIF compare them at 15
+/// significant digits. Every expectation was observed in Excel 365 with these fixtures
+/// (`=0.1+0.2` is 0.30000000000000004): 0.3 sorts first whatever the input order.
+#[test]
+fn sorts_and_ranks_compare_numbers_exactly() {
+    let mut t = T::new();
+    for (at, input) in [
+        // The noisy value first, then the exact one first.
+        ("A1", "=0.1+0.2"),
+        ("B1", "e"),
+        ("A2", "0.3"),
+        ("B2", "t"),
+        ("D1", "0.3"),
+        ("E1", "t"),
+        ("D2", "=0.1+0.2"),
+        ("E2", "e"),
+        ("G1", "=100+1E-14"),
+        ("H1", "e"),
+        ("G2", "100"),
+        ("H2", "t"),
+    ] {
+        t.set(at, input);
+    }
+    let e = 0.1 + 0.2;
+    let n = Value::Number;
+    let s = |x: &str| Value::from(x);
+    let cases: Vec<(&str, Value)> = vec![
+        ("=A1=A2", Value::Bool(true)),
+        ("=COUNTIF(A1:A2,0.3)", n(2.0)),
+        ("=INDEX(SORT(A1:B2),1,2)", s("t")),
+        ("=INDEX(SORT(D1:E2),1,2)", s("t")),
+        ("=INDEX(SORT(A1:B2,1,-1),1,2)", s("e")),
+        ("=INDEX(SORT(D1:E2,1,-1),1,2)", s("e")),
+        ("=INDEX(SORT(G1:H2),1,2)", s("t")),
+        ("=INDEX(SORT(G1:H2,1,-1),1,2)", s("e")),
+        ("=INDEX(SORTBY(B1:B2,A1:A2),1,1)", s("t")),
+        ("=INDEX(SORTBY(E1:E2,D1:D2),1,1)", s("t")),
+        ("=INDEX(SORTBY(B1:B2,A1:A2,-1),1,1)", s("e")),
+        ("=INDEX(SORTBY(E1:E2,D1:D2,-1),1,1)", s("e")),
+        // Already exact: UNIQUE, RANK, LARGE/SMALL, MODE.
+        ("=ROWS(UNIQUE(A1:A2))", n(2.0)),
+        ("=RANK.EQ(0.3,A1:A2)", n(2.0)),
+        ("=RANK.EQ(0.3,A1:A2,1)", n(1.0)),
+        ("=RANK.AVG(0.3,A1:A2)", n(2.0)),
+        ("=RANK.EQ(0.3,A1)", Value::Error(CellError::NA)),
+        ("=LARGE(A1:A2,1)", n(e)),
+        ("=SMALL(A1:A2,1)", n(0.3)),
+        ("=MODE.SNGL(A1:A2,5)", Value::Error(CellError::NA)),
+    ];
+    let mut wrong = Vec::new();
+    for (formula, expected) in cases {
+        let got = crate::evaluate(&t.wb, 0, c("Z1"), formula);
+        if got != expected {
+            wrong.push(format!("{formula}: got {got:?}, Excel {expected:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// `@` intersects a reference with the formula's row (a column range) or column (a row range);
