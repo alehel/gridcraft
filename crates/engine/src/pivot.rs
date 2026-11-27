@@ -8,12 +8,11 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use gridcraft_core::date::datetime_from_serial;
 pub use gridcraft_core::quote_sheet;
-use gridcraft_core::{CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, split_sheet};
+use gridcraft_core::{CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, number_to_text};
 use gridcraft_model::{
-    BorderLine, BorderStyle, Cell, Chart, Color, Fill, HAlign, NumFmt, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotShowAs,
-    PivotSort, PivotTable, PivotValue, Series, Style, StyleId, Workbook,
+    BorderLine, BorderStyle, Cell, Chart, Color, Fill, HAlign, NumFmt, PivotDataCell, PivotDateGroup, PivotField, PivotFilter, PivotFunc,
+    PivotItemRef, PivotLayout, PivotLookup, PivotShowAs, PivotSort, PivotTable, PivotValue, Series, Style, StyleId, Workbook,
 };
 
 use crate::pivot_calc::CalcSet;
@@ -32,7 +31,6 @@ pub use items::{distinct_labels, func_caption, item_label};
 use output::data_cols_exceed_sheet;
 pub use output::{CellKind, OutCell, Output, RowKind};
 use output::{cell_style, look};
-
 /// Largest source block read (cells).
 pub const MAX_SOURCE_CELLS: u64 = 10_000_000;
 /// Largest report written (cells).
@@ -41,8 +39,9 @@ pub const MAX_OUTPUT_CELLS: u64 = 2_000_000;
 pub const MAX_AXIS_FIELDS: usize = 32;
 /// Most fields in the Values area.
 pub const MAX_VALUE_FIELDS: usize = 256;
-
-const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/// Most report value cells a report may have (every one is indexed for GETPIVOTDATA; bigger
+/// reports are rejected).
+pub const MAX_INDEXED_CELLS: usize = 1_000_000;
 
 // ---------------------------------------------------------------- source
 
@@ -58,11 +57,51 @@ pub struct Source {
     /// Numeric with a date number format.
     pub dates: Vec<bool>,
     pub rows: Vec<Vec<Value>>,
+    /// The sheet row of each record (blank rows are skipped).
+    pub record_rows: Vec<u32>,
 }
 
 impl Source {
     pub fn col(&self, name: &str) -> Option<usize> {
         self.headers.iter().position(|h| h.eq_ignore_ascii_case(name))
+    }
+    /// Per record: the column's cell is a number whose own format is a date (Excel caches such
+    /// a number as `<d>` and sorts it after errors), and no cell of the column holds that number
+    /// with a non-date format: a number in any General cell is a number item, whatever the row
+    /// order or report filter. Looks up each distinct style once.
+    pub fn date_cells(&self, wb: &Workbook, col: usize) -> Vec<bool> {
+        let (Some(sh), Ok(off)) = (wb.sheet(self.sheet), u32::try_from(col)) else {
+            return vec![false; self.rows.len()];
+        };
+        let c = self.range.start.col + off;
+        let mut memo: HashMap<StyleId, bool> = HashMap::new();
+        let mut dates: Vec<bool> = self
+            .rows
+            .iter()
+            .zip(&self.record_rows)
+            .map(|(rec, &row)| {
+                rec.get(col).is_some_and(Value::is_number)
+                    && *memo
+                        .entry(sh.style_id(CellRef::new(row, c)))
+                        .or_insert_with_key(|id| crate::display::number_format(wb.styles.get(*id).num_fmt.as_str()).is_date())
+            })
+            .collect();
+        if !dates.contains(&true) {
+            return dates;
+        }
+        let number = |rec: &Vec<Value>| match rec.get(col) {
+            Some(Value::Number(n)) => Some(n.to_bits()),
+            _ => None,
+        };
+        let general: HashSet<u64> = dates.iter().zip(&self.rows).filter(|(d, _)| !**d).filter_map(|(_, rec)| number(rec)).collect();
+        if !general.is_empty() {
+            for (d, rec) in dates.iter_mut().zip(&self.rows) {
+                if *d && number(rec).is_some_and(|n| general.contains(&n)) {
+                    *d = false;
+                }
+            }
+        }
+        dates
     }
 }
 
@@ -74,50 +113,8 @@ pub fn range_text(sheet_name: &str, r: RangeRef) -> String {
 
 /// Resolves source text (range, table name or defined name) to (sheet, range including header).
 pub fn resolve_source(wb: &Workbook, text: &str, default_sheet: usize) -> Result<(usize, RangeRef), String> {
-    resolve_inner(wb, text, default_sheet, 0)
+    gridcraft_model::pivot_source::resolve(wb, text, default_sheet)
 }
-
-fn resolve_inner(wb: &Workbook, text: &str, default_sheet: usize, depth: u32) -> Result<(usize, RangeRef), String> {
-    const INVALID: &str = "The reference isn't valid.";
-    let t = text.trim().trim_start_matches('=').trim();
-    if t.is_empty() || depth > 4 {
-        return Err(INVALID.into());
-    }
-    if let Some((si, ti)) = wb.table(t)
-        && let Some(tb) = wb.sheet(si).and_then(|s| s.tables.get(ti))
-    {
-        if !tb.header_row {
-            return Err("The table needs a header row to be used as a PivotTable source.".into());
-        }
-        let end_row = tb.range.end.row.saturating_sub(tb.totals_row as u32).max(tb.range.start.row);
-        return Ok((si, RangeRef::new(tb.range.start, CellRef::new(end_row, tb.range.end.col))));
-    }
-    let (sheet, body) = split_sheet(t);
-    if let Some(r) = RangeRef::parse(body) {
-        let si = match sheet {
-            Some(n) => wb.sheet_index(&n).ok_or_else(|| INVALID.to_string())?,
-            None => default_sheet,
-        };
-        let sh = wb.sheet(si).ok_or_else(|| INVALID.to_string())?;
-        let r = if r.is_full_cols() || r.is_full_rows() {
-            let used = sh.used_range().ok_or_else(|| INVALID.to_string())?;
-            r.intersection(&used).ok_or_else(|| INVALID.to_string())?
-        } else {
-            r
-        };
-        return Ok((si, r));
-    }
-    if sheet.is_none()
-        && let Some(n) = wb.name(t, default_sheet)
-    {
-        let f = n.formula.clone();
-        return resolve_inner(wb, &f, default_sheet, depth + 1);
-    }
-    Err(INVALID.into())
-}
-
-const FIELD_NAME_ERR: &str =
-    "The PivotTable field name is not valid. To create a PivotTable, you must use data that is organized as a list with labeled columns.";
 
 /// Reads the source list.
 pub fn read_source(wb: &Workbook, text: &str, default_sheet: usize) -> Result<Source, String> {
@@ -126,36 +123,11 @@ pub fn read_source(wb: &Workbook, text: &str, default_sheet: usize) -> Result<So
     if r.count() > MAX_SOURCE_CELLS {
         return Err("The source range is too large for a PivotTable.".into());
     }
-    let mut headers: Vec<String> = Vec::new();
-    // Names taken so far (lower-case), and the next suffix to try for each repeated header, so
-    // that thousands of equal headers don't take cubic time.
-    let mut taken: HashSet<String> = HashSet::new();
-    let mut next_suffix: HashMap<String, usize> = HashMap::new();
-    let mut formats = Vec::new();
-    for c in r.start.col..=r.end.col {
-        let h = crate::display::cell_text(wb, sh, CellRef::new(r.start.row, c)).trim().to_string();
-        if h.is_empty() {
-            return Err(FIELD_NAME_ERR.into());
-        }
-        let key = h.to_ascii_lowercase();
-        let mut n = h.clone();
-        let mut k = next_suffix.get(&key).copied().unwrap_or(2);
-        while taken.contains(&n.to_ascii_lowercase()) {
-            n = format!("{h}{k}");
-            k += 1;
-        }
-        next_suffix.insert(key, k);
-        taken.insert(n.to_ascii_lowercase());
-        headers.push(n);
-        let fmt = if r.end.row > r.start.row {
-            wb.styles.get(sh.style_id(CellRef::new(r.start.row + 1, c))).num_fmt.as_str().to_string()
-        } else {
-            "General".into()
-        };
-        formats.push(fmt);
-    }
+    let headers = gridcraft_model::pivot_source::headers(wb, si, r)?;
+    let formats: Vec<String> = (r.start.col..=r.end.col).map(|c| gridcraft_model::pivot_source::column_format(wb, si, r, c)).collect();
     let w = headers.len();
     let mut rows = Vec::new();
+    let mut record_rows = Vec::new();
     let mut numeric = vec![true; w];
     let mut any = vec![false; w];
     if r.end.row > r.start.row {
@@ -176,6 +148,7 @@ pub fn read_source(wb: &Workbook, text: &str, default_sheet: usize) -> Result<So
                     }
                 }
             }
+            record_rows.push(row);
             rows.push(rec);
         }
     }
@@ -183,13 +156,214 @@ pub fn read_source(wb: &Workbook, text: &str, default_sheet: usize) -> Result<So
         *n = *n && *a;
     }
     let dates = numeric.iter().zip(formats.iter()).map(|(n, f)| *n && crate::display::parsed(f).is_date()).collect();
-    Ok(Source { sheet: si, range: r, headers, formats, numeric, dates, rows })
+    Ok(Source { sheet: si, range: r, headers, formats, numeric, dates, rows, record_rows })
 }
 
 /// Computes a PivotTable report from the workbook.
 pub fn compute(wb: &Workbook, pt: &PivotTable, pivot_sheet: usize) -> Result<Output, String> {
     let src = read_source(wb, &pt.source, pivot_sheet)?;
     compute_from(wb, pt, &src, None)
+}
+
+/// Brings the PivotTables an older GridCraft saved to how fields are named now, each once. Every
+/// reader of a PivotTable (the report, edits, the field list, Show Details, GETPIVOTDATA, file
+/// writers) then sees one set of names. It runs wherever cells have just taken their values: as a
+/// workbook is opened, and after each edit and recalculation, so a PivotTable whose source can't
+/// be read (a blank header) is renamed as soon as it can. One already renamed costs a flag test.
+/// Returns a cell of each report renamed, for the caller to recalculate the GETPIVOTDATA formulas
+/// that read it: they were calculated with the old names, since headers need their values first.
+#[must_use]
+pub fn migrate_older_names(wb: &mut Workbook) -> Vec<(usize, CellRef)> {
+    reports(&migrate_staged(wb))
+}
+
+/// A PivotTable [`migrate_staged`] renamed: where it is, the definition it had, and the header
+/// readings its new names came from.
+pub(crate) struct Renamed {
+    sheet: usize,
+    idx: usize,
+    before: PivotTable,
+    read: Readings,
+}
+
+/// The header readings a rename reads: each column's current name, the headers as the sheet
+/// showed them without (`[0]`) and with (`[1]`) Show Formulas, and the sheet's own setting.
+#[derive(PartialEq)]
+struct Readings {
+    current: Vec<String>,
+    shown: [Option<Vec<String>>; 2],
+    show_formulas: bool,
+}
+
+/// As [`migrate_older_names`], keeping what each rename needs to be put back.
+pub(crate) fn migrate_staged(wb: &mut Workbook) -> Vec<Renamed> {
+    let mut updates: Vec<(Renamed, PivotTable)> = Vec::new();
+    for (si, sh) in wb.sheets.iter().enumerate() {
+        for (pi, pt) in sh.pivots.iter().enumerate() {
+            if !pt.names_from_values
+                && let Some(read) = readings(wb, pt, si)
+            {
+                let new = migrated(pt, &read);
+                updates.push((Renamed { sheet: si, idx: pi, before: pt.clone(), read }, new));
+            }
+        }
+    }
+    let mut done = Vec::new();
+    for (r, new) in updates {
+        if let Some(slot) = wb.sheet_mut(r.sheet).and_then(|sh| sh.pivots.get_mut(r.idx)) {
+            *slot = new;
+            done.push(r);
+        }
+    }
+    done
+}
+
+/// A cell of each renamed PivotTable's report.
+pub(crate) fn reports(renamed: &[Renamed]) -> Vec<(usize, CellRef)> {
+    renamed.iter().filter_map(|r| r.before.last_range.map(|a| (r.sheet, a.start))).collect()
+}
+
+/// Puts back each renamed PivotTable whose headers read differently now: the recalculation that
+/// followed the renames changed them (a header reading another report), so its names came from
+/// stale values. It is renamed again by the next [`migrate_staged`] that can read it. Returns a
+/// cell of each report put back, for the caller to recalculate what was read with its new names.
+pub(crate) fn undo_stale(wb: &mut Workbook, renamed: Vec<Renamed>) -> Vec<(usize, CellRef)> {
+    let mut back = Vec::new();
+    for r in renamed {
+        if readings(wb, &r.before, r.sheet).is_none_or(|now| now != r.read)
+            && let Some(slot) = wb.sheet_mut(r.sheet).and_then(|sh| sh.pivots.get_mut(r.idx))
+        {
+            back.extend(r.before.last_range.map(|a| (r.sheet, a.start)));
+            *slot = r.before;
+        }
+    }
+    back
+}
+
+/// The header readings of a PivotTable's source; `None` when the source can't be read.
+fn readings(wb: &Workbook, pt: &PivotTable, pivot_sheet: usize) -> Option<Readings> {
+    use gridcraft_model::pivot_source::{headers, unique_names};
+    let (si, r) = resolve_source(wb, &pt.source, pivot_sheet).ok()?;
+    let sh = wb.sheet(si)?;
+    let current = headers(wb, si, r).ok()?;
+    let shown = |formulas: bool| {
+        unique_names((r.start.col..=r.end.col).map(|c| crate::display::cell_text_with(wb, sh, CellRef::new(r.start.row, c), formulas))).ok()
+    };
+    Some(Readings { current, shown: [shown(false), shown(true)], show_formulas: sh.show_formulas })
+}
+
+/// A PivotTable saved by an older GridCraft, with its fields named by header value as `read`
+/// reads its source.
+///
+/// Older GridCraft named a column by its header as the cell showed it: the formula under Show
+/// Formulas (`="Region"`), a long General number narrowed to the cell width. Now a header is its
+/// value through its number format. The saved names are read against the headers as the sheet
+/// showed them, both ways (with and without Show Formulas), by one rule for each name:
+/// - the layout that places more of the saved names (the fields', and those calculated fields'
+///   formulas use) is read first, the sheet's own Show Formulas setting on a tie;
+/// - a name it places takes that column;
+/// - a name only the other layout places takes that layout's column, unless a name the first
+///   layout placed already has it (then two names would read one column);
+/// - a name neither places is left as it is.
+///
+/// Each field then takes the current name of its column, and so does each field a calculated
+/// formula, a sort by value's scope or GETPIVOTDATA's saved index names. A calculated field whose name is now also a header
+/// is renamed (`Margin2`), with the values that show it, as Excel doesn't allow the two to share a
+/// name. Worksheet formulas are not rewritten: GETPIVOTDATA knows a field by its current name only.
+fn migrated(pt: &PivotTable, read: &Readings) -> PivotTable {
+    let current = &read.current;
+    let calc_name = |n: &str| pt.calculated_fields.iter().any(|c| c.name.trim().eq_ignore_ascii_case(n.trim()));
+    let axes = pt.rows.iter().chain(&pt.columns).map(|f| f.source_col.clone());
+    let filters = pt.filters.iter().map(|f| f.source_col.clone());
+    let values = pt.values.iter().map(|v| v.source_col.clone());
+    let formulas = pt.calculated_fields.iter().flat_map(|c| crate::pivot_calc::field_names(&c.formula));
+    // Each saved name that can only be a column's, once however often it is used.
+    let mut seen = HashSet::new();
+    let fields: Vec<String> =
+        axes.chain(filters).chain(values.chain(formulas).filter(|n| !calc_name(n))).filter(|n| seen.insert(n.trim().to_ascii_lowercase())).collect();
+    let saved_way = read.show_formulas;
+    let lists = [read.shown[usize::from(saved_way)].clone(), read.shown[usize::from(!saved_way)].clone()];
+    let pos = |l: &Option<Vec<String>>, n: &str| l.as_ref()?.iter().position(|h| h.trim().eq_ignore_ascii_case(n.trim()));
+    let placed = |l: &Option<Vec<String>>| fields.iter().filter(|n| pos(l, n).is_some()).count();
+    let [saved_list, other_list] = &lists;
+    let (first, second) = if placed(other_list) > placed(saved_list) { (other_list, saved_list) } else { (saved_list, other_list) };
+    // Columns the first layout gives the saved names: the second layout can't give them again.
+    let claimed: Vec<usize> = fields.iter().filter_map(|n| pos(first, n)).collect();
+
+    // Calculated fields keep their own names unless a header now has one of them.
+    let mut calc_names: Vec<String> = Vec::new();
+    for c in &pt.calculated_fields {
+        let taken = |n: &str| current.iter().chain(&calc_names).any(|h| h.eq_ignore_ascii_case(n));
+        let base = c.name.trim();
+        let mut name = base.to_string();
+        let mut k = 2;
+        while taken(&name) {
+            name = format!("{base}{k}");
+            k += 1;
+        }
+        calc_names.push(name);
+    }
+    // A saved name's new name: the column it named, else the calculated field it named.
+    let column = |n: &str| -> Option<String> {
+        let i = pos(first, n).or_else(|| pos(second, n).filter(|i| !claimed.contains(i)))?;
+        current.get(i).cloned()
+    };
+    let calculated = |n: &str| -> Option<String> {
+        let i = pt.calculated_fields.iter().position(|c| c.name.trim().eq_ignore_ascii_case(n.trim()))?;
+        calc_names.get(i).cloned()
+    };
+    let mut new = pt.clone();
+    for f in new.rows.iter_mut().chain(new.columns.iter_mut()) {
+        if let Some(n) = column(&f.source_col) {
+            f.source_col = n;
+        }
+        for e in &mut f.sort_scope {
+            if let Some(n) = column(&e.source_col) {
+                e.source_col = n;
+            }
+        }
+    }
+    for f in &mut new.filters {
+        if let Some(n) = column(&f.source_col) {
+            f.source_col = n;
+        }
+    }
+    // A value or a calculated formula named a column first, then a calculated field, as the
+    // older report read them: by the headers as the sheet showed them when it was saved. So a
+    // calculated field's name that only the other layout places is still the calculated field.
+    let value_ref = |n: &str| -> Option<String> {
+        if calc_name(n) && pos(saved_list, n).is_none() { calculated(n) } else { column(n).or_else(|| calculated(n)) }
+    };
+    for v in &mut new.values {
+        if let Some(n) = value_ref(&v.source_col) {
+            v.source_col = n;
+        }
+    }
+    let rename = |n: &str| column(n).or_else(|| calculated(n));
+    for (c, name) in new.calculated_fields.iter_mut().zip(&calc_names) {
+        if let Some(f) = crate::pivot_calc::rename_fields(&c.formula, &value_ref) {
+            c.formula = f;
+        }
+        c.name = name.clone();
+    }
+    // The index describes the report as it is stored, so only its names change.
+    if let Some(cells) = pt.data_index.cells() {
+        let mut cells = cells.to_vec();
+        for c in &mut cells {
+            if let Some(to) = value_ref(&c.source_col) {
+                c.source_col = to;
+            }
+            for n in c.items.iter_mut().map(|i| &mut i.field) {
+                if let Some(to) = rename(n) {
+                    *n = to;
+                }
+            }
+        }
+        new.data_index = PivotLookup::default();
+        new.data_index.set_cells(cells);
+    }
+    new.names_from_values = true;
+    new
 }
 
 /// Recomputes a pivot and writes its report. With `replace` false, refuses when the target area
@@ -314,7 +488,40 @@ pub fn refresh(wb: &mut Workbook, sheet: usize, idx: usize, replace: bool) -> Re
     }
     let sheet_name = shm.name.clone();
     rebind_charts(wb, &sheet_name, &pt.name, origin, &out);
+    // The index of the new report; its lookup hash is built on the first GETPIVOTDATA.
+    if let Some(p) = wb.sheet_mut(sheet).and_then(|s| s.pivots.get_mut(idx)) {
+        let index = PivotLookup::default();
+        index.set_cells(out.data);
+        p.data_index = index;
+    }
     Ok(area)
+}
+
+/// The value cells of a PivotTable's report, for GETPIVOTDATA when a refresh did not set the
+/// index (a workbook just opened from XLSX). The positions must describe the report as it is
+/// stored on the sheet, not as the current source would render it: the source is recomputed only
+/// to learn the layout, and the result is accepted when every label and header cell of that
+/// layout equals the stored cell at the same place. A source changed since the last refresh gives
+/// a different layout, so there is no trustworthy index and the lookup fails until a refresh.
+pub fn index_cells(wb: &Workbook, sheet: usize, pt: &PivotTable) -> Result<Vec<PivotDataCell>, String> {
+    const STALE: &str = "The stored report no longer matches the source. Refresh the PivotTable.";
+    let report = pt.last_range.ok_or("The PivotTable has no report.")?;
+    let out = compute(wb, pt, sheet)?;
+    let sh = wb.sheet(sheet).ok_or("There's no such sheet.")?;
+    let rows = u64::from(report.end.row) - u64::from(report.start.row) + 1;
+    let cols = u64::from(report.end.col) - u64::from(report.start.col) + 1;
+    if rows != u64::from(out.height().max(1)) || cols != u64::from(out.width.max(1)) {
+        return Err(STALE.into());
+    }
+    let labels = [CellKind::Header, CellKind::RowLabel, CellKind::ColLabel, CellKind::Filter];
+    for (r, row) in out.grid.iter().enumerate() {
+        for (c, oc) in row.iter().enumerate() {
+            if labels.contains(&oc.kind) && sh.value(CellRef::new(report.start.row + r as u32, report.start.col + c as u32)) != oc.value {
+                return Err(STALE.into());
+            }
+        }
+    }
+    Ok(out.data)
 }
 
 #[cfg(test)]

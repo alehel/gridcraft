@@ -668,7 +668,7 @@ fn text_uncached(v: &Value, code: &str, sys: DateSystem) -> Result<String, CellE
     if !n.is_finite() {
         return Err(CellError::Num);
     }
-    let (f, overflow) = fmt.format_number(n, sys);
+    let (f, overflow) = fmt.format_number(n, sys, false);
     if overflow { Err(CellError::Value) } else { Ok(f.text) }
 }
 
@@ -1246,4 +1246,11 @@ fn round_as_displayed_matches_excel() {
     assert_eq!(r("0%%%%%%%%%%%%%%%%%%%%%%%%", f64::MAX), f64::MAX);
     assert_eq!(r("0", f64::MAX), f64::MAX);
     assert_eq!(r("0.0E+0", f64::MIN_POSITIVE), 2.2e-308);
+}
+
+#[test]
+fn plain_shows_a_repeat_fill_as_one_space() {
+    assert_eq!(full("$* #,##0", Value::Number(1234.0)).plain(), "$ 1,234");
+    assert_eq!(full("0.0", Value::Number(2.0)).plain(), "2.0");
+    assert_eq!(full("@*-", Value::from("ab")).plain(), "ab ");
 }
