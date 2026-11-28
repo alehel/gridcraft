@@ -1,6 +1,6 @@
 use super::{
-    INTERFACE_SCALE_MAX, INTERFACE_SCALE_MIN, Json, Notice, NoticeKind, SheetApp, UiRequest, backstage, clamp_interface_scale, clean_error, dialogs,
-    formula_locale, i18n, json, now_ms, printing,
+    INTERFACE_SCALE_MAX, INTERFACE_SCALE_MIN, Json, Notice, NoticeKind, SaveRequest, SheetApp, UiRequest, backstage, clamp_interface_scale,
+    clean_error, dialogs, formula_locale, i18n, json, now_ms, printing,
 };
 
 impl SheetApp {
@@ -25,6 +25,9 @@ impl SheetApp {
         }
         if matches!(id, "file.save" | "file.saveAs" | "file.saveBytes") {
             self.store_view_state();
+        }
+        if let Some(refused) = dialogs::refuse_sheet_change(self, id) {
+            return Err(refused);
         }
         if matches!(
             id,
@@ -128,6 +131,15 @@ impl SheetApp {
         if id == "file.exportPdf" && self.services.pick_save.is_some() && params.get("path").and_then(Json::as_str).is_none_or(str::is_empty) {
             return self.export_pdf_with_picker(params);
         }
+        // Menu-style AutoSum on one cell proposes its formula in the editor with the range
+        // pointed and selected, so a click, drag, arrow key or typing replaces it, as in Excel.
+        // Programmatic callers use `run` and get the total entered.
+        if id == "formulas.autoSum"
+            && params.get("range").and_then(Json::as_str).is_none()
+            && self.session.active().is_some_and(|d| d.selection.current().is_single())
+        {
+            return self.auto_sum_in_editor(params);
+        }
         // Recommended Charts with no chart type named (ribbon button, keytip, command search) asks
         // which chart to insert; programmatic callers of `run` still get the first recommendation.
         if id == "insert.recommendedCharts" && params.get("type").is_none() {
@@ -141,6 +153,11 @@ impl SheetApp {
             self.open_switch_windows = true;
             return;
         }
+        // A menu-style save that would lose something asks first; programmatic callers of `run`
+        // get `warnings` in the result instead.
+        if matches!(id, "file.save" | "file.saveAs") && self.hold_save(SaveRequest::Command { id: id.into(), params: params.clone() }) {
+            return;
+        }
         match self.run(id, params) {
             // A refused cell draft already shows its own message (with the rule's title).
             Err(e) if self.message.as_ref().is_some_and(|(_, m)| *m == e) => {}
@@ -149,8 +166,26 @@ impl SheetApp {
         }
     }
 
+    /// Runs AutoSum on the active cell without entering it (`enter: false`) and points the
+    /// proposed range in the editor that opens.
+    fn auto_sum_in_editor(&mut self, params: Json) {
+        let mut params = if params.is_object() { params } else { json!({}) };
+        if let Some(map) = params.as_object_mut() {
+            map.insert("enter".into(), Json::Bool(false));
+        }
+        if let Err(e) = self.run("formulas.autoSum", params) {
+            return self.alert(e);
+        }
+        if let Some(ed) = self.editor.as_mut() {
+            ed.point_last_argument();
+            if ed.can_point() {
+                self.session.mode = gridcraft_engine::Mode::Point;
+            }
+        }
+    }
+
     /// Shows a command error: a toast for an unavailable command, else a message box.
-    pub(super) fn alert(&mut self, e: String) {
+    pub(crate) fn alert(&mut self, e: String) {
         // Shown in the window the user ends up in, also after a command that switched windows.
         self.follow_active_window();
         if e.contains("is not available right now") {
@@ -275,6 +310,7 @@ impl SheetApp {
                 self.ui.language = i18n::Language::Ja;
                 Ok(json!({"language": i18n::Language::Ja}))
             }
+            "ui.quickAnalysis" => crate::quick_analysis::toggle(self, p.get("open").and_then(Json::as_bool)),
             "ui.backstage" => {
                 // `{"page": "info"}` opens File › Info; `{"page": "close"}` returns to the sheet.
                 match p.get("page").and_then(Json::as_str).map(str::trim) {
@@ -295,6 +331,18 @@ impl SheetApp {
                 let name = p.get("name").and_then(Json::as_str).unwrap_or("");
                 self.open_dialog(name, p.clone());
                 Ok(json!({"dialog": self.dialog.as_ref().map(|d| d.name())}))
+            }
+            "ui.selectionMode" => {
+                // `{"mode": "extend"}` (F8), `"add"` (Shift+F8) or `"off"`; `{}` reports the mode.
+                match p.get("mode").and_then(Json::as_str) {
+                    Some(id) => match crate::grid::SelectionMode::parse(id) {
+                        Some(mode) => self.grid.set_selection_mode(mode),
+                        None => return Some(Err(format!("unknown selection mode {id:?} (use \"extend\", \"add\" or \"off\")"))),
+                    },
+                    None if p.get("mode").is_some_and(|v| !v.is_null()) => return Some(Err("`mode` must be \"extend\", \"add\" or \"off\"".into())),
+                    None => {}
+                }
+                Ok(json!({"mode": self.grid.selection_mode.id()}))
             }
             "ui.pythonMode" => {
                 // `{"on": true}` starts Python mode on the active cell (or switches the edit in
@@ -422,40 +470,41 @@ impl SheetApp {
                         let path = if std::path::Path::new(&path).extension().is_none() { format!("{path}.xlsx") } else { path };
                         self.run_or_alert("file.save", json!({"path": path}));
                     }
-                } else if self.services.download.is_some()
-                    && let Ok(r) = self.run("file.saveBytes", json!({"format": "xlsx"}))
-                    && let Some(dl) = &self.services.download
-                    && let Some(b) = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode)
-                {
-                    let name = r.get("name").and_then(Json::as_str).unwrap_or("Book.xlsx").to_string();
-                    dl(&name, &b);
+                } else if self.services.download.is_some() && !self.hold_save(SaveRequest::Download) {
+                    self.download_workbook("xlsx");
                 }
             }
+            // The notice AutoSave holds back with: Save asks what the notice says.
+            "saveLoss" => self.run_or_alert("file.save", json!({})),
             // File › Options (`file.options`) and the File tab itself open the Backstage view.
             "options" => self.open_backstage(backstage::Page::Options),
             "backstage" => {
                 let page = params.get("page").and_then(Json::as_str).and_then(backstage::Page::parse).unwrap_or(backstage::Page::Home);
                 self.open_backstage(page);
             }
-            // The macro step editor stays until it closes itself (its draft, overlays and debug
-            // run go with it), so another dialog can't replace it.
-            _ if self.dialog.as_ref().is_some_and(|d| d.name == "macroEditor") => {
-                self.message = Some((
-                    "Macro".into(),
-                    "Close the macro step editor first: it keeps its window until it closes itself, so its steps and debug run are not lost.".into(),
-                ));
-            }
-            other => {
-                // A dialog replaced while one of its reference boxes picks (a ribbon command
-                // opening another dialog) first puts the sheet and selection from before picking
-                // back, as closing it does.
-                if let Some(mut old) = self.dialog.take() {
-                    // The draft was committed above, so the sheet can be shown again.
-                    let _ = old.end_pick(self);
-                }
-                self.dialog = dialogs::Dialog::open(self, other, params);
-            }
+            other => self.replace_dialog(|app| dialogs::Dialog::open(app, other, params)),
         }
+    }
+
+    /// Shows the dialog `make` builds in place of the one that is open.
+    pub(super) fn replace_dialog(&mut self, make: impl FnOnce(&mut SheetApp) -> Option<dialogs::Dialog>) {
+        // The macro step editor stays until it closes itself (its draft, overlays and debug
+        // run go with it), so another dialog can't replace it.
+        if self.dialog.as_ref().is_some_and(|d| d.name == "macroEditor") {
+            self.message = Some((
+                "Macro".into(),
+                "Close the macro step editor first: it keeps its window until it closes itself, so its steps and debug run are not lost.".into(),
+            ));
+            return;
+        }
+        // A dialog replaced while one of its reference boxes picks (a ribbon command opening
+        // another dialog) first puts the sheet and selection from before picking back, as closing
+        // it does.
+        if let Some(mut old) = self.dialog.take() {
+            // The draft was committed by the caller, so the sheet can be shown again.
+            let _ = old.end_pick(self);
+        }
+        self.dialog = make(self);
     }
 
     /// Opens the File tab's Backstage view on `page`, committing a cell still being edited first

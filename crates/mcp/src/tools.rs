@@ -288,7 +288,7 @@ fn base_tool_definitions() -> Vec<Value> {
                 json!({
                     "range": string("Source data range including headers, e.g. \"A1:C6\""),
                     "type": enumeration("Chart type", CHART_TYPES),
-                    "subtype": enumeration("Variant (optional)", &["clustered", "stacked", "stacked100", "markers"]),
+                    "subtype": enumeration("Variant (optional)", &["clustered", "stacked", "stacked100", "markers", "stacked100Markers"]),
                     "title": string("Chart title"),
                     "at": string("Top-left anchor cell (default: right of the data)"),
                 }),
@@ -366,7 +366,7 @@ fn base_tool_definitions() -> Vec<Value> {
             "save_workbook",
             "Save workbook",
             "Save the active workbook. The format follows the extension (.xlsx default; .csv/.tsv save the active sheet; .json; .html). \
-             Without `path` saves to the workbook's current file.",
+             Without `path` saves to the workbook's current file. Check `warnings` in the result: it lists what the format could not keep.",
             obj(json!({"path": string("Destination path")}), &[]),
             false,
         ),
